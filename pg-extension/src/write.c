@@ -1,9 +1,7 @@
 /*
  * write.c — ingest a columnar segment (NPCOLUMN) into a table via
  * table_multi_insert (the COPY fast path: no per-row SQL, no text round-trip).
- *
- * np_write_segment() is shared by the SQL function below and by the ring
- * worker (worker.c).
+ * Driven by the ring worker (worker.c).
  */
 #include "postgres.h"
 
@@ -18,9 +16,7 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
-#include "fmgr.h"
 #include "nodes/makefuncs.h"
-#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -253,14 +249,4 @@ np_write_segment(const char *seg, const char *tab)
   munmap(map, size);
 
   return nrows;
-}
-
-PG_FUNCTION_INFO_V1(native_write_shm);
-Datum
-native_write_shm(PG_FUNCTION_ARGS)
-{
-  char *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
-  char *tab = text_to_cstring(PG_GETARG_TEXT_PP(1));
-
-  PG_RETURN_INT64((int64) np_write_segment(seg, tab));
 }

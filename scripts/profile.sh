@@ -19,10 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 COPY pg-extension /src/pg-extension
 COPY node-extension /src/node-extension
+COPY benchmark /src/benchmark
 WORKDIR /src/pg-extension
 RUN make clean && make && make install
 WORKDIR /src/node-extension
-RUN npm install --no-audit --no-fund
+RUN npm install --no-audit --no-fund && npm run build
 DOCKERFILE
 
 echo "==> perf record across the benchmark ($NROWS rows)"
@@ -36,7 +37,9 @@ gosu postgres pg_ctl -D "\$PGDATA" -l /tmp/pg.log \
 gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -c "CREATE EXTENSION nativepostgress;" >/dev/null
 
 # system-wide profile while the benchmark runs (client + postgres backend)
-perf record -g -a -o /tmp/perf.data -- gosu postgres node /src/node-extension/bench/bench.js $NROWS >/dev/null 2>&1 || true
+perf record -g -a -o /tmp/perf.data -- gosu postgres \
+  sh -c "cd /src/node-extension && exec node --import tsx ../benchmark/bench.ts $NROWS" \
+  >/dev/null 2>&1 || true
 gosu postgres pg_ctl -D "\$PGDATA" -w stop >/dev/null
 
 echo "=== raw top symbols (self time) ==="
@@ -45,6 +48,6 @@ perf report -i /tmp/perf.data --stdio --no-children 2>/dev/null | head -60
 echo
 echo "=== nativepostgress + serialization symbols ==="
 perf report -i /tmp/perf.data --stdio --no-children 2>/dev/null \
-  | grep -iE "nativepostgress|fill_columnar|compute_sizes|col_datum|multi_insert|heap_|Sprintf|AllocSet|text_|memcpy" \
+  | grep -iE "np_|columnar|text_cell|col_datum|multi_insert|heap_|OidOutput|AllocSet|memcpy" \
   | head -40
 SCRIPT

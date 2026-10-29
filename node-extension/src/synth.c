@@ -8,17 +8,15 @@
  */
 #include <node_api.h>
 
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include "np_shm.h"
 
+#include "np_map.h"
 #include "synth.h"
 
 static napi_value mk_undefined(napi_env env) {
@@ -66,26 +64,6 @@ static bool get_n(napi_env env, napi_callback_info info, const char *name,
   }
   *out = (uint64_t) nd;
   return true;
-}
-
-static void *map_rw(const char *path, size_t capacity, size_t map_size) {
-  int fd = shm_open(path, O_RDWR | O_CREAT, 0666);
-  struct stat st;
-  void *map;
-  if (capacity == 0) capacity = map_size;
-  if (fd < 0) return NULL;
-  if (fstat(fd, &st) != 0) {
-    close(fd);
-    return NULL;
-  }
-  if ((size_t) st.st_size < capacity && ftruncate(fd, (off_t) capacity) != 0) {
-    close(fd);
-    return NULL;
-  }
-  /* map only what is used; the file keeps the full capacity */
-  map = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  close(fd);
-  return map == MAP_FAILED ? NULL : map;
 }
 
 /* The bench table: id, account_id, balance, active, name, email, score, age. */
@@ -175,7 +153,7 @@ static napi_value synth_segment(napi_env env, napi_callback_info info) {
   seg_size = NP_SEGMENT_BYTES;
   map_size = (size_t) (NP_SHM_HEADER_SIZE + total);
 
-  map = map_rw(path, seg_size, map_size);
+  map = np_map_rw(path, seg_size, map_size);
   if (map == NULL) {
     napi_throw_error(env, NULL, "synthSegment: cannot map /dev/shm segment");
     return mk_undefined(env);

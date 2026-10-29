@@ -2,24 +2,25 @@
  * addon.c — Node client for the nativepostgress shared-memory transport.
  *
  * Raw N-API (node_api.h, no node-addon-api):
- *   new Connection(conninfo)  libpq connection for the control channel
+ *   new Connection(conninfo)  libpq connection, used as a control channel
  *   conn.exec(sql)            run a statement, return rows as objects
+ *   conn.copyFrom(sql, data)  stream rows with COPY FROM STDIN
+ *   new Ring(seg)             drive the backend worker through the ring
  *   read(segName, opts)       view a columnar segment as JS typed arrays
+ *   writeSegment(seg, cols)   publish JS typed arrays as a columnar segment
  *
  * read() is zero-copy by default: the typed arrays alias the mapped segment, so
- * they are only valid until the segment is rewritten. Pass { copy: true } to
- * detach into Node-owned buffers.
+ * they are only valid until the segment is rewritten (the next chunk through
+ * the ring). Pass { copy: true } to detach into Node-owned buffers.
  */
 #include <node_api.h>
 
-#include <errno.h>
 #include <fcntl.h>
 #include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -28,6 +29,7 @@
 #include "np_shm.h"
 #include "ring.h"
 
+#include "np_map.h"
 #include "synth.h"
 
 #define NP_ERR_MAX 1024
@@ -631,13 +633,11 @@ static napi_value typed_over(napi_env env, napi_value ab,
 
 static napi_value read_impl(napi_env env, napi_callback_info info) {
   size_t argc = 2;
-  napi_value argv[2], opts, handlers = NULL, on_kind = NULL, on_column = NULL;
+  napi_value argv[2], handlers = NULL, on_kind = NULL, on_column = NULL;
   char name[256];
   size_t nlen = sizeof(name);
   char path[300];
-  int fd;
-  struct stat st;
-  size_t size;
+  size_t size = 0;
   void *map;
   const uint8_t *payload;
   uint64_t payload_len = 0;
@@ -662,8 +662,7 @@ static napi_value read_impl(napi_env env, napi_callback_info info) {
     if (ot == napi_object) {
       bool b;
       napi_value v;
-      opts = argv[1];
-      if (napi_get_named_property(env, opts, "copy", &v) == napi_ok &&
+      if (napi_get_named_property(env, argv[1], "copy", &v) == napi_ok &&
           napi_get_value_bool(env, v, &b) == napi_ok)
         copy = b;
       if (napi_get_named_property(env, argv[1], "handlers", &handlers) == napi_ok) {
@@ -683,21 +682,9 @@ static napi_value read_impl(napi_env env, napi_callback_info info) {
     }
   }
 
-  fd = shm_open(path, O_RDONLY, 0);
-  if (fd < 0) {
-    napi_throw_error(env, NULL, "cannot open /dev/shm segment");
-    return mk_undefined(env);
-  }
-  if (fstat(fd, &st) != 0) {
-    close(fd);
-    napi_throw_error(env, NULL, "fstat failed");
-    return mk_undefined(env);
-  }
-  size = (size_t) st.st_size;
-  map = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
-  close(fd);
-  if (map == MAP_FAILED) {
-    napi_throw_error(env, NULL, "mmap failed");
+  map = np_map_ro(path, &size);
+  if (map == NULL) {
+    napi_throw_error(env, NULL, "cannot map /dev/shm segment");
     return mk_undefined(env);
   }
 
@@ -996,38 +983,6 @@ static int ta_elem_size(napi_typedarray_type t) {
   }
 }
 
-static void *map_rw(const char *path, size_t capacity, size_t map_size) {
-  int fd = shm_open(path, O_RDWR | O_CREAT, 0666);
-  struct stat st;
-  void *map;
-  if (capacity == 0) capacity = map_size;
-  if (fd < 0) return NULL;
-  if (fstat(fd, &st) != 0) {
-    close(fd);
-    return NULL;
-  }
-  if ((size_t) st.st_size < capacity && ftruncate(fd, (off_t) capacity) != 0) {
-    close(fd);
-    return NULL;
-  }
-  /* map only what is used; the file keeps the full capacity */
-  map = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  close(fd);
-  return map == MAP_FAILED ? NULL : map;
-}
-
-static int col_width(uint32_t kind) {
-  switch (kind) {
-    case NP_KIND_BOOL: return 1;
-    case NP_KIND_INT16: return 2;
-    case NP_KIND_INT32: return 4;
-    case NP_KIND_INT64: return 8;
-    case NP_KIND_FLOAT4: return 4;
-    case NP_KIND_FLOAT8: return 8;
-    default: return 0;
-  }
-}
-
 static napi_value write_segment(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2], cols, out;
@@ -1117,12 +1072,13 @@ static napi_value write_segment(napi_env env, napi_callback_info info) {
         napi_throw_type_error(env, NULL, "value must be a TypedArray");
         goto fail;
       }
-      if (ta_elem_size(t) != col_width(wc[c].kind)) {
+      if (ta_elem_size(t) != np_kind_width((uint8_t) wc[c].kind)) {
         napi_throw_type_error(env, NULL, "value type does not match kind");
         goto fail;
       }
       wc[c].data = dp;
-      wc[c].data_len = (uint64_t) len * (uint64_t) col_width(wc[c].kind);
+      wc[c].data_len =
+          (uint64_t) len * (uint64_t) np_kind_width((uint8_t) wc[c].kind);
       if (!have_rows) { nrows = len; have_rows = true; }
       else if (len != nrows) {
         napi_throw_error(env, NULL, "columns have different row counts");
@@ -1146,7 +1102,7 @@ static napi_value write_segment(napi_env env, napi_callback_info info) {
   seg_size = NP_SEGMENT_BYTES;
 
   map_size = (size_t) (NP_SHM_HEADER_SIZE + total);
-  map = map_rw(path, seg_size, map_size);
+  map = np_map_rw(path, seg_size, map_size);
   if (map == NULL) {
     napi_throw_error(env, NULL, "writeSegment: cannot map /dev/shm segment");
     goto fail;

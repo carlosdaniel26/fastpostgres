@@ -2,8 +2,9 @@
  * Node client for nativepostgress.
  *
  * `read()` is zero-copy by default: the typed arrays alias the mapped
- * `/dev/shm` segment, so they are only valid until that segment is rewritten
- * (e.g. the next `native_stream_next`). Use `{ copy: true }` to detach.
+ * `/dev/shm` segment, so they are only valid until that segment is rewritten —
+ * i.e. until the next chunk comes through the ring. Use `{ copy: true }` to
+ * detach.
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';

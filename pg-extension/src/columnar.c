@@ -40,35 +40,13 @@ np_oid_to_kind(Oid typ)
   }
 }
 
-static bool
-is_varlena_text(Oid typ)
+bool
+np_is_text_type(Oid typ)
 {
   return typ == TEXTOID || typ == VARCHAROID || typ == BPCHAROID;
 }
 
-int
-np_kind_width(int kind)
-{
-  switch (kind)
-  {
-    case NP_KIND_BOOL:
-      return 1;
-    case NP_KIND_INT16:
-      return 2;
-    case NP_KIND_INT32:
-      return 4;
-    case NP_KIND_INT64:
-      return 8;
-    case NP_KIND_FLOAT4:
-      return 4;
-    case NP_KIND_FLOAT8:
-      return 8;
-    default:
-      return 0;
-  }
-}
-
-/* Text bytes come from the varlena directly; other types go through their
+/* Text bytes come straight off the varlena; every other type goes through its
  * output function. */
 static void
 text_cell(HeapTuple tuple, TupleDesc td, int col, Oid type, Oid typoutput,
@@ -81,7 +59,7 @@ text_cell(HeapTuple tuple, TupleDesc td, int col, Oid type, Oid typoutput,
     *len = 0;
     return;
   }
-  if (is_varlena_text(type))
+  if (np_is_text_type(type))
   {
     struct varlena *v =
         pg_detoast_datum_packed((struct varlena *) DatumGetPointer(d));
@@ -95,51 +73,6 @@ text_cell(HeapTuple tuple, TupleDesc td, int col, Oid type, Oid typoutput,
     *data = s ? s : "";
     *len = s ? (int) strlen(s) : 0;
   }
-}
-
-/* Exact payload size; only needed where an exact buffer must be allocated up
- * front (the bytea path). The /dev/shm path builds in one pass instead. */
-uint64
-np_columnar_size(HeapTuple *tuples, TupleDesc td, uint64 nrows)
-{
-  uint64 off = 8 + 4 + 4 + 4 + 8; /* magic + version + flags + ncols + nrows */
-  int null_bytes = (int) ((nrows + 7) / 8);
-  int c;
-  uint64 r;
-
-  for (c = 0; c < td->natts; c++)
-  {
-    Form_pg_attribute att = TupleDescAttr(td, c);
-    Oid type = att->atttypid;
-    int kind = np_oid_to_kind(type);
-    Oid typoutput = InvalidOid;
-
-    if (kind == NP_KIND_TEXT && !is_varlena_text(type))
-    {
-      bool varlena;
-      getTypeOutputInfo(type, &typoutput, &varlena);
-    }
-
-    off += 4 + (uint64) strlen(NameStr(att->attname)) + 1 + 4 + null_bytes + 8;
-    off = NP_ALIGN8(off);
-
-    if (kind == NP_KIND_TEXT)
-    {
-      uint64 tbytes = 0;
-      for (r = 0; r < nrows; r++)
-      {
-        bool isnull;
-        const char *d;
-        int len;
-        text_cell(tuples[r], td, c, type, typoutput, &isnull, &d, &len);
-        if (!isnull) tbytes += (uint64) len;
-      }
-      off += (uint64) (nrows + 1) * 4 + tbytes;
-    }
-    else
-      off += (uint64) nrows * (uint64) np_kind_width(kind);
-  }
-  return off;
 }
 
 /* One pass into [out, end); `data_len` is backpatched once the column's bytes
@@ -165,12 +98,12 @@ np_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out,
     Form_pg_attribute att = TupleDescAttr(td, c);
     Oid type = att->atttypid;
     int kind = np_oid_to_kind(type);
-    int width = np_kind_width(kind);
+    int width = np_kind_width((uint8_t) kind);
     Oid typoutput = InvalidOid;
     size_t name_len = strlen(NameStr(att->attname));
     char *nulls, *lenp;
 
-    if (kind == NP_KIND_TEXT && !is_varlena_text(type))
+    if (kind == NP_KIND_TEXT && !np_is_text_type(type))
     {
       bool varlena;
       getTypeOutputInfo(type, &typoutput, &varlena);
@@ -288,7 +221,7 @@ np_publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples,
                         uint64 nrows, size_t capacity)
 {
   size_t cap = capacity ? capacity : NP_SEGMENT_BYTES;
-  void *map = np_shm_map_rw(path, cap, cap);
+  void *map = np_shm_map_rw(path, cap);
   uint64 total = np_columnar_build(tuples, td, nrows,
                                    (char *) map + NP_SHM_HEADER_SIZE,
                                    (char *) map + cap);

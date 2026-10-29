@@ -1,12 +1,12 @@
 /* np_shm.h — shared-memory result-segment format, agreed between the
- * PostgreSQL extension (writer) and the client (reader).
+ * PostgreSQL extension (writer) and the Node client (reader).
  *
  * Segment layout:
  *   [ NpShmHeader (64 bytes) ][ NPCOLUMN payload (header + columns) ]
  *
- * This is the single source of truth for the format: the extension and the
- * client include this one header (the client-only copy is a shim), and it
- * carries the reader/writer helpers so the NPCOLUMN codec lives in one place.
+ * This is the single source of truth for the format: the extension, the addon
+ * and the benchmark generator all include this one header, and it carries the
+ * codec helpers so the NPCOLUMN wire format lives in one place.
  *
  * The writer fills the payload, then publishes payload_size and bumps seq with
  * a memory barrier; the reader checks seq before/after copying the payload to
@@ -22,18 +22,18 @@
 #define NP_SHM_VERSION 1
 #define NP_SHM_HEADER_SIZE 64
 
-/* Fixed capacity for the writer's segment (lazily faulted, so only what is
- * written costs memory). */
+/* Fixed capacity for a data segment (lazily faulted: only what is written
+ * costs memory). */
 #define NP_SEGMENT_BYTES (1024u * 1024u * 1024u)
 
 typedef struct NpShmHeader {
-  char magic[8];        /* "NPQSHMEM" */
-  uint32_t version;     /* 1 */
-  uint32_t flags;       /* bit0: 1 = little-endian */
-  uint64_t payload_size;/* valid NPCOLUMN bytes at offset NP_SHM_HEADER_SIZE */
-  uint64_t capacity;    /* total mapped bytes */
-  uint64_t seq;         /* bumped after each completed write */
-  uint32_t reserved[6]; /* pad to 64 bytes */
+  char magic[8];         /* "NPQSHMEM" */
+  uint32_t version;      /* 1 */
+  uint32_t flags;        /* bit0: 1 = little-endian */
+  uint64_t payload_size; /* valid NPCOLUMN bytes at offset NP_SHM_HEADER_SIZE */
+  uint64_t capacity;     /* total mapped bytes */
+  uint64_t seq;          /* bumped after each completed write */
+  uint32_t reserved[6];  /* pad to 64 bytes */
 } NpShmHeader;
 
 #ifdef __cplusplus
@@ -46,8 +46,8 @@ static_assert(sizeof(NpShmHeader) == 64, "NpShmHeader must be 64 bytes");
  *   data_len u64 and data: fixed-width values, or (text) an int32 offset table
  *   followed by the raw bytes.
  *
- * Each column's data is padded to 8-byte alignment (relative to the payload
- * base), so a client can view it in place as a typed array.
+ * Each column's data is padded to 8-byte alignment relative to the payload
+ * base, so the client can view it in place as a typed array.
  */
 #define NP_ALIGN8(x) (((uint64_t) (x) + 7) & ~(uint64_t) 7)
 #define NP_COLUMNAR_MAGIC "NPCOLUMN"
@@ -62,6 +62,26 @@ enum NpKind {
   NP_KIND_INT16 = 6, /* verbatim 2-byte integer (int2) */
   NP_KIND_FLOAT4 = 7  /* verbatim 4-byte float (float4) */
 };
+
+/* Width of a wire kind in bytes (0 for text, which has no fixed width). */
+static inline int np_kind_width(uint8_t kind) {
+  switch (kind) {
+    case NP_KIND_BOOL:
+      return 1;
+    case NP_KIND_INT16:
+      return 2;
+    case NP_KIND_INT32:
+      return 4;
+    case NP_KIND_FLOAT4:
+      return 4;
+    case NP_KIND_INT64:
+      return 8;
+    case NP_KIND_FLOAT8:
+      return 8;
+    default:
+      return 0;
+  }
+}
 
 /* little-endian scalar readers/writers */
 static inline void np_put_u32(char *p, uint32_t v) { memcpy(p, &v, 4); }

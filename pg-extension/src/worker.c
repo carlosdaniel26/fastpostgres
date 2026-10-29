@@ -366,8 +366,7 @@ push_startup(DestReceiver *self, int operation, TupleDesc td)
     d->kinds[i] = (uint8_t) kind;
     d->types[i] = type;
     d->typoutput[i] = InvalidOid;
-    if (kind == NP_KIND_TEXT && type != TEXTOID && type != VARCHAROID &&
-        type != BPCHAROID)
+    if (kind == NP_KIND_TEXT && !np_is_text_type(type))
     {
       bool varlena;
       getTypeOutputInfo(type, &d->typoutput[i], &varlena);
@@ -461,8 +460,7 @@ push_receive(TupleTableSlot *slot, DestReceiver *self)
         const char *data;
         int len;
 
-        if (d->types[i] == TEXTOID || d->types[i] == VARCHAROID ||
-            d->types[i] == BPCHAROID)
+        if (np_is_text_type(d->types[i]))
         {
           struct varlena *vv =
               pg_detoast_datum_packed((struct varlena *) DatumGetPointer(v));

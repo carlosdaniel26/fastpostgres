@@ -46,7 +46,7 @@ SAMPLE = {
               "10M": (0.9, 0.7, 1.5)},
 }
 
-# Benchmark row size (node-extension/bench/bench.js):
+# Benchmark row size (benchmark/bench.ts):
 #   id 4 + account_id 8 + balance 8 + active 1 + name ~13 + email ~25
 #   + score 8 + age 4 = ~71 bytes
 BYTES_PER_ROW = 71
@@ -65,8 +65,6 @@ def parse_log(path):
             section = "read"
         elif line.startswith("WRITE (rows/s)"):
             section = "write"
-        elif line.startswith(("SCAN", "PAGINATED", "TOP-N", "QUERY")):
-            section = None
         elif section:
             m = ROW_RE.match(line)
             if m:

@@ -45,13 +45,14 @@ function setupTable(conn: ConnectionLike, n: number): void {
 
 /* ---- READ ---------------------------------------------------------------- */
 
+/** Read rows over libpq; the cost is libpq's text decode plus the JS objects. */
 function readText(conn: ConnectionLike): number {
   const t0 = now();
   const rows = conn.exec(QUERY);
-  let sum = 0;
-  for (const r of rows) sum += (r.name ?? '').length;
+  let bytes = 0;
+  for (const r of rows) bytes += (r.name ?? '').length;
   const ms = now() - t0;
-  if (sum < 0) throw new Error('unreachable');
+  if (bytes === 0) throw new Error('read: empty result');
   return ms;
 }
 

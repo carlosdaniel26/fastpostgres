@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the Node benchmark (node-extension/bench/bench.js) inside a postgres:18 +
-# Node container: the same data across tcp / unix socket / shared memory, read
-# and write.
+# Runs the Node benchmark (benchmark/bench.ts) inside a postgres:18 + Node
+# container: the same data across tcp / unix socket / shared memory, read and
+# write.
 #
 # Usage: scripts/bench-node-docker.sh [nrows ...]   (default: 100000 1000000 10000000)
 

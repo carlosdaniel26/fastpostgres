@@ -1,5 +1,5 @@
-/** Wire kinds (see np_shm.h). */
-export const enum Kind {
+/** Wire kinds (see np_shm.h), for use in `handlers.onKind`. */
+export enum Kind {
   Bool = 1,
   Int32 = 2,
   Int64 = 3,
