@@ -72,23 +72,40 @@ SELECT count(*) = 5000                     AS dst_has_5000,
        (SELECT t  FROM dst WHERE i4 = 42) = 'x42' AS sample_text
 FROM dst;
 
-\echo '--- direct heap scan (no SQL executor, no SPI) ---'
-SELECT native_scan_shm('scan_seg', 'dst') AS scanned;
-SELECT native_shm_info('scan_seg') AS info;
+\echo '--- write path: TOASTed text survives the round-trip (detoast) ---'
+CREATE TABLE IF NOT EXISTS dst_toast (id int4, t text);
+INSERT INTO dst_toast
+  SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 50) g;
 
-CREATE TABLE IF NOT EXISTS dst_copy (LIKE dst);
-SELECT native_write_shm('scan_seg', 'dst_copy') AS scan_rows_written;
-SELECT count(*) = 5000                         AS scan_copy_count_matches,
-       (SELECT i8 FROM dst_copy WHERE i4 = 42) = 42 AS scan_sample_int8,
-       (SELECT t  FROM dst_copy WHERE i4 = 42) = 'x42' AS scan_sample_text
-FROM dst_copy;
+SELECT native_query_shm('toast_seg', 'SELECT id, t FROM dst_toast')
+  AS produced_toast;
 
-\echo '--- scan: column selection + WHERE predicate ---'
-SELECT native_scan_shm('scan_sel', 'dst', ARRAY['t', 'i8'], 'i8 >= 100') AS scanned_sel;
+CREATE TABLE IF NOT EXISTS dst_toast_copy (LIKE dst_toast);
+SELECT native_write_shm('toast_seg', 'dst_toast_copy') AS toast_rows_written;
+SELECT count(*) = 50 AND min(length(t)) = 9600 AS toast_roundtrip
+FROM dst_toast_copy;
 
-CREATE TABLE IF NOT EXISTS dst_sel (t text, i8 int8);
-SELECT native_write_shm('scan_sel', 'dst_sel') AS sel_rows_written;
-SELECT count(*) = 4901                          AS sel_count_matches,
-       (SELECT min(i8) FROM dst_sel) = 100      AS sel_min_i8,
-       (SELECT t FROM dst_sel WHERE i8 = 100) = 'x100' AS sel_sample
-FROM dst_sel;
+\echo '--- streaming: pull batches through a cursor (needs an open transaction) ---'
+BEGIN;
+CREATE TEMP TABLE stream_batches (n int8);
+CREATE TABLE IF NOT EXISTS dst_stream (LIKE dst);
+
+SELECT native_stream_open('stream_seg', 'SELECT * FROM dst') AS opened;
+
+INSERT INTO stream_batches SELECT native_stream_next('stream_seg', 2000);
+SELECT native_write_shm('stream_seg', 'dst_stream');
+INSERT INTO stream_batches SELECT native_stream_next('stream_seg', 2000);
+SELECT native_write_shm('stream_seg', 'dst_stream');
+INSERT INTO stream_batches SELECT native_stream_next('stream_seg', 2000);
+SELECT native_write_shm('stream_seg', 'dst_stream');
+INSERT INTO stream_batches SELECT native_stream_next('stream_seg', 2000);
+
+SELECT native_stream_close('stream_seg') AS closed;
+COMMIT;
+
+SELECT count(*) = 5000                               AS stream_total,
+       (SELECT sum(n) FROM stream_batches) = 5000    AS stream_rows_ok,
+       (SELECT count(*) FROM stream_batches) = 4     AS stream_batches_ok,
+       (SELECT i8 FROM dst_stream WHERE i4 = 42) = 42 AS stream_sample_int8,
+       (SELECT t  FROM dst_stream WHERE i4 = 42) = 'x42' AS stream_sample_text
+FROM dst_stream;

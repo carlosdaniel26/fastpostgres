@@ -1,6 +1,6 @@
 EXTENSION = nativepostgress
 MODULE_big = nativepostgress
-OBJS = nativepostgress.o
+OBJS = src/nativepostgress.o src/columnar.o src/shm.o src/write.o src/stream.o
 DATA = nativepostgress--1.0.sql
 
 PG_CONFIG = pg_config

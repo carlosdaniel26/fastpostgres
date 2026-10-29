@@ -22,7 +22,14 @@ CREATE FUNCTION native_write_shm(text, text) RETURNS bigint
 AS 'MODULE_PATHNAME', 'native_write_shm'
 LANGUAGE C STRICT VOLATILE;
 
-CREATE FUNCTION native_scan_shm(text, text, text[] DEFAULT NULL, text DEFAULT NULL)
-RETURNS text
-AS 'MODULE_PATHNAME', 'native_scan_shm'
+CREATE FUNCTION native_stream_open(text, text) RETURNS text
+AS 'MODULE_PATHNAME', 'native_stream_open'
+LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION native_stream_next(text, bigint DEFAULT NULL) RETURNS bigint
+AS 'MODULE_PATHNAME', 'native_stream_next'
 LANGUAGE C VOLATILE;
+
+CREATE FUNCTION native_stream_close(text) RETURNS text
+AS 'MODULE_PATHNAME', 'native_stream_close'
+LANGUAGE C STRICT VOLATILE;
