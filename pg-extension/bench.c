@@ -298,6 +298,22 @@ static const char *fmt(long n) {
   return b;
 }
 
+/* direct heap scan vs SPI SELECT * (both produce the same columnar result) */
+static void bench_scan(PGconn *conn, double *query_ms, double *scan_ms) {
+  PGresult *r;
+  double t0 = now_ms();
+  r = PQexec(conn, "SELECT native_query_shm('q_seg', 'SELECT * FROM bench')");
+  if (PQresultStatus(r) != PGRES_TUPLES_OK) fail(conn, "native_query_shm");
+  PQclear(r);
+  *query_ms = now_ms() - t0;
+
+  t0 = now_ms();
+  r = PQexec(conn, "SELECT native_scan_shm('s_seg', 'bench')");
+  if (PQresultStatus(r) != PGRES_TUPLES_OK) fail(conn, "native_scan_shm");
+  PQclear(r);
+  *scan_ms = now_ms() - t0;
+}
+
 int main(int argc, char **argv) {
   long sizes[16];
   int nsizes = 0;
@@ -335,6 +351,16 @@ int main(int argc, char **argv) {
     printf("  %-8s %8.1fM %8.1fM %8.1fM %8.2fx %9.2fx\n",
            fmt(n), n / (wt / 1000.0) / 1e6, n / (wu / 1000.0) / 1e6,
            n / (ws / 1000.0) / 1e6, wt / ws, wu / ws);
+  }
+
+  printf("\nSCAN vs QUERY (rows/s): query(SPI)  scan(direct)  speedup\n");
+  for (int i = 0; i < nsizes; i++) {
+    long n = sizes[i];
+    double qm, sm;
+    setup_table(unix_conn, n);
+    bench_scan(unix_conn, &qm, &sm);
+    printf("  %-8s %8.1fM %8.1fM %6.2fx\n",
+           fmt(n), n / (qm / 1000.0) / 1e6, n / (sm / 1000.0) / 1e6, qm / sm);
   }
 
   PQfinish(tcp_conn);

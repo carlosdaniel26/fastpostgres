@@ -71,3 +71,24 @@ SELECT count(*) = 5000                     AS dst_has_5000,
        (SELECT i8 FROM dst WHERE i4 = 42) = 42 AS sample_int8,
        (SELECT t  FROM dst WHERE i4 = 42) = 'x42' AS sample_text
 FROM dst;
+
+\echo '--- direct heap scan (no SQL executor, no SPI) ---'
+SELECT native_scan_shm('scan_seg', 'dst') AS scanned;
+SELECT native_shm_info('scan_seg') AS info;
+
+CREATE TABLE IF NOT EXISTS dst_copy (LIKE dst);
+SELECT native_write_shm('scan_seg', 'dst_copy') AS scan_rows_written;
+SELECT count(*) = 5000                         AS scan_copy_count_matches,
+       (SELECT i8 FROM dst_copy WHERE i4 = 42) = 42 AS scan_sample_int8,
+       (SELECT t  FROM dst_copy WHERE i4 = 42) = 'x42' AS scan_sample_text
+FROM dst_copy;
+
+\echo '--- scan: column selection + WHERE predicate ---'
+SELECT native_scan_shm('scan_sel', 'dst', ARRAY['t', 'i8'], 'i8 >= 100') AS scanned_sel;
+
+CREATE TABLE IF NOT EXISTS dst_sel (t text, i8 int8);
+SELECT native_write_shm('scan_sel', 'dst_sel') AS sel_rows_written;
+SELECT count(*) = 4901                          AS sel_count_matches,
+       (SELECT min(i8) FROM dst_sel) = 100      AS sel_min_i8,
+       (SELECT t FROM dst_sel WHERE i8 = 100) = 'x100' AS sel_sample
+FROM dst_sel;
