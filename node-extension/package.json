@@ -1,0 +1,42 @@
+{
+  "name": "nativepostgress",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node client for nativepostgress: columnar query results over POSIX shared memory, delivered as zero-copy JS typed arrays",
+  "keywords": [
+    "postgresql",
+    "postgres",
+    "shared-memory",
+    "columnar",
+    "typed-arrays",
+    "zero-copy",
+    "napi",
+    "native-addon"
+  ],
+  "license": "UNLICENSED",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "require": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "src/",
+    "binding.gyp"
+  ],
+  "gypfile": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "install": "node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "test": "node --test",
+    "bench": "node bench/bench.js"
+  }
+}
