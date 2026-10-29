@@ -36,7 +36,6 @@
   "scripts": {
     "install": "node-gyp rebuild",
     "build": "node-gyp rebuild",
-    "test": "node --test",
-    "bench": "node bench/bench.js"
+    "test": "node --test"
   }
 }

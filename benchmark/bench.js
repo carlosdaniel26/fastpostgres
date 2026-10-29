@@ -7,9 +7,14 @@
  *   unix   libpq over the unix socket (text rows -> JS objects)
  *   shm    native columnar over /dev/shm (typed arrays, zero-copy)
  *
- * Usage: node bench/bench.js [nrows ...]   (default 100000 1000000 10000000)
+ * Usage: node benchmark/bench.js [nrows ...]   (default 100000 1000000 10000000)
  */
-const { Connection, read, synthSegment, synthCopy } = require('..');
+const {
+  Connection,
+  read,
+  synthSegment,
+  synthCopy,
+} = require('../node-extension');
 
 const QUERY =
   'SELECT id, account_id, balance, active, name, email, score, age FROM bench';

@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 COPY pg-extension /src/pg-extension
 COPY node-extension /src/node-extension
+COPY benchmark /src/benchmark
 WORKDIR /src/pg-extension
 RUN make clean && make && make install
 WORKDIR /src/node-extension
