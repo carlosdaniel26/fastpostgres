@@ -1,5 +1,5 @@
 # postgres:18 + Node, with the extension installed and the Node addon built.
-# Shared by scripts/test-pg-docker.sh, bench-node-docker.sh and profile.sh.
+# Shared by scripts/bench-node-docker.sh and profile.sh.
 FROM postgres:18
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential postgresql-server-dev-18 python3 nodejs npm \
