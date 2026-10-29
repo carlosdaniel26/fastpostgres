@@ -14,11 +14,13 @@ const {
   read,
   synthSegment,
   synthCopy,
+  Ring,
 } = require('../node-extension');
 
 const QUERY =
   'SELECT id, account_id, balance, active, name, email, score, age FROM bench';
 const SEG = 'npseg';
+const RING = 'np_ring';
 
 const CONN_TCP =
   process.env.NP_TCP || 'host=127.0.0.1 dbname=postgres user=postgres';
@@ -61,18 +63,16 @@ function readText(conn) {
 
 const READ_BATCH = 100000;
 
-/* Batched: pull chunks through a cursor instead of materializing the result. */
-function readShm(conn) {
+/* Pull chunks through the ring (no socket) and read each from /dev/shm. */
+function readShm(ring) {
   const t0 = now();
-  conn.exec('BEGIN');
-  conn.exec(`SELECT native_stream_open('${SEG}', $q$${QUERY}$q$)`);
+  ring.open(SEG, QUERY);
   for (;;) {
-    const rows = conn.exec(`SELECT native_stream_next('${SEG}', ${READ_BATCH})`);
-    if (Number(rows[0].native_stream_next) === 0) break;
+    const n = ring.next(READ_BATCH);
+    if (n === 0) break;
     read(SEG); // zero-copy chunk, consumed before the next fetch
   }
-  conn.exec(`SELECT native_stream_close('${SEG}')`);
-  conn.exec('COMMIT');
+  ring.close();
   return now() - t0;
 }
 
@@ -85,11 +85,11 @@ function writeCopy(conn, n) {
   return now() - t0;
 }
 
-function writeShm(conn, n) {
+function writeShm(conn, ring, n) {
   conn.exec('DROP TABLE IF EXISTS dst; CREATE TABLE dst (LIKE bench)');
   const t0 = now();
   synthSegment(SEG, n); // native: generate rows straight into /dev/shm
-  conn.exec(`SELECT native_write_shm('${SEG}', 'dst')`);
+  ring.write(SEG, 'dst'); // no socket
   return now() - t0;
 }
 
@@ -131,12 +131,16 @@ function main() {
   tcp.exec('SET client_min_messages = warning');  // keep the tables clean
   unix.exec('SET client_min_messages = warning');
 
+  // One SQL call bootstraps the worker; the shm path then uses only the ring.
+  const ring = new Ring(RING);
+  ring.start(unix);
+
   header('READ (rows/s)');
   for (const n of sizes) {
     setupTable(unix, n);
     const rt = readText(tcp);
     const ru = readText(unix);
-    const rs = readShm(unix);
+    const rs = readShm(ring);
     row(n, rate(n, rt), rate(n, ru), rate(n, rs), rt / rs, ru / rs);
   }
 
@@ -145,10 +149,11 @@ function main() {
   for (const n of sizes) {
     const wt = writeCopy(tcp, n);
     const wu = writeCopy(unix, n);
-    const ws = writeShm(unix, n);
+    const ws = writeShm(unix, ring, n);
     row(n, rate(n, wt), rate(n, wu), rate(n, ws), wt / ws, wu / ws);
   }
 
+  ring.stop();
   tcp.close();
   unix.close();
 }

@@ -1,10 +1,10 @@
 /*
- * stream.c — pull-driven batches. native_stream_open() opens an SPI cursor on a
- * query; each native_stream_next() fetches up to `batch` rows through the
- * executor and writes them as one columnar chunk into /dev/shm.
+ * stream.c — pull-driven batches over an SPI cursor. The cursor is a portal:
+ * it lives in TopPortalContext and is dropped at COMMIT, so the caller must
+ * keep a transaction open around the stream.
  *
- * The cursor is a portal: it lives in TopPortalContext and is dropped at COMMIT,
- * so the client must keep a transaction open around the stream.
+ * The db_* helpers are shared by the SQL functions below and by the ring
+ * worker (worker.c).
  */
 #include "postgres.h"
 
@@ -18,6 +18,7 @@
 
 #include "columnar.h"
 #include "shm.h"
+#include "stream.h"
 
 #define NP_STREAM_PREFIX "np_stream_"
 #define NP_STREAM_DEFAULT_BATCH 10000
@@ -30,44 +31,28 @@ cursor_name(const char *seg)
   return name;
 }
 
-/* native_stream_open(segname, query) -> text */
-PG_FUNCTION_INFO_V1(native_stream_open);
-Datum
-native_stream_open(PG_FUNCTION_ARGS)
+void
+np_stream_open(const char *seg, const char *query)
 {
-  text *segname = PG_GETARG_TEXT_PP(0);
-  text *query = PG_GETARG_TEXT_PP(1);
-  char *seg = text_to_cstring(segname);
-  char *q = text_to_cstring(query);
   char *name = cursor_name(seg);
   Portal portal;
-  char summary[256];
 
   if (SPI_connect() != SPI_OK_CONNECT)
-    elog(ERROR, "native_stream_open: SPI_connect failed");
+    elog(ERROR, "np_stream_open: SPI_connect failed");
 
-  portal = SPI_cursor_open_with_args(name, q, 0, NULL, NULL, NULL, true,
+  portal = SPI_cursor_open_with_args(name, query, 0, NULL, NULL, NULL, true,
                                      CURSOR_OPT_PARALLEL_OK);
   if (portal == NULL)
   {
     SPI_finish();
-    elog(ERROR, "native_stream_open: %s", SPI_result_code_string(SPI_result));
+    elog(ERROR, "np_stream_open: %s", SPI_result_code_string(SPI_result));
   }
   SPI_finish();
-
-  snprintf(summary, sizeof(summary), "seg=%s cursor=%s", seg, name);
-  PG_RETURN_TEXT_P(cstring_to_text(summary));
 }
 
-/* native_stream_next(segname [, batch]) -> bigint: rows in this chunk (0 = end) */
-PG_FUNCTION_INFO_V1(native_stream_next);
-Datum
-native_stream_next(PG_FUNCTION_ARGS)
+uint64
+np_stream_next(const char *seg, int64 batch)
 {
-  text *segname = PG_GETARG_TEXT_PP(0);
-  int64 batch = PG_NARGS() > 1 && !PG_ARGISNULL(1) ? PG_GETARG_INT64(1)
-                                                   : NP_STREAM_DEFAULT_BATCH;
-  char *seg = text_to_cstring(segname);
   char *path = np_shm_path(seg);
   char *name = cursor_name(seg);
   Portal portal;
@@ -76,16 +61,16 @@ native_stream_next(PG_FUNCTION_ARGS)
   uint64 nrows;
 
   if (batch <= 0)
-    elog(ERROR, "native_stream_next: batch must be > 0");
+    elog(ERROR, "np_stream_next: batch must be > 0");
 
   if (SPI_connect() != SPI_OK_CONNECT)
-    elog(ERROR, "native_stream_next: SPI_connect failed");
+    elog(ERROR, "np_stream_next: SPI_connect failed");
 
   portal = SPI_cursor_find(name);
   if (portal == NULL)
   {
     SPI_finish();
-    elog(ERROR, "native_stream_next: no open stream for segment \"%s\"", seg);
+    elog(ERROR, "np_stream_next: no open stream for segment \"%s\"", seg);
   }
 
   SPI_cursor_fetch(portal, true, (long) batch);
@@ -94,30 +79,59 @@ native_stream_next(PG_FUNCTION_ARGS)
   tuples = SPI_tuptable ? SPI_tuptable->vals : NULL;
   np_publish_columnar_shm(path, td, tuples, nrows, 0); /* chunk-sized */
   SPI_finish();
-
-  PG_RETURN_INT64((int64) nrows);
+  return nrows;
 }
 
-/* native_stream_close(segname) -> text */
-PG_FUNCTION_INFO_V1(native_stream_close);
-Datum
-native_stream_close(PG_FUNCTION_ARGS)
+void
+np_stream_close(const char *seg)
 {
-  text *segname = PG_GETARG_TEXT_PP(0);
-  char *seg = text_to_cstring(segname);
   char *name = cursor_name(seg);
   Portal portal;
-  char summary[256];
 
   if (SPI_connect() != SPI_OK_CONNECT)
-    elog(ERROR, "native_stream_close: SPI_connect failed");
+    elog(ERROR, "np_stream_close: SPI_connect failed");
 
   portal = SPI_cursor_find(name);
   if (portal != NULL)
     SPI_cursor_close(portal);
 
   SPI_finish();
+}
 
+/* ---- SQL wrappers -------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(native_stream_open);
+Datum
+native_stream_open(PG_FUNCTION_ARGS)
+{
+  char *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  char *q = text_to_cstring(PG_GETARG_TEXT_PP(1));
+  char summary[256];
+
+  np_stream_open(seg, q);
+  snprintf(summary, sizeof(summary), "seg=%s cursor=%s", seg,
+           cursor_name(seg));
+  PG_RETURN_TEXT_P(cstring_to_text(summary));
+}
+
+PG_FUNCTION_INFO_V1(native_stream_next);
+Datum
+native_stream_next(PG_FUNCTION_ARGS)
+{
+  char *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  int64 batch = PG_NARGS() > 1 && !PG_ARGISNULL(1) ? PG_GETARG_INT64(1)
+                                                   : NP_STREAM_DEFAULT_BATCH;
+  PG_RETURN_INT64((int64) np_stream_next(seg, batch));
+}
+
+PG_FUNCTION_INFO_V1(native_stream_close);
+Datum
+native_stream_close(PG_FUNCTION_ARGS)
+{
+  char *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  char summary[256];
+
+  np_stream_close(seg);
   snprintf(summary, sizeof(summary), "seg=%s closed", seg);
   PG_RETURN_TEXT_P(cstring_to_text(summary));
 }

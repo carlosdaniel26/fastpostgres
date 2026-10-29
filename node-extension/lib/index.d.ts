@@ -83,3 +83,21 @@ export function synthSegment(name: string, n: number): number;
 
 /** Generate the benchmark's COPY payload. */
 export function synthCopy(n: number): Buffer[];
+
+/**
+ * Control channel over /dev/shm, serviced by a background worker — no socket
+ * after `start()`. The ring is an SQL-execution endpoint; keep it 0600.
+ */
+export class Ring {
+  constructor(seg: string);
+  /** Start the worker (one SQL call on `conn`) and wait until it is ready. */
+  start(conn: Connection): void;
+  /** Open a query; chunks land in `seg` (`/dev/shm/<seg>`). */
+  open(seg: string, query: string): void;
+  /** Fetch the next batch; returns the number of rows (0 = end of stream). */
+  next(batch?: number): number;
+  close(): void;
+  /** Ingest `seg` into `table`; returns rows inserted. */
+  write(seg: string, table: string): number;
+  stop(): void;
+}

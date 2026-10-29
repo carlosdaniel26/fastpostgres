@@ -1,6 +1,9 @@
 /*
  * write.c — ingest a columnar segment (NPCOLUMN) into a table via
  * table_multi_insert (the COPY fast path: no per-row SQL, no text round-trip).
+ *
+ * np_write_segment() is shared by the SQL function below and by the ring
+ * worker (worker.c).
  */
 #include "postgres.h"
 
@@ -24,6 +27,7 @@
 #include "np_shm.h"
 
 #include "shm.h"
+#include "write.h"
 
 typedef struct WCol {
   int kind;
@@ -133,17 +137,12 @@ col_datum(WCol *col, uint64_t r, bool *isnull, char **arena)
   }
 }
 
-PG_FUNCTION_INFO_V1(native_write_shm);
-Datum
-native_write_shm(PG_FUNCTION_ARGS)
+uint64
+np_write_segment(const char *seg, const char *tab)
 {
-  text *segname = PG_GETARG_TEXT_PP(0);
-  text *tabname = PG_GETARG_TEXT_PP(1);
-  char *seg = text_to_cstring(segname);
-  char *tab = text_to_cstring(tabname);
   char *path = np_shm_path(seg);
   size_t size;
-  void *map = np_shm_map_ro(path, "native_write_shm", &size);
+  void *map = np_shm_map_ro(path, "np_write_segment", &size);
   uint64_t payload_len;
   NpReader rd;
   NpColumn col;
@@ -165,18 +164,19 @@ native_write_shm(PG_FUNCTION_ARGS)
                       payload_len))
   {
     munmap(map, size);
-    elog(ERROR, "native_write_shm: bad segment");
+    elog(ERROR, "np_write_segment: bad segment");
   }
   ncols = rd.ncols;
   nrows = rd.nrows;
 
-  rel = table_openrv(makeRangeVar(NULL, tab, -1), RowExclusiveLock);
+  rel = table_openrv(makeRangeVar(NULL, unconstify(char *, tab), -1),
+                     RowExclusiveLock);
   tupdesc = RelationGetDescr(rel);
   if (tupdesc->natts != (int) ncols)
   {
     table_close(rel, RowExclusiveLock);
     munmap(map, size);
-    elog(ERROR, "native_write_shm: column count mismatch (%d vs %u)",
+    elog(ERROR, "np_write_segment: column count mismatch (%d vs %u)",
          tupdesc->natts, ncols);
   }
 
@@ -187,7 +187,7 @@ native_write_shm(PG_FUNCTION_ARGS)
     {
       table_close(rel, RowExclusiveLock);
       munmap(map, size);
-      elog(ERROR, "native_write_shm: truncated columnar payload");
+      elog(ERROR, "np_write_segment: truncated columnar payload");
     }
     wcols[c].kind = (int) col.kind;
     wcols[c].nulls = col.nulls;
@@ -200,7 +200,7 @@ native_write_shm(PG_FUNCTION_ARGS)
   slots = palloc(sizeof(TupleTableSlot *) * BATCH);
   for (c = 0; c < (uint32) BATCH; c++)
     slots[c] = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-  batch_ctx = AllocSetContextCreate(CurrentMemoryContext, "native_write_shm",
+  batch_ctx = AllocSetContextCreate(CurrentMemoryContext, "np_write_segment",
                                     ALLOCSET_DEFAULT_SIZES);
   bistate = GetBulkInsertState();
 
@@ -252,5 +252,15 @@ native_write_shm(PG_FUNCTION_ARGS)
   MemoryContextDelete(batch_ctx);
   munmap(map, size);
 
-  PG_RETURN_INT64((int64) nrows);
+  return nrows;
+}
+
+PG_FUNCTION_INFO_V1(native_write_shm);
+Datum
+native_write_shm(PG_FUNCTION_ARGS)
+{
+  char *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  char *tab = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+  PG_RETURN_INT64((int64) np_write_segment(seg, tab));
 }

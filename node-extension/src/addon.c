@@ -12,17 +12,21 @@
  */
 #include <node_api.h>
 
+#include <errno.h>
 #include <fcntl.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libpq-fe.h>
 
 #include "np_shm.h"
+#include "ring.h"
 
 #include "synth.h"
 
@@ -158,6 +162,280 @@ static napi_value conn_close(napi_env env, napi_callback_info info) {
     PQfinish(c->pg);
     c->pg = NULL;
   }
+  return mk_undefined(env);
+}
+
+/* ---- Ring: control channel over /dev/shm (no socket) --------------------- */
+
+typedef struct {
+  NpRing *ring;
+  void *map;
+  size_t size;
+  char seg[128];  /* the ring itself */
+  char data[128]; /* the columnar segment of the current stream */
+} RingState;
+
+static void ring_finalize(napi_env env, void *data, void *hint) {
+  RingState *st = data;
+  (void) env;
+  (void) hint;
+  if (!st) return;
+  if (st->map) munmap(st->map, st->size);
+  free(st);
+}
+
+static napi_value ring_new(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], self;
+  char seg[128];
+  size_t seg_len = sizeof(seg);
+  char path[160];
+  int fd;
+  void *map;
+  RingState *st;
+  size_t i;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  if (argc < 1 ||
+      napi_get_value_string_utf8(env, argv[0], seg, sizeof(seg), &seg_len) !=
+          napi_ok) {
+    napi_throw_type_error(env, NULL, "Ring(segName)");
+    return mk_undefined(env);
+  }
+  for (i = 0; i < seg_len; i++) {
+    char ch = seg[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+          (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) {
+      napi_throw_error(env, NULL, "Ring: invalid segment name");
+      return mk_undefined(env);
+    }
+  }
+
+  snprintf(path, sizeof(path), "/%s", seg);
+  fd = shm_open(path, O_RDWR | O_CREAT, 0600);
+  if (fd < 0) {
+    napi_throw_error(env, NULL, "Ring: cannot create /dev/shm segment");
+    return mk_undefined(env);
+  }
+  if (ftruncate(fd, NP_RING_BYTES) != 0) {
+    close(fd);
+    napi_throw_error(env, NULL, "Ring: ftruncate failed");
+    return mk_undefined(env);
+  }
+  map = mmap(NULL, NP_RING_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (map == MAP_FAILED) {
+    napi_throw_error(env, NULL, "Ring: mmap failed");
+    return mk_undefined(env);
+  }
+
+  {
+    NpRing *r = (NpRing *) map;
+    if (memcmp(r->magic, NP_RING_MAGIC, 8) != 0) {
+      /* fresh segment: initialise the semaphores before the worker starts */
+      memset(r, 0, NP_RING_BYTES);
+      if (sem_init(&r->req_ready, 1, 0) != 0 ||
+          sem_init(&r->resp_ready, 1, 0) != 0) {
+        munmap(map, NP_RING_BYTES);
+        napi_throw_error(env, NULL, "Ring: sem_init failed");
+        return mk_undefined(env);
+      }
+      r->version = NP_RING_VERSION;
+      memcpy(r->magic, NP_RING_MAGIC, 8);
+    }
+  }
+
+  st = calloc(1, sizeof(*st));
+  st->ring = (NpRing *) map;
+  st->map = map;
+  st->size = NP_RING_BYTES;
+  snprintf(st->seg, sizeof(st->seg), "%s", seg);
+  napi_wrap(env, self, st, ring_finalize, NULL, NULL);
+  return self;
+}
+
+/* Send one request and block for its response; returns nrows, or -1 on error
+ * (leaving a JS exception pending). */
+static int64_t ring_request(napi_env env, RingState *st, uint32_t op,
+                            const char *a1, const char *a2, uint32_t batch) {
+  NpRing *r = st->ring;
+  struct timespec ts;
+  size_t n = 0;
+
+  if (a1) {
+    size_t l = strlen(a1);
+    if (l + 1 > NP_RING_ARG) {
+      napi_throw_error(env, NULL, "ring: argument too long");
+      return -1;
+    }
+    memcpy(r->arg, a1, l + 1);
+    n = l + 1;
+  } else {
+    r->arg[0] = 0;
+    n = 1;
+  }
+  if (a2) {
+    size_t l = strlen(a2);
+    if (n + l + 1 > NP_RING_ARG) {
+      napi_throw_error(env, NULL, "ring: argument too long");
+      return -1;
+    }
+    memcpy(r->arg + n, a2, l + 1);
+  }
+
+  r->op = op;
+  r->batch = batch;
+  r->status = 0;
+  r->nrows = 0;
+  r->error[0] = 0;
+
+  __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
+  sem_post(&r->req_ready);
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 10;
+  if (sem_timedwait(&r->resp_ready, &ts) != 0) {
+    napi_throw_error(env, NULL, "ring: timeout waiting for the worker");
+    return -1;
+  }
+  __atomic_thread_fence(__ATOMIC_ACQUIRE);
+  if (r->status != 0) {
+    napi_throw_error(env, NULL, r->error[0] ? r->error : "ring: worker error");
+    return -1;
+  }
+  return (int64_t) r->nrows;
+}
+
+static napi_value ring_start(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], self;
+  RingState *st = NULL;
+  Connection *c = NULL;
+  char sql[256];
+  PGresult *res;
+  int waited = 0;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc < 1 || napi_unwrap(env, argv[0], (void **) &c) != napi_ok || !c ||
+      !c->pg) {
+    napi_throw_type_error(env, NULL, "ring.start(conn)");
+    return mk_undefined(env);
+  }
+
+  snprintf(sql, sizeof(sql), "SELECT native_ring_start('%s')", st->seg);
+  res = PQexec(c->pg, sql);
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    char msg[512];
+    snprintf(msg, sizeof(msg), "libpq: %s", PQresultErrorMessage(res));
+    PQclear(res);
+    napi_throw_error(env, NULL, msg);
+    return mk_undefined(env);
+  }
+  PQclear(res);
+
+  while (__atomic_load_n(&st->ring->worker_ready, __ATOMIC_ACQUIRE) == 0) {
+    struct timespec pause = {0, 1000000}; /* 1 ms */
+    nanosleep(&pause, NULL);
+    if (++waited > 10000) {
+      napi_throw_error(env, NULL, "ring: worker did not become ready");
+      return mk_undefined(env);
+    }
+  }
+  return mk_undefined(env);
+}
+
+static napi_value ring_open(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2], self;
+  RingState *st = NULL;
+  char seg[128], query[NP_RING_ARG];
+  size_t slen = sizeof(seg), qlen = 0;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc < 2 ||
+      napi_get_value_string_utf8(env, argv[0], seg, sizeof(seg), &slen) !=
+          napi_ok ||
+      napi_get_value_string_utf8(env, argv[1], query, sizeof(query), &qlen) !=
+          napi_ok) {
+    napi_throw_type_error(env, NULL, "ring.open(seg, query)");
+    return mk_undefined(env);
+  }
+  snprintf(st->data, sizeof(st->data), "%s", seg);
+  if (ring_request(env, st, NP_OP_OPEN, st->data, query, 0) < 0)
+    return mk_undefined(env);
+  return mk_undefined(env);
+}
+
+static napi_value ring_next(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], self, out;
+  RingState *st = NULL;
+  int64_t batch = 100000;
+  int64_t nrows;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc >= 1) {
+    double b;
+    if (napi_get_value_double(env, argv[0], &b) == napi_ok && b > 0)
+      batch = (int64_t) b;
+  }
+  nrows = ring_request(env, st, NP_OP_NEXT, st->data, NULL, (uint32_t) batch);
+  if (nrows < 0) return mk_undefined(env);
+  napi_create_double(env, (double) nrows, &out);
+  return out;
+}
+
+static napi_value ring_close(napi_env env, napi_callback_info info) {
+  size_t argc = 0;
+  napi_value self;
+  RingState *st = NULL;
+
+  napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (ring_request(env, st, NP_OP_CLOSE, st->data, NULL, 0) < 0)
+    return mk_undefined(env);
+  return mk_undefined(env);
+}
+
+static napi_value ring_write(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2], self, out;
+  RingState *st = NULL;
+  char seg[128], table[128];
+  size_t slen = sizeof(seg), tlen = sizeof(table);
+  int64_t nrows;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc < 2 ||
+      napi_get_value_string_utf8(env, argv[0], seg, sizeof(seg), &slen) !=
+          napi_ok ||
+      napi_get_value_string_utf8(env, argv[1], table, sizeof(table), &tlen) !=
+          napi_ok) {
+    napi_throw_type_error(env, NULL, "ring.write(seg, table)");
+    return mk_undefined(env);
+  }
+  nrows = ring_request(env, st, NP_OP_WRITE, seg, table, 0);
+  if (nrows < 0) return mk_undefined(env);
+  napi_create_double(env, (double) nrows, &out);
+  return out;
+}
+
+static napi_value ring_stop(napi_env env, napi_callback_info info) {
+  size_t argc = 0;
+  napi_value self;
+  RingState *st = NULL;
+  NpRing *r;
+
+  napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  r = st->ring;
+  r->op = NP_OP_STOP;
+  __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
+  sem_post(&r->req_ready);
   return mk_undefined(env);
 }
 
@@ -749,11 +1027,19 @@ fail:
 /* ---- module -------------------------------------------------------------- */
 
 static napi_value init(napi_env env, napi_value exports) {
-  napi_value conn_class, read_fn, write_fn;
+  napi_value conn_class, read_fn, write_fn, ring_class;
   napi_property_descriptor conn_props[] = {
       {"exec", NULL, conn_exec, NULL, NULL, NULL, napi_default, NULL},
       {"copyFrom", NULL, conn_copy_from, NULL, NULL, NULL, napi_default, NULL},
       {"close", NULL, conn_close, NULL, NULL, NULL, napi_default, NULL},
+  };
+  napi_property_descriptor ring_props[] = {
+      {"start", NULL, ring_start, NULL, NULL, NULL, napi_default, NULL},
+      {"open", NULL, ring_open, NULL, NULL, NULL, napi_default, NULL},
+      {"next", NULL, ring_next, NULL, NULL, NULL, napi_default, NULL},
+      {"close", NULL, ring_close, NULL, NULL, NULL, napi_default, NULL},
+      {"write", NULL, ring_write, NULL, NULL, NULL, napi_default, NULL},
+      {"stop", NULL, ring_stop, NULL, NULL, NULL, napi_default, NULL},
   };
 
   napi_define_class(env, "Connection", NAPI_AUTO_LENGTH, conn_new, NULL,
@@ -765,6 +1051,10 @@ static napi_value init(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "Connection", conn_class);
   napi_set_named_property(env, exports, "read", read_fn);
   napi_set_named_property(env, exports, "writeSegment", write_fn);
+  napi_define_class(env, "Ring", NAPI_AUTO_LENGTH, ring_new, NULL,
+                    sizeof(ring_props) / sizeof(ring_props[0]), ring_props,
+                    &ring_class);
+  napi_set_named_property(env, exports, "Ring", ring_class);
   return np_register_synth(env, exports);
 }
 
