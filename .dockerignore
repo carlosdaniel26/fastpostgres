@@ -1,0 +1,11 @@
+.git
+.commandcode
+third_party
+**/node_modules
+**/build
+*.png
+*.log
+**/*.o
+**/*.so
+**/*.a
+**/*.bc

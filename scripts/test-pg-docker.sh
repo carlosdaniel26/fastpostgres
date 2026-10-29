@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds the nativepostgress extension inside a postgres:18 container, runs the
-# correctness tests (query + shared-memory round-trip + write round-trip), then
-# reads /dev/shm/np_test from the host into JS typed arrays (shm-demo).
+# Builds the extension and the Node addon in a postgres:18 + Node image, runs the
+# SQL correctness suite, then `node --test` for the client. Postgres and Node run
+# in the same container, so they share /dev/shm directly.
 #
 # Usage: scripts/test-pg-docker.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXT="$ROOT/pg-extension"
-IMG="nativepostgress-pg"
+IMG="nativepostgress-node"
 
-echo "==> building extension image (postgres:18 + dev headers + extension)"
-docker build -t "$IMG" -f - "$EXT" <<'DOCKERFILE'
-FROM postgres:18
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential postgresql-server-dev-18 \
- && rm -rf /var/lib/apt/lists/*
-COPY . /src
-WORKDIR /src
-RUN make clean && make && make install
-DOCKERFILE
+echo "==> building image (postgres:18 + dev headers + extension + Node addon)"
+docker build -t "$IMG" -f "$ROOT/scripts/Dockerfile.node" "$ROOT"
 
-rm -f /dev/shm/np_test 2>/dev/null || true
-
-echo "==> running a real query + writing the result to shared memory (--ipc=host)"
-docker run --rm --ipc=host -i "$IMG" bash -s <<'SCRIPT'
+echo "==> running the SQL suite and node --test as postgres"
+docker run --rm --shm-size=2g -i "$IMG" bash -s <<'SCRIPT'
 set -euo pipefail
 export PGDATA=/tmp/pgdata
 rm -rf "$PGDATA"
@@ -36,16 +25,13 @@ gosu postgres initdb -D "$PGDATA" >/dev/null
 gosu postgres pg_ctl -D "$PGDATA" \
   -o "-c listen_addresses='' -c unix_socket_directories='/tmp'" -w start >/dev/null
 
-gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -f /src/test.sql
-
-gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null
-echo "OK: postgres wrote /dev/shm/np_test"
-SCRIPT
+echo "--- psql: pg-extension/test.sql ---"
+gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -f /src/pg-extension/test.sql
 
 echo
-echo "==> building the host-side reader (separate process, V8 side)"
-cmake -S "$ROOT/v8-extension" -B "$ROOT/v8-extension/build" >/dev/null
-cmake --build "$ROOT/v8-extension/build" --target shm-demo 2>&1 | tail -3
+echo "--- node --test (Node client) ---"
+cd /src/node-extension
+gosu postgres node --test
 
-echo "==> reading /dev/shm/np_test from the host into JS typed arrays"
-"$ROOT/v8-extension/build/shm-demo" np_test
+gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null
+SCRIPT

@@ -2,30 +2,31 @@
 set -euo pipefail
 
 # Profiles the nativepostgress path with `perf` (Linux process tracer).
-# Captures BOTH the client (bench) and the postgres backend (the extension),
-# then prints the hottest functions.
+# Captures BOTH the Node client and the postgres backend (the extension), then
+# prints the hottest functions.
 #
 # Usage: scripts/profile.sh [nrows]   (default 1000000)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXT="$ROOT/pg-extension"
-IMG="nativepostgress-bench"
+IMG="nativepostgress-node"
 NROWS="${1:-1000000}"
 
-echo "==> building profile image (postgres:18 + dev headers + libpq + perf)"
-docker build -t "$IMG" -f - "$EXT" <<'DOCKERFILE'
+echo "==> building profile image (postgres:18 + dev headers + Node addon + perf)"
+docker build -t "$IMG" -f - "$ROOT" <<'DOCKERFILE'
 FROM postgres:18
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential postgresql-server-dev-18 libpq-dev linux-perf \
+      build-essential postgresql-server-dev-18 python3 nodejs npm linux-perf \
  && rm -rf /var/lib/apt/lists/*
-COPY . /src
-WORKDIR /src
-RUN make clean && make && make install \
- && gcc -O2 -g -o bench bench.c -I. -I"$(pg_config --includedir)" -lpq
+COPY pg-extension /src/pg-extension
+COPY node-extension /src/node-extension
+WORKDIR /src/pg-extension
+RUN make clean && make && make install
+WORKDIR /src/node-extension
+RUN npm install --no-audit --no-fund
 DOCKERFILE
 
 echo "==> perf record across the benchmark ($NROWS rows)"
-docker run --rm --privileged --ipc=host -i "$IMG" bash -s <<SCRIPT
+docker run --rm --privileged --shm-size=2g -i "$IMG" bash -s <<SCRIPT
 set -euo pipefail
 export PGDATA=/tmp/pgdata
 rm -rf "\$PGDATA"; mkdir -p "\$PGDATA"; chown -R postgres:postgres /tmp/pgdata
@@ -35,7 +36,7 @@ gosu postgres pg_ctl -D "\$PGDATA" -l /tmp/pg.log \
 gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -c "CREATE EXTENSION nativepostgress;" >/dev/null
 
 # system-wide profile while the benchmark runs (client + postgres backend)
-perf record -g -a -o /tmp/perf.data -- /src/bench $NROWS >/dev/null 2>&1 || true
+perf record -g -a -o /tmp/perf.data -- gosu postgres node /src/node-extension/bench/bench.js $NROWS >/dev/null 2>&1 || true
 gosu postgres pg_ctl -D "\$PGDATA" -w stop >/dev/null
 
 echo "=== raw top symbols (self time) ==="

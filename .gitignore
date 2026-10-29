@@ -4,4 +4,11 @@ third_party/
 *.so
 *.a
 *.bc
+.deps/
+node_modules/
+bench.log
+bench_chart.png
+*.tgz
+.commandcode/
 compile_commands.json
+__pycache__/
