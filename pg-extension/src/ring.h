@@ -1,8 +1,17 @@
 /*
  * ring.h — request/response ring shared between the client and the
  * background worker (no socket). The client creates /dev/shm/<seg>, zeroes it
- * and initialises both semaphores before bootstrapping the worker, so there is
+ * and initialises the semaphores before bootstrapping the worker, so there is
  * no init race; the worker only maps it.
+ *
+ * Columnar mode: one OPEN/NEXT/CLOSE/WRITE request at a time, data lands in a
+ * separate columnar segment.
+ *
+ * Push mode: the worker runs the query with a DestReceiver and writes each row
+ * into a circular slot queue as the executor produces it; the client turns each
+ * row into a JS object immediately. Slot layout:
+ *   [u8 status][u8 nulls[ceil(ncols/8)]][values...]
+ * where status 0 = row, 1 = done, 2 = error (message in push_error).
  */
 #ifndef NP_RING_H
 #define NP_RING_H
@@ -12,9 +21,15 @@
 
 #define NP_RING_MAGIC "NPRING01"
 #define NP_RING_VERSION 1u
-#define NP_RING_BYTES (1u << 20) /* 1 MiB */
+#define NP_RING_BYTES (8u << 20) /* 8 MiB segment */
 #define NP_RING_ARG 4096
 #define NP_RING_ERR 256
+
+#define NP_PUSH_OFFSET 8192u     /* slot area starts here */
+#define NP_PUSH_SLOTS 64u        /* ring depth */
+#define NP_PUSH_SLOT 65536u      /* bytes per row frame */
+#define NP_PUSH_MAXCOLS 64
+#define NP_PUSH_NAME 32
 
 enum NpRingOp {
   NP_OP_NONE = 0,
@@ -22,8 +37,12 @@ enum NpRingOp {
   NP_OP_NEXT = 2,
   NP_OP_CLOSE = 3,
   NP_OP_WRITE = 4,
-  NP_OP_STOP = 5
+  NP_OP_STOP = 5,
+  NP_OP_PUSH = 6
 };
+
+/* push slot status */
+enum { NP_PUSH_ROW = 0, NP_PUSH_DONE = 1, NP_PUSH_ERROR = 2 };
 
 typedef struct NpRing {
   char magic[8];        /* "NPRING01" */
@@ -39,6 +58,18 @@ typedef struct NpRing {
   uint32_t batch;
   char error[NP_RING_ERR];
   char arg[NP_RING_ARG];/* "<seg>\0<query|table>\0" */
+
+  /* push (row-by-row) mode */
+  sem_t push_free;      /* free slots: client -> worker */
+  sem_t push_ready;     /* filled slots: worker -> client */
+  uint32_t push_ncols;
+  uint32_t push_status; /* 1 = the stream failed */
+  char push_error[NP_RING_ERR];
+  struct {
+    char name[NP_PUSH_NAME];
+    uint8_t kind;
+    uint32_t pgtype;
+  } push_cols[NP_PUSH_MAXCOLS];
 } NpRing;
 
 #endif

@@ -17,8 +17,8 @@
 #include "columnar.h"
 #include "shm.h"
 
-static int
-oid_to_kind(Oid typ)
+int
+np_oid_to_kind(Oid typ)
 {
   switch (typ)
   {
@@ -46,8 +46,8 @@ is_varlena_text(Oid typ)
   return typ == TEXTOID || typ == VARCHAROID || typ == BPCHAROID;
 }
 
-static int
-kind_width(int kind)
+int
+np_kind_width(int kind)
 {
   switch (kind)
   {
@@ -111,7 +111,7 @@ np_columnar_size(HeapTuple *tuples, TupleDesc td, uint64 nrows)
   {
     Form_pg_attribute att = TupleDescAttr(td, c);
     Oid type = att->atttypid;
-    int kind = oid_to_kind(type);
+    int kind = np_oid_to_kind(type);
     Oid typoutput = InvalidOid;
 
     if (kind == NP_KIND_TEXT && !is_varlena_text(type))
@@ -137,7 +137,7 @@ np_columnar_size(HeapTuple *tuples, TupleDesc td, uint64 nrows)
       off += (uint64) (nrows + 1) * 4 + tbytes;
     }
     else
-      off += (uint64) nrows * (uint64) kind_width(kind);
+      off += (uint64) nrows * (uint64) np_kind_width(kind);
   }
   return off;
 }
@@ -164,8 +164,8 @@ np_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out,
   {
     Form_pg_attribute att = TupleDescAttr(td, c);
     Oid type = att->atttypid;
-    int kind = oid_to_kind(type);
-    int width = kind_width(kind);
+    int kind = np_oid_to_kind(type);
+    int width = np_kind_width(kind);
     Oid typoutput = InvalidOid;
     size_t name_len = strlen(NameStr(att->attname));
     char *nulls, *lenp;

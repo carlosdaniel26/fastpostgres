@@ -100,4 +100,8 @@ export class Ring {
   /** Ingest `seg` into `table`; returns rows inserted. */
   write(seg: string, table: string): number;
   stop(): void;
+  /** Push mode: run `query`; the worker streams rows as the executor produces. */
+  pushOpen(query: string): void;
+  /** Consume rows one by one, each already a `{ column: value }` object. */
+  pushRows(handler: (row: Record<string, unknown>) => void): void;
 }

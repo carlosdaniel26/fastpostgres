@@ -22,19 +22,26 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "access/tupdesc.h"
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "executor/spi.h"
+#include "executor/tuptable.h"
 #include "fmgr.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
+#include "tcop/dest.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
+#include "varatt.h"
 
 #include "np_shm.h"
 
+#include "columnar.h"
 #include "ring.h"
 #include "stream.h"
 #include "write.h"
@@ -45,6 +52,8 @@ static volatile sig_atomic_t got_sigterm = false;
 static bool have_txn = false;
 static bool have_stream = false;
 static bool have_snapshot = false;
+
+static bool push_run(NpRing *r, const char *query);
 
 static void
 ring_sigterm(SIGNAL_ARGS)
@@ -135,13 +144,16 @@ ring_set_error(NpRing *r)
   FreeErrorData(edata);
 }
 
-/* Returns false when the worker should stop. */
+/* Returns false when the worker should stop; *respond is false for push, whose
+ * completion is signalled in the slot queue instead. */
 static bool
-ring_handle(NpRing *r, const char *ring_name)
+ring_handle(NpRing *r, const char *ring_name, bool *respond)
 {
   char *a1 = r->arg;
   char *a2 = a1 + strlen(a1) + 1;
   uint64 n = 0;
+
+  *respond = true;
 
   /* never let a data write clobber the ring itself */
   if ((r->op == NP_OP_OPEN || r->op == NP_OP_NEXT ||
@@ -158,6 +170,11 @@ ring_handle(NpRing *r, const char *ring_name)
   {
     case NP_OP_STOP:
       return false;
+
+    case NP_OP_PUSH:
+      *respond = false; /* the slot queue carries the result */
+      push_run(r, a1);
+      break;
 
     case NP_OP_OPEN:
       begin_txn(); /* drop any previous stream and open a new transaction */
@@ -294,16 +311,263 @@ np_ring_main(Datum main_arg)
     r->nrows = 0;
     r->error[0] = 0;
 
-    if (!ring_handle(r, seg))
-      break;
+    {
+      bool respond = true;
 
-    __atomic_store_n(&r->resp_seq, handled, __ATOMIC_RELEASE);
-    sem_post(&r->resp_ready);
+      if (!ring_handle(r, seg, &respond))
+        break;
+      if (respond)
+      {
+        __atomic_store_n(&r->resp_seq, handled, __ATOMIC_RELEASE);
+        sem_post(&r->resp_ready);
+      }
+    }
   }
 
   abort_txn();
   munmap(r, rsize);
   proc_exit(0);
+}
+
+/* ---- push mode: one JS object per row, as the executor produces it -------- */
+
+typedef struct {
+  DestReceiver pub;
+  NpRing *r;
+  char *slots;
+  uint32_t head;
+  uint32_t ncols;
+  uint8_t kinds[NP_PUSH_MAXCOLS];
+  Oid types[NP_PUSH_MAXCOLS];
+  Oid typoutput[NP_PUSH_MAXCOLS];
+  bool failed;
+} NpPushDest;
+
+static bool push_receive(TupleTableSlot *slot, DestReceiver *self);
+static void push_startup(DestReceiver *self, int operation, TupleDesc td);
+static void push_noop(DestReceiver *self) {}
+
+static void
+push_startup(DestReceiver *self, int operation, TupleDesc td)
+{
+  NpPushDest *d = (NpPushDest *) self;
+  int i, n = td->natts;
+
+  if (n > NP_PUSH_MAXCOLS) n = NP_PUSH_MAXCOLS;
+  d->ncols = (uint32_t) n;
+  d->r->push_ncols = (uint32_t) n;
+
+  for (i = 0; i < n; i++)
+  {
+    Form_pg_attribute att = TupleDescAttr(td, i);
+    Oid type = att->atttypid;
+    int kind = np_oid_to_kind(type);
+
+    d->kinds[i] = (uint8_t) kind;
+    d->types[i] = type;
+    d->typoutput[i] = InvalidOid;
+    if (kind == NP_KIND_TEXT && type != TEXTOID && type != VARCHAROID &&
+        type != BPCHAROID)
+    {
+      bool varlena;
+      getTypeOutputInfo(type, &d->typoutput[i], &varlena);
+    }
+    snprintf(d->r->push_cols[i].name, NP_PUSH_NAME, "%s",
+             NameStr(att->attname));
+    d->r->push_cols[i].kind = (uint8_t) kind;
+    d->r->push_cols[i].pgtype = (uint32_t) type;
+  }
+}
+
+static bool
+push_receive(TupleTableSlot *slot, DestReceiver *self)
+{
+  NpPushDest *d = (NpPushDest *) self;
+  uint32_t ncol = d->ncols;
+  int nullbytes = (int) ((ncol + 7) / 8);
+  char *s = d->slots + (size_t) d->head * NP_PUSH_SLOT;
+  size_t p = 1 + (size_t) nullbytes;
+  struct timespec ts;
+  uint32_t i;
+
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 10;
+  if (sem_timedwait(&d->r->push_free, &ts) != 0)
+  {
+    d->failed = true;
+    return false; /* stop execution: the client stalled */
+  }
+
+  slot_getallattrs(slot);
+  s[0] = (char) NP_PUSH_ROW;
+  memset(s + 1, 0, (size_t) nullbytes);
+
+  for (i = 0; i < ncol; i++)
+  {
+    Datum v;
+
+    if (p + 16 > NP_PUSH_SLOT) goto too_big;
+    if (slot->tts_isnull[i])
+    {
+      s[1 + (i >> 3)] |= (char) (1 << (i & 7));
+      continue;
+    }
+    v = slot->tts_values[i];
+
+    switch (d->kinds[i])
+    {
+      case NP_KIND_BOOL:
+        s[p++] = DatumGetBool(v) ? 1 : 0;
+        break;
+      case NP_KIND_INT16:
+      {
+        int16 x = DatumGetInt16(v);
+        memcpy(s + p, &x, 2);
+        p += 2;
+        break;
+      }
+      case NP_KIND_INT32:
+      {
+        int32 x = DatumGetInt32(v);
+        memcpy(s + p, &x, 4);
+        p += 4;
+        break;
+      }
+      case NP_KIND_INT64:
+      {
+        int64 x = DatumGetInt64(v);
+        memcpy(s + p, &x, 8);
+        p += 8;
+        break;
+      }
+      case NP_KIND_FLOAT4:
+      {
+        float4 x = DatumGetFloat4(v);
+        memcpy(s + p, &x, 4);
+        p += 4;
+        break;
+      }
+      case NP_KIND_FLOAT8:
+      {
+        double x = (d->types[i] == NUMERICOID)
+                       ? DatumGetFloat8(DirectFunctionCall1(numeric_float8, v))
+                       : DatumGetFloat8(v);
+        memcpy(s + p, &x, 8);
+        p += 8;
+        break;
+      }
+      default: /* text */
+      {
+        const char *data;
+        int len;
+
+        if (d->types[i] == TEXTOID || d->types[i] == VARCHAROID ||
+            d->types[i] == BPCHAROID)
+        {
+          struct varlena *vv =
+              pg_detoast_datum_packed((struct varlena *) DatumGetPointer(v));
+          data = VARDATA_ANY(vv);
+          len = VARSIZE_ANY_EXHDR(vv);
+        }
+        else
+        {
+          char *out = OidOutputFunctionCall(d->typoutput[i], v);
+          data = out ? out : "";
+          len = out ? (int) strlen(out) : 0;
+        }
+        if (p + 4 + (size_t) len > NP_PUSH_SLOT) goto too_big;
+        {
+          uint32 l = (uint32) len;
+          memcpy(s + p, &l, 4);
+          p += 4;
+          memcpy(s + p, data, (size_t) len);
+          p += (size_t) len;
+        }
+        break;
+      }
+    }
+  }
+
+  d->head = (d->head + 1) % NP_PUSH_SLOTS;
+  sem_post(&d->r->push_ready);
+  return true;
+
+too_big:
+  d->failed = true;
+  return false;
+}
+
+/* Run the query with our receiver; returns true when the stream completed. */
+static bool
+push_run(NpRing *r, const char *query)
+{
+  NpPushDest d;
+  SPIExecuteOptions opts;
+  bool ok = false;
+
+  memset(&d, 0, sizeof(d));
+  d.r = r;
+  d.slots = (char *) r + NP_PUSH_OFFSET;
+  d.pub.receiveSlot = push_receive;
+  d.pub.rStartup = push_startup;
+  d.pub.rShutdown = push_noop;
+  d.pub.rDestroy = push_noop;
+  d.pub.mydest = DestNone;
+
+  begin_txn();
+  memset(&opts, 0, sizeof(opts));
+  opts.read_only = true;
+  opts.must_return_tuples = true;
+  opts.dest = &d.pub;
+
+  PG_TRY();
+  {
+    int rc;
+
+    if (SPI_connect() != SPI_OK_CONNECT)
+      elog(ERROR, "push: SPI_connect failed");
+    rc = SPI_execute_extended(query, &opts);
+    SPI_finish();
+    if (rc < 0)
+      elog(ERROR, "push: %s", SPI_result_code_string(rc));
+    ok = true;
+  }
+  PG_CATCH();
+  {
+    ring_set_error(r);
+    r->push_status = 1;
+    strlcpy(r->push_error, r->error, sizeof(r->push_error));
+    FlushErrorState();
+    abort_txn();
+  }
+  PG_END_TRY();
+
+  if (ok)
+    commit_txn();
+
+  if (d.failed && ok)
+  {
+    r->push_status = 1;
+    strlcpy(r->push_error, "row too large or client stalled",
+            sizeof(r->push_error));
+    ok = false;
+  }
+
+  /* final marker: DONE, or ERROR with the message in push_error */
+  {
+    char *s = d.slots + (size_t) d.head * NP_PUSH_SLOT;
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 10;
+    if (sem_timedwait(&r->push_free, &ts) == 0)
+    {
+      s[0] = ok ? (char) NP_PUSH_DONE : (char) NP_PUSH_ERROR;
+      d.head = (d.head + 1) % NP_PUSH_SLOTS;
+      sem_post(&r->push_ready);
+    }
+  }
+  return ok;
 }
 
 /* ---- SQL: start / stop --------------------------------------------------- */

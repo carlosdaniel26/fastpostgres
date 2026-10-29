@@ -7,6 +7,10 @@
 #include "access/htup.h"
 #include "access/tupdesc.h"
 
+/* PostgreSQL type OID -> wire kind, and the kind's fixed width (0 for text). */
+int np_oid_to_kind(Oid typ);
+int np_kind_width(int kind);
+
 /* Exact encoded payload size for these tuples (a full pass over text values). */
 uint64 np_columnar_size(HeapTuple *tuples, TupleDesc td, uint64 nrows);
 

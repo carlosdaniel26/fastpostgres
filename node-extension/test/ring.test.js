@@ -54,3 +54,27 @@ test('ring: stream and ingest without a socket in the loop', () => {
   ring.stop();
   conn.close();
 });
+
+test('ring: push mode yields a JS object per row as it is produced', () => {
+  const conn = new Connection(CONNINFO);
+  const ring = new Ring('np_ring_push');
+  ring.start(conn);
+
+  let count = 0;
+  const first = [];
+  ring.pushOpen(
+    "SELECT g::int4 AS i4, ('x' || g)::text AS t, (g*1.5)::float8 AS f " +
+      'FROM generate_series(1, 2000) g'
+  );
+  ring.pushRows((row) => {
+    if (first.length < 3) first.push(row);
+    count++;
+  });
+
+  assert.strictEqual(count, 2000);
+  assert.deepStrictEqual(first[0], { i4: 1, t: 'x1', f: 1.5 });
+  assert.strictEqual(first[2].i4, 3);
+
+  ring.stop();
+  conn.close();
+});

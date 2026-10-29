@@ -173,6 +173,7 @@ typedef struct {
   size_t size;
   char seg[128];  /* the ring itself */
   char data[128]; /* the columnar segment of the current stream */
+  uint32_t tail;  /* push mode: consumer slot index */
 } RingState;
 
 static void ring_finalize(napi_env env, void *data, void *hint) {
@@ -235,7 +236,9 @@ static napi_value ring_new(napi_env env, napi_callback_info info) {
       /* fresh segment: initialise the semaphores before the worker starts */
       memset(r, 0, NP_RING_BYTES);
       if (sem_init(&r->req_ready, 1, 0) != 0 ||
-          sem_init(&r->resp_ready, 1, 0) != 0) {
+          sem_init(&r->resp_ready, 1, 0) != 0 ||
+          sem_init(&r->push_free, 1, NP_PUSH_SLOTS) != 0 ||
+          sem_init(&r->push_ready, 1, 0) != 0) {
         munmap(map, NP_RING_BYTES);
         napi_throw_error(env, NULL, "Ring: sem_init failed");
         return mk_undefined(env);
@@ -436,6 +439,166 @@ static napi_value ring_stop(napi_env env, napi_callback_info info) {
   r->op = NP_OP_STOP;
   __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
   sem_post(&r->req_ready);
+  return mk_undefined(env);
+}
+
+/* Push mode: send the query, then consume one JS object per row. */
+static napi_value ring_push_open(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], self;
+  RingState *st = NULL;
+  NpRing *r;
+  char query[NP_RING_ARG];
+  size_t qlen = 0, l;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc < 1 ||
+      napi_get_value_string_utf8(env, argv[0], query, sizeof(query), &qlen) !=
+          napi_ok) {
+    napi_throw_type_error(env, NULL, "ring.pushOpen(query)");
+    return mk_undefined(env);
+  }
+  r = st->ring;
+  l = strlen(query);
+  if (l + 1 > NP_RING_ARG) {
+    napi_throw_error(env, NULL, "ring: query too long");
+    return mk_undefined(env);
+  }
+  memcpy(r->arg, query, l + 1);
+  r->op = NP_OP_PUSH;
+  r->push_status = 0;
+  r->push_error[0] = 0;
+  st->tail = 0;
+  __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
+  sem_post(&r->req_ready);
+  return mk_undefined(env);
+}
+
+static napi_value ring_push_rows(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], self;
+  RingState *st = NULL;
+  NpRing *r;
+  napi_value cb;
+  char *slots;
+  bool call_handler = true;
+
+  napi_get_cb_info(env, info, &argc, argv, &self, NULL);
+  napi_unwrap(env, self, (void **) &st);
+  if (argc < 1 || !is_function(env, argv[0])) {
+    napi_throw_type_error(env, NULL, "ring.pushRows(handler)");
+    return mk_undefined(env);
+  }
+  r = st->ring;
+  cb = argv[0];
+  slots = (char *) st->map + NP_PUSH_OFFSET;
+
+  for (;;) {
+    struct timespec ts;
+    char *s;
+    uint32_t ncol, i;
+    size_t nullbytes, p;
+    napi_value row;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 10;
+    if (sem_timedwait(&r->push_ready, &ts) != 0) {
+      napi_throw_error(env, NULL, "ring: timeout waiting for a row");
+      return mk_undefined(env);
+    }
+    s = slots + (size_t) st->tail * NP_PUSH_SLOT;
+
+    if (s[0] == NP_PUSH_DONE) {
+      st->tail = (st->tail + 1) % NP_PUSH_SLOTS;
+      sem_post(&r->push_free);
+      break;
+    }
+    if (s[0] == NP_PUSH_ERROR) {
+      char msg[NP_RING_ERR];
+      snprintf(msg, sizeof(msg), "%s",
+               r->push_error[0] ? r->push_error : "push: error");
+      st->tail = (st->tail + 1) % NP_PUSH_SLOTS;
+      sem_post(&r->push_free);
+      napi_throw_error(env, NULL, msg);
+      return mk_undefined(env);
+    }
+
+    ncol = r->push_ncols;
+    nullbytes = (size_t) ((ncol + 7) / 8);
+    p = 1 + nullbytes;
+    napi_create_object(env, &row);
+
+    for (i = 0; i < ncol; i++) {
+      bool isnull = (s[1 + (i >> 3)] >> (i & 7)) & 1;
+      napi_value v;
+
+      if (isnull) {
+        napi_get_null(env, &v);
+      } else {
+        switch (r->push_cols[i].kind) {
+          case NP_KIND_BOOL:
+            napi_get_boolean(env, s[p++] != 0, &v);
+            break;
+          case NP_KIND_INT16: {
+            int16_t x;
+            memcpy(&x, s + p, 2);
+            p += 2;
+            napi_create_int32(env, x, &v);
+            break;
+          }
+          case NP_KIND_INT32: {
+            int32_t x;
+            memcpy(&x, s + p, 4);
+            p += 4;
+            napi_create_int32(env, x, &v);
+            break;
+          }
+          case NP_KIND_INT64: {
+            int64_t x;
+            memcpy(&x, s + p, 8);
+            p += 8;
+            napi_create_bigint_int64(env, x, &v);
+            break;
+          }
+          case NP_KIND_FLOAT4: {
+            float x;
+            memcpy(&x, s + p, 4);
+            p += 4;
+            napi_create_double(env, (double) x, &v);
+            break;
+          }
+          case NP_KIND_FLOAT8: {
+            double x;
+            memcpy(&x, s + p, 8);
+            p += 8;
+            napi_create_double(env, x, &v);
+            break;
+          }
+          default: {
+            uint32_t l;
+            memcpy(&l, s + p, 4);
+            p += 4;
+            napi_create_string_utf8(env, s + p, l, &v);
+            p += l;
+            break;
+          }
+        }
+      }
+      napi_set_named_property(env, row, r->push_cols[i].name, v);
+    }
+
+    st->tail = (st->tail + 1) % NP_PUSH_SLOTS;
+    sem_post(&r->push_free);
+
+    if (call_handler) {
+      napi_value ignored;
+      bool pending = false;
+      napi_call_function(env, mk_undefined(env), cb, 1, &row, &ignored);
+      napi_is_exception_pending(env, &pending);
+      if (pending) call_handler = false;
+    }
+  }
   return mk_undefined(env);
 }
 
@@ -1040,6 +1203,8 @@ static napi_value init(napi_env env, napi_value exports) {
       {"close", NULL, ring_close, NULL, NULL, NULL, napi_default, NULL},
       {"write", NULL, ring_write, NULL, NULL, NULL, napi_default, NULL},
       {"stop", NULL, ring_stop, NULL, NULL, NULL, napi_default, NULL},
+      {"pushOpen", NULL, ring_push_open, NULL, NULL, NULL, napi_default, NULL},
+      {"pushRows", NULL, ring_push_rows, NULL, NULL, NULL, napi_default, NULL},
   };
 
   napi_define_class(env, "Connection", NAPI_AUTO_LENGTH, conn_new, NULL,
