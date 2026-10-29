@@ -1,0 +1,7 @@
+build/
+third_party/
+*.o
+*.so
+*.a
+*.bc
+compile_commands.json

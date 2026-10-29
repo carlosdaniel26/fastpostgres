@@ -1,0 +1,5 @@
+# nativepostgress extension
+comment = 'native columnar query result (typed arrays + raw text)'
+default_version = '1.0'
+module_pathname = '$libdir/nativepostgress'
+relocatable = true
