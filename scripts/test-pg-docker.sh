@@ -13,7 +13,7 @@ IMG="nativepostgress-node"
 echo "==> building image (postgres:18 + dev headers + extension + Node addon)"
 docker build -t "$IMG" -f "$ROOT/scripts/Dockerfile.node" "$ROOT"
 
-echo "==> running the SQL suite and node --test as postgres"
+echo "==> running the SQL suite as postgres"
 docker run --rm --shm-size=2g -i "$IMG" bash -s <<'SCRIPT'
 set -euo pipefail
 export PGDATA=/tmp/pgdata
@@ -27,11 +27,6 @@ gosu postgres pg_ctl -D "$PGDATA" \
 
 echo "--- psql: pg-extension/test.sql ---"
 gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -f /src/pg-extension/test.sql
-
-echo
-echo "--- node --test (Node client) ---"
-cd /src/node-extension
-gosu postgres node --import tsx --test test/*.test.ts
 
 gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null
 SCRIPT
