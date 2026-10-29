@@ -1,9 +1,7 @@
-'use strict';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 
-const { test } = require('node:test');
-const assert = require('node:assert');
-
-const { Connection, read, Ring, synthSegment } = require('..');
+import { Connection, read, Ring, synthSegment } from '../lib';
 
 const CONNINFO =
   process.env.NP_CONNINFO || 'host=/tmp dbname=postgres user=postgres';
@@ -22,7 +20,7 @@ test('ring: stream and ingest without a socket in the loop', () => {
   const ring = new Ring(RING);
   ring.start(conn); // the one SQL bootstrap call
 
-  const batches = [];
+  const batches: number[] = [];
   let seen = 0;
   ring.open(SEG, 'SELECT * FROM ring_src');
   for (;;) {
@@ -61,7 +59,7 @@ test('ring: push mode yields a JS object per row as it is produced', () => {
   ring.start(conn);
 
   let count = 0;
-  const first = [];
+  const first: Array<Record<string, unknown>> = [];
   ring.pushOpen(
     "SELECT g::int4 AS i4, ('x' || g)::text AS t, (g*1.5)::float8 AS f " +
       'FROM generate_series(1, 2000) g'

@@ -1,21 +1,15 @@
-'use strict';
-
 /*
- * bench.js — the same data across three transports, read and write:
+ * bench.ts — the same data across three transports, read and write:
  *
- *   tcp    libpq over 127.0.0.1       (text rows -> JS objects)
- *   unix   libpq over the unix socket (text rows -> JS objects)
- *   shm    native columnar over /dev/shm (typed arrays, zero-copy)
+ *   tcp    libpq over 127.0.0.1        (text rows -> JS objects)
+ *   unix   libpq over the unix socket  (text rows -> JS objects)
+ *   shm    native columnar over /dev/shm (typed arrays, zero-copy, ring control)
  *
- * Usage: node benchmark/bench.js [nrows ...]   (default 100000 1000000 10000000)
+ * Usage: node --import tsx ../benchmark/bench.ts [nrows ...]
+ *        (default 100000 1000000 10000000)
  */
-const {
-  Connection,
-  read,
-  synthSegment,
-  synthCopy,
-  Ring,
-} = require('../node-extension');
+import type { ConnectionLike, RingLike } from '../node-extension';
+import { Connection, read, Ring, synthCopy, synthSegment } from '../node-extension';
 
 const QUERY =
   'SELECT id, account_id, balance, active, name, email, score, age FROM bench';
@@ -27,16 +21,16 @@ const CONN_TCP =
 const CONN_UNIX =
   process.env.NP_UNIX || 'host=/tmp dbname=postgres user=postgres';
 
-const now = () => Number(process.hrtime.bigint()) / 1e6;
-const rate = (n, ms) => n / (ms / 1000) / 1e6; // M rows/s
+const now = (): number => Number(process.hrtime.bigint()) / 1e6;
+const rate = (n: number, ms: number): number => n / (ms / 1000) / 1e6; // M rows/s
 
-function fmt(n) {
+function fmt(n: number): string {
   if (n >= 1000000) return `${Math.floor(n / 1000000)}M`;
   if (n >= 1000) return `${Math.floor(n / 1000)}K`;
   return `${n}`;
 }
 
-function setupTable(conn, n) {
+function setupTable(conn: ConnectionLike, n: number): void {
   conn.exec('DROP TABLE IF EXISTS bench');
   conn.exec(
     `CREATE TABLE bench AS
@@ -51,11 +45,11 @@ function setupTable(conn, n) {
 
 /* ---- READ ---------------------------------------------------------------- */
 
-function readText(conn) {
+function readText(conn: ConnectionLike): number {
   const t0 = now();
   const rows = conn.exec(QUERY);
   let sum = 0;
-  for (const r of rows) sum += r.name.length;
+  for (const r of rows) sum += (r.name ?? '').length;
   const ms = now() - t0;
   if (sum < 0) throw new Error('unreachable');
   return ms;
@@ -63,8 +57,8 @@ function readText(conn) {
 
 const READ_BATCH = 100000;
 
-/* Pull chunks through the ring (no socket) and read each from /dev/shm. */
-function readShm(ring) {
+/** Pull chunks through the ring (no socket) and read each from /dev/shm. */
+function readShm(ring: RingLike): number {
   const t0 = now();
   ring.open(SEG, QUERY);
   for (;;) {
@@ -78,14 +72,14 @@ function readShm(ring) {
 
 /* ---- WRITE --------------------------------------------------------------- */
 
-function writeCopy(conn, n) {
+function writeCopy(conn: ConnectionLike, n: number): number {
   conn.exec('DROP TABLE IF EXISTS dst; CREATE TABLE dst (LIKE bench)');
   const t0 = now();
   conn.copyFrom('COPY dst FROM STDIN', synthCopy(n)); // native build + send
   return now() - t0;
 }
 
-function writeShm(conn, ring, n) {
+function writeShm(conn: ConnectionLike, ring: RingLike, n: number): number {
   conn.exec('DROP TABLE IF EXISTS dst; CREATE TABLE dst (LIKE bench)');
   const t0 = now();
   synthSegment(SEG, n); // native: generate rows straight into /dev/shm
@@ -95,40 +89,58 @@ function writeShm(conn, ring, n) {
 
 /* ---- output -------------------------------------------------------------- */
 
-const col = (s, w, right) => (right ? String(s).padStart(w) : String(s).padEnd(w));
+const col = (s: unknown, w: number, right: boolean): string =>
+  right ? String(s).padStart(w) : String(s).padEnd(w);
 
-function header(title) {
+function header(title: string): void {
   console.log(
-    `${title}: ` + ['tcp', 'unix', 'shm', 'shm/tcp', 'shm/unix']
-      .map((s, i) => col(s, i < 3 ? 8 : 10, false))
-      .join(' ') + ' '
+    `${title}: ` +
+      ['tcp', 'unix', 'shm', 'shm/tcp', 'shm/unix']
+        .map((s, i) => col(s, i < 3 ? 8 : 10, false))
+        .join(' ') +
+      ' '
   );
 }
 
-function row(load, a, b, c, ra, rb) {
+function row(
+  load: number,
+  a: number,
+  b: number,
+  c: number,
+  ra: number,
+  rb: number
+): void {
   console.log(
     '  ' +
       col(fmt(load), 8, false) +
       ' ' +
-      col(a.toFixed(2), 8, true) + 'M' +
+      col(a.toFixed(2), 8, true) +
+      'M' +
       ' ' +
-      col(b.toFixed(2), 8, true) + 'M' +
+      col(b.toFixed(2), 8, true) +
+      'M' +
       ' ' +
-      col(c.toFixed(2), 8, true) + 'M' +
+      col(c.toFixed(2), 8, true) +
+      'M' +
       ' ' +
-      col(ra.toFixed(2), 8, true) + 'x' +
+      col(ra.toFixed(2), 8, true) +
+      'x' +
       ' ' +
-      col(rb.toFixed(2), 9, true) + 'x'
+      col(rb.toFixed(2), 9, true) +
+      'x'
   );
 }
 
-function main() {
-  let sizes = process.argv.slice(2).map(Number).filter((x) => x > 0);
+function main(): void {
+  let sizes = process.argv
+    .slice(2)
+    .map(Number)
+    .filter((x) => x > 0);
   if (sizes.length === 0) sizes = [100000, 1000000, 10000000];
 
   const tcp = new Connection(CONN_TCP);
   const unix = new Connection(CONN_UNIX);
-  tcp.exec('SET client_min_messages = warning');  // keep the tables clean
+  tcp.exec('SET client_min_messages = warning'); // keep the tables clean
   unix.exec('SET client_min_messages = warning');
 
   // One SQL call bootstraps the worker; the shm path then uses only the ring.

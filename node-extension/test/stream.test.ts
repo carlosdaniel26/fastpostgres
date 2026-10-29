@@ -1,9 +1,7 @@
-'use strict';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 
-const { test } = require('node:test');
-const assert = require('node:assert');
-
-const { Connection, read } = require('..');
+import { Connection, read } from '../lib';
 
 const CONNINFO =
   process.env.NP_CONNINFO || 'host=/tmp dbname=postgres user=postgres';
@@ -17,12 +15,14 @@ test('streams batches through a cursor and dispatches handlers', () => {
     FROM generate_series(1, 5000) g
   `);
 
-  const batches = [];
-  const seenColumns = [];
+  const batches: number[] = [];
+  const seenColumns: string[] = [];
   let seen = 0;
 
   conn.exec('BEGIN');
-  conn.exec(`SELECT native_stream_open('stream_seg', 'SELECT * FROM stream_src')`);
+  conn.exec(
+    `SELECT native_stream_open('stream_seg', 'SELECT * FROM stream_src')`
+  );
   for (;;) {
     const rows = conn.exec(`SELECT native_stream_next('stream_seg', 2000)`);
     const n = Number(rows[0].native_stream_next);

@@ -31,7 +31,7 @@ gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 -f /src/pg-extension/t
 echo
 echo "--- node --test (Node client) ---"
 cd /src/node-extension
-gosu postgres node --test
+gosu postgres node --import tsx --test test/*.test.ts
 
 gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null
 SCRIPT

@@ -1,18 +1,15 @@
-'use strict';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 
-const { test } = require('node:test');
-const assert = require('node:assert');
-
-const { Connection, read } = require('..');
+import { Connection, read, type TextColumn } from '../lib';
 
 const CONNINFO =
   process.env.NP_CONNINFO || 'host=/tmp dbname=postgres user=postgres';
 
-function textAt(col, i) {
-  const { bytes, offsets } = col;
-  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    .subarray(offsets[i], offsets[i + 1])
-    .toString('utf8');
+function textAt(col: TextColumn, i: number): string {
+  return Buffer.from(
+    col.bytes.subarray(col.offsets[i], col.offsets[i + 1])
+  ).toString('utf8');
 }
 
 test('read() decodes a segment into aligned typed arrays', () => {
@@ -32,7 +29,13 @@ test('read() decodes a segment into aligned typed arrays', () => {
     ['i4', 'i8', 'f8', 'flag', 'name']
   );
 
-  const [i4, i8, f8, flag, name] = res.columns.map((c) => c.value);
+  const [i4, i8, f8, flag, name] = res.columns.map((c) => c.value) as [
+    Int32Array,
+    BigInt64Array,
+    Float64Array,
+    Uint8Array,
+    TextColumn,
+  ];
   assert.ok(i4 instanceof Int32Array);
   assert.ok(i8 instanceof BigInt64Array);
   assert.ok(f8 instanceof Float64Array);
@@ -70,11 +73,12 @@ test('read() handles every width (alignment check)', () => {
   assert.ok(columns[4].value instanceof Float64Array); // float8
   assert.ok(columns[5].value instanceof Float64Array); // numeric -> float8
   assert.ok(columns[6].value instanceof Uint8Array); // bool
-  assert.ok(columns[7].value.bytes instanceof Uint8Array); // char -> text
-  assert.strictEqual(columns[0].value[7], 8);
-  assert.strictEqual(columns[2].value[7], 8n);
-  assert.strictEqual(columns[3].value[7], 8);
-  assert.strictEqual(textAt(columns[7].value, 0).trim(), 'c1');
+  assert.ok((columns[7].value as TextColumn).bytes instanceof Uint8Array);
+
+  assert.strictEqual((columns[0].value as Int16Array)[7], 8);
+  assert.strictEqual((columns[2].value as BigInt64Array)[7], 8n);
+  assert.strictEqual((columns[3].value as Float32Array)[7], 8);
+  assert.strictEqual(textAt(columns[7].value as TextColumn, 0).trim(), 'c1');
 
   conn.close();
 });

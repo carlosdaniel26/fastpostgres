@@ -1,12 +1,4 @@
-/**
- * Node client for nativepostgress.
- *
- * `read()` is zero-copy by default: the typed arrays alias the mapped
- * `/dev/shm` segment, so they are only valid until that segment is rewritten
- * (e.g. the next `native_stream_next`). Use `{ copy: true }` to detach.
- */
-
-/** Wire kind (see np_shm.h). */
+/** Wire kinds (see np_shm.h). */
 export const enum Kind {
   Bool = 1,
   Int32 = 2,
@@ -48,6 +40,9 @@ export interface Segment {
   columns: Column[];
 }
 
+export type Row = Record<string, string | null>;
+export type PushRow = Record<string, unknown>;
+
 export type Handler = (field: Column, value: ColumnValue) => void;
 
 export interface ReadOptions {
@@ -59,12 +54,7 @@ export interface ReadOptions {
   };
 }
 
-/** A row from `Connection.exec`, keyed by column name. */
-export type Row = Record<string, string | null>;
-
-/** A libpq connection for the control channel. */
-export class Connection {
-  constructor(conninfo?: string);
+export interface ConnectionLike {
   /** Run a statement; returns row objects (nulls as `null`). */
   exec(sql: string): Row[];
   /** Stream rows with COPY FROM STDIN. */
@@ -72,26 +62,9 @@ export class Connection {
   close(): void;
 }
 
-/** View a segment as typed arrays (zero-copy unless `copy`). */
-export function read(name: string, options?: ReadOptions): Segment;
-
-/** Encode columns (JS typed arrays) into a segment. Returns the byte size. */
-export function writeSegment(name: string, columns: Column[]): number;
-
-/** Generate the benchmark's rows straight into a segment. Returns the byte size. */
-export function synthSegment(name: string, n: number): number;
-
-/** Generate the benchmark's COPY payload. */
-export function synthCopy(n: number): Buffer[];
-
-/**
- * Control channel over /dev/shm, serviced by a background worker — no socket
- * after `start()`. The ring is an SQL-execution endpoint; keep it 0600.
- */
-export class Ring {
-  constructor(seg: string);
+export interface RingLike {
   /** Start the worker (one SQL call on `conn`) and wait until it is ready. */
-  start(conn: Connection): void;
+  start(conn: ConnectionLike): void;
   /** Open a query; chunks land in `seg` (`/dev/shm/<seg>`). */
   open(seg: string, query: string): void;
   /** Fetch the next batch; returns the number of rows (0 = end of stream). */
@@ -103,5 +76,15 @@ export class Ring {
   /** Push mode: run `query`; the worker streams rows as the executor produces. */
   pushOpen(query: string): void;
   /** Consume rows one by one, each already a `{ column: value }` object. */
-  pushRows(handler: (row: Record<string, unknown>) => void): void;
+  pushRows(handler: (row: PushRow) => void): void;
+}
+
+/** Shape of the compiled N-API addon. */
+export interface NativeModule {
+  Connection: new (conninfo?: string) => ConnectionLike;
+  Ring: new (seg: string) => RingLike;
+  read(name: string, options?: ReadOptions): Segment;
+  writeSegment(name: string, columns: Column[]): number;
+  synthSegment(name: string, n: number): number;
+  synthCopy(n: number): Buffer[];
 }

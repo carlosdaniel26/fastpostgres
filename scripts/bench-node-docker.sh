@@ -30,7 +30,8 @@ gosu postgres pg_ctl -D "\$PGDATA" -l /tmp/pg.log \
 gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION nativepostgress;" >/dev/null
 
-gosu postgres node --max-old-space-size=8192 /src/benchmark/bench.js $SIZES
+cd /src/node-extension
+gosu postgres node --import tsx --max-old-space-size=8192 ../benchmark/bench.ts $SIZES
 
 gosu postgres pg_ctl -D "\$PGDATA" -w stop >/dev/null
 SCRIPT

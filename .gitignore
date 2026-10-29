@@ -1,4 +1,5 @@
 build/
+dist/
 third_party/
 *.o
 *.so
