@@ -9,7 +9,7 @@ third_party/
 .deps/
 node_modules/
 bench.log
-bench_chart.png
+bench_chart*.png
 *.tgz
 .commandcode/
 compile_commands.json
