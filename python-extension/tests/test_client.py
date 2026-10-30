@@ -207,5 +207,36 @@ class DbapiTest(unittest.TestCase):
             other.close()
 
 
+    def test_stream_columnar_zero_copy(self):
+        cur = self.conn.cursor()
+        names = None
+        seen = []
+        total = 0
+        for batch in cur.stream(
+            "SELECT g::int AS id, ('x' || g)::text AS s FROM generate_series(1, 250000) g",
+            size=100000,
+        ):
+            self.assertEqual(len(batch.columns), 2)
+            if names is None:
+                names = [c.name for c in batch.columns]
+            ids = cast(batch.columns[0].data, "i")
+            off = cast(batch.columns[1].data[: 2 * 4], "i")
+            seen.append((ids[0], bytes(batch.columns[1].bytes[off[0] : off[1]])))
+            total += batch.row_count
+
+        self.assertEqual(names, ["id", "s"])
+        self.assertEqual(total, 250000)
+        self.assertEqual(seen[0], (1, b"x1"))
+        self.assertEqual(seen[-1], (200001, b"x200001"))
+
+    def test_stream_needs_the_extension(self):
+        conn = self.dbapi.connect(CONNINFO, shm=False)
+        try:
+            with self.assertRaises(self.dbapi.NotSupportedError):
+                list(conn.cursor().stream("SELECT 1"))
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -446,6 +446,47 @@ class Cursor:
         self.rowcount = total
         return self
 
+    def stream(self, operation: str, parameters=None, size=_SHM_BATCH):
+        """Yield columnar batches for a read-only SELECT, zero-copy.
+
+        Each batch is a ``Segment``: ``row_count`` plus ``columns``, whose
+        ``data``/``bytes``/``nulls`` are memoryviews aliasing the /dev/shm
+        segment. Those views are only valid until the next iteration — copy (or
+        reduce into numpy) whatever you keep. This is the fast path: no Python
+        row objects, so it runs at transport speed rather than decode speed.
+
+        The ring is held for the stream's lifetime; exhausting or closing the
+        generator returns it. Requires the extension.
+        """
+        sql = operation if parameters is None else _inline(operation, parameters)
+        return self._stream(sql, size)
+
+    def _stream(self, sql, size):
+        if not self.connection._shm or not _is_read_only(sql):
+            raise NotSupportedError("stream() serves read-only SELECTs over /dev/shm")
+        info = _ring_acquire(self.connection._conn)
+        if info is None:
+            raise NotSupportedError("stream() needs the fastpostgres extension (ring unavailable)")
+        ring, seg = info
+        yielded = False
+        try:
+            ring.open(seg, sql)
+            while True:
+                n = ring.next(size)
+                batch = _client.read(seg)
+                if n == 0 and yielded:
+                    break
+                yielded = True
+                yield batch
+                if n == 0:
+                    break
+        finally:
+            try:
+                ring.close()
+            except Exception:
+                pass
+            _ring_release(info)
+
     def fetchone(self):
         if self._pos >= len(self._rows):
             return None
