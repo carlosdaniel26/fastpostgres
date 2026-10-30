@@ -7,10 +7,9 @@ third_party/
 *.a
 *.bc
 .deps/
-node_modules/
-bench.log
-bench_chart*.png
-*.tgz
 .commandcode/
 compile_commands.json
 __pycache__/
+*.pyc
+.venv/
+*.egg-info/

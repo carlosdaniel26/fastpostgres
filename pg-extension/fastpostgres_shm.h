@@ -1,10 +1,10 @@
 /* fastpostgres_shm.h — shared-memory result-segment format, agreed between the
- * PostgreSQL extension (writer) and the Node client (reader).
+ * PostgreSQL extension (writer) and the client (reader).
  *
  * Segment layout:
  *   [ FastpostgresShmHeader (64 bytes) ][ FPCOLUMN payload (header + columns) ]
  *
- * This is the single source of truth for the format: the extension, the addon
+ * This is the single source of truth for the format: the extension, the client
  * and the benchmark generator all include this one header, and it carries the
  * codec helpers so the FPCOLUMN wire format lives in one place.
  *

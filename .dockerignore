@@ -1,7 +1,6 @@
 .git
 .commandcode
 third_party
-**/node_modules
 **/build
 **/dist
 *.png
