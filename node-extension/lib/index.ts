@@ -1,5 +1,5 @@
 /**
- * Node client for nativepostgress.
+ * Node client for fastpostgres.
  *
  * `read()` is zero-copy by default: the typed arrays alias the mapped
  * `/dev/shm` segment, so they are only valid until that segment is rewritten —
@@ -19,12 +19,12 @@ function addonPath(): string {
   ];
   for (const base of bases) {
     for (const config of ['Release', 'Debug']) {
-      const candidate = join(base, config, 'nativepostgress.node');
+      const candidate = join(base, config, 'fastpostgres.node');
       if (existsSync(candidate)) return candidate;
     }
   }
   throw new Error(
-    'nativepostgress: native addon is not built — run `npm run build` (needs node-gyp)'
+    'fastpostgres: native addon is not built — run `npm run build` (needs node-gyp)'
   );
 }
 

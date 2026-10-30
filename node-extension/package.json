@@ -1,8 +1,8 @@
 {
-  "name": "nativepostgress",
+  "name": "fastpostgres",
   "version": "1.0.0",
   "private": true,
-  "description": "Node client for nativepostgress: columnar query results over POSIX shared memory, delivered as zero-copy JS typed arrays",
+  "description": "Node client for fastpostgres: columnar query results over POSIX shared memory, delivered as zero-copy JS typed arrays",
   "keywords": [
     "postgresql",
     "postgres",

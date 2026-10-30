@@ -1,4 +1,4 @@
-/** Wire kinds (see np_shm.h), for use in `handlers.onKind`. */
+/** Wire kinds (see fastpostgres_shm.h), for use in `handlers.onKind`. */
 export enum Kind {
   Bool = 1,
   Int32 = 2,
