@@ -283,7 +283,13 @@ PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg)
         }
 
         rc = sem_timedwait(&r->req_ready, &ts);
-        if (rc != 0) continue; /* timeout, or EINTR: re-check got_sigterm */
+        if (rc != 0)
+        {
+            /* timeout or EINTR: re-check SIGTERM, and whether the client that
+             * owns this ring is gone (then there is nobody to serve) */
+            if (r->client_pid != 0 && kill((pid_t)r->client_pid, 0) != 0 && errno == ESRCH) break;
+            continue;
+        }
 
         seq = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
         if (seq == handled) continue;
@@ -306,6 +312,7 @@ PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg)
     }
 
     abort_txn();
+    __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
     munmap(r, rsize);
     proc_exit(0);
 }

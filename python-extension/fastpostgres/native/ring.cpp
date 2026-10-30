@@ -83,6 +83,7 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     self->map  = map;
     self->size = FASTPOSTGRES_RING_BYTES;
     memcpy(self->data, seg, std::strlen(seg) + 1);
+    r->client_pid = (uint32_t)getpid(); /* the worker exits once this process is gone */
     return 0;
 }
 

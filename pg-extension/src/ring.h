@@ -54,6 +54,7 @@ typedef struct FastpostgresRing {
     char     magic[8];     /* "FPRING01" */
     uint32_t version;
     uint32_t worker_ready; /* release-store once the worker has mapped it */
+    uint32_t client_pid;   /* owning client: the worker exits once it is gone */
     uint64_t req_seq;      /* bumped by the client per request */
     uint64_t resp_seq;     /* bumped by the worker per response */
     sem_t    req_ready;    /* client -> worker */
