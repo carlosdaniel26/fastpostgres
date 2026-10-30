@@ -29,8 +29,8 @@ using libpq.
 3. **Server.** The worker opens an SPI cursor, fetches a batch, encodes it into
    a second segment as `FPCOLUMN`, publishes it (payload size, then a seqlock
    bump), and replies with the row count.
-4. **Client.** `read()` maps the segment once and returns memoryviews over it;
-   `read_rows()` decodes the same chunk into Python tuples.
+4. **Client.** The segment is mapped once and read in place: either the columnar
+   views are consumed as-is (zero-copy), or the chunk is decoded into tuples.
 
 Everything that is not a read-only `SELECT` — DML, DDL, `SET`, multi-statement
 SQL — goes over libpq.
@@ -50,21 +50,27 @@ client needs no type table; fixed-width data is 8-byte aligned, which is what
 makes zero-copy typed views possible. The header holds the reader *and* the
 writer, so the layout has one implementation.
 
-## Client API
+## Usage
+
+Point an existing SQLAlchemy app at it — no model or query changes:
 
 ```python
-import fastpostgres as fp
+import fastpostgres.dialect  # registers the postgresql+fastpostgres dialect
+from sqlalchemy import create_engine
 
-seg  = fp.read("seg_name")        # zero-copy: seg.columns[i].data is a memoryview
-rows = fp.read_rows("seg_name")   # typed tuples, decoded natively
+engine = create_engine("postgresql+fastpostgres://user@/app?host=/tmp")
 ```
 
-`fastpostgres.dbapi` is a PEP 249 driver: read-only `SELECT`s take the ring,
-everything else libpq, falling back to libpq when the ring is unavailable.
-`Cursor.stream()` yields zero-copy columnar batches.
+Or use the driver directly, like any PEP 249 module:
 
-`postgresql+fastpostgres://` is a SQLAlchemy dialect, so an existing app changes
-only its URL.
+```python
+import fastpostgres.dbapi as dbapi
+
+conn = dbapi.connect("host=/tmp dbname=app user=app")
+cur = conn.cursor()
+cur.execute("select id, name from products")
+rows = cur.fetchall()
+```
 
 ## Build and run
 
@@ -78,20 +84,13 @@ scripts/run_bench.py         # benchmarks + charts
 
 ## Measured
 
-8-core container, PostgreSQL 18.6, `/dev/shm` 3 GB:
+![SQLAlchemy Core reads: fast-postgres vs psycopg2](assets/core-read.png)
 
-| workload | socket | fastpostgres |
-| --- | --- | --- |
-| read, transport (rows/s) | ~1.2 M | ~7.5 M |
-| write, transport (rows/s) | ~1.0 M | ~3.4 M |
-| rows through the DB-API, 10 M (rows/s) | 2.5 M | 3.7 M |
-| zero-copy stream, 10 M (rows/s) | — | 9.6 M |
-| SQLAlchemy Core read | baseline | +30–60% |
-| SQLAlchemy ORM read | baseline | ~0–30% |
-
-The transport is roughly 6× the socket. Materializing rows into Python objects
-is allocation-bound and consumes most of that; the ORM's own hydration consumes
-most of the rest.
+8-core container, PostgreSQL 18.6, `/dev/shm` 3 GB. At the transport layer reads
+run ~6× the socket transports (≈7.5 M vs ≈1.2 M rows/s) and writes ~2.5×. Most
+of that is given back once rows become Python objects: the Core path above lands
+17–34% ahead of psycopg2, the ORM path 5–13%, because materialising and
+hydrating objects is allocation-bound. Regenerate with `scripts/run_bench.py`.
 
 ## Limitations
 
