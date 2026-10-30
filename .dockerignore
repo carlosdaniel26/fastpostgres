@@ -1,5 +1,6 @@
 .git
 .commandcode
+data
 third_party
 **/build
 **/dist
