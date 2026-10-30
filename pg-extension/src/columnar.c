@@ -153,6 +153,8 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
                 if (isnull)
                 {
                     nulls[r >> 3] |= (char)(1 << (r & 7));
+                    memset(p, 0, (size_t)width); /* nulls keep their slot, so data_len == nrows*width */
+                    p += width;
                     continue;
                 }
                 switch (kind)
