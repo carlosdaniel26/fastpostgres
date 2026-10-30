@@ -24,6 +24,7 @@
 #include "fastpostgres_shm.h"
 #include "ring.h"
 #include "shm_map.h"
+#include "synth.hpp"
 
 /* ------------------------------------------------------------------ utils */
 
@@ -232,6 +233,25 @@ static int copy_put(PGconn *pg, const char *buf, size_t n)
     return 0;
 }
 
+/* Send one bytes-like item; returns 0, or -1 with a Python error set. */
+static int copy_put_object(PGconn *pg, PyObject *item)
+{
+    Py_buffer view;
+    if (PyObject_GetBuffer(item, &view, PyBUF_SIMPLE) != 0)
+    {
+        PyErr_SetString(PyExc_TypeError, "copy_from: data must be bytes-like, or a sequence of them");
+        return -1;
+    }
+    int rc = copy_put(pg, (const char *)view.buf, (size_t)view.len);
+    PyBuffer_Release(&view);
+    if (rc != 0)
+    {
+        PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(pg));
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
 {
     const char *sql;
@@ -252,29 +272,30 @@ static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
     }
     PQclear(res);
 
-    const char *buf = nullptr;
-    Py_ssize_t len = 0;
-    Py_buffer view;
-    bool have_view = false;
-    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) == 0)
+    int rc = 0;
+    if (PyList_Check(data) || PyTuple_Check(data))
     {
-        have_view = true;
-        buf = (const char *)view.buf;
-        len = view.len;
+        Py_ssize_t count = PySequence_Size(data);
+        for (Py_ssize_t i = 0; i < count && rc == 0; i++)
+        {
+            PyObject *item = PySequence_GetItem(data, i);
+            if (!item)
+            {
+                rc = -1;
+                break;
+            }
+            rc = copy_put_object(self->pg, item);
+            Py_DECREF(item);
+        }
     }
     else
     {
-        PyErr_Clear();
-        PyErr_SetString(PyExc_TypeError, "copy_from(sql, data): data must be bytes-like");
-        return nullptr;
+        rc = copy_put_object(self->pg, data);
     }
 
-    int rc = copy_put(self->pg, buf, (size_t)len);
-    if (have_view) PyBuffer_Release(&view);
     if (rc != 0)
     {
-        while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res);
-        PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(self->pg));
+        while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res); /* resync */
         return nullptr;
     }
 
@@ -787,5 +808,6 @@ PyMODINIT_FUNC PyInit__client(void)
             return nullptr;
         }
     }
+    fp_register_synth(m);
     return m;
 }

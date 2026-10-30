@@ -6,9 +6,28 @@ rewritten by the next streamed chunk.
 """
 from enum import IntEnum
 
-from ._client import Column, Connection, Result, Ring, Segment, read
+from ._client import (
+    Column,
+    Connection,
+    Result,
+    Ring,
+    Segment,
+    read,
+    synth_copy,
+    synth_segment,
+)
 
-__all__ = ["Column", "Connection", "Kind", "Result", "Ring", "Segment", "read"]
+__all__ = [
+    "Column",
+    "Connection",
+    "Kind",
+    "Result",
+    "Ring",
+    "Segment",
+    "read",
+    "synth_copy",
+    "synth_segment",
+]
 
 
 class Kind(IntEnum):

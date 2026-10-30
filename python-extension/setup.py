@@ -27,7 +27,10 @@ setup(
     ext_modules=[
         Extension(
             "fastpostgres._client",
-            sources=["src/fastpostgres/_client.cpp"],
+            sources=[
+                "src/fastpostgres/_client.cpp",
+                "src/fastpostgres/synth.cpp",
+            ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,
             libraries=["pq"],
