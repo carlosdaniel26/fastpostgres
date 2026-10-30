@@ -14,8 +14,8 @@ COPY pg-extension /src/pg-extension
 COPY python-extension /src/python-extension
 COPY benchmark /src/benchmark
 COPY demo /src/demo
-COPY scripts/with-db.sh scripts/bench-env.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/with-db.sh /usr/local/bin/bench-env.sh
+COPY scripts/with-db.sh /usr/local/bin/with-db.sh
+RUN chmod +x /usr/local/bin/with-db.sh
 
 WORKDIR /src/pg-extension
 RUN make clean && make && make install

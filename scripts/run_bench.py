@@ -7,11 +7,12 @@ Builds the container, runs both benchmarks, then writes four images:
     sqlalchemy_chart-orm.png / sqlalchemy_chart-core.png   psycopg2 / fastpostgres
 
 Usage:
-    scripts/run_bench.py [nrows ...]        (default: 100000 1000000 10000000)
-    scripts/run_bench.py --transport-log bench.log --drivers-log bench-sqlalchemy.log
+    scripts/run_bench.py [nrows ...]        (default: each benchmark's own)
+    scripts/run_bench.py --log bench.log    (plot an existing log)
 
-`--transport-log` / `--drivers-log` skip the corresponding run and plot an
-existing log instead. The 10M default takes a few minutes.
+Both benchmarks run in one container, so their logs share one environment
+block; `--log` skips the run and plots a saved log instead. The 10M default
+takes a few minutes.
 """
 import argparse
 import re
@@ -234,22 +235,18 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("sizes", nargs="*", help="row counts (default: 100000 1000000 10000000)")
-    ap.add_argument("--transport-log", help="plot this log instead of running the transport benchmark")
-    ap.add_argument("--drivers-log", help="plot this log instead of running the driver benchmark")
+    ap.add_argument("sizes", nargs="*", help="row counts (default: each benchmark's own)")
+    ap.add_argument("--log", help="plot this log instead of running the benchmarks")
     ap.add_argument("--scale", choices=("auto", "linear", "log"), default="auto")
     args = ap.parse_args()
 
-    sizes = args.sizes or ["100000", "1000000", "10000000"]
-
-    transport = Path(args.transport_log).read_text() if args.transport_log else run(
-        [str(ROOT / "scripts/bench-docker.sh"), *sizes])
-    drivers = Path(args.drivers_log).read_text() if args.drivers_log else run(
-        [str(ROOT / "scripts/bench-sqlalchemy-docker.sh"), *sizes])
+    text = Path(args.log).read_text() if args.log else run(
+        [str(ROOT / "scripts/dev.sh"), "bench", *args.sizes])
 
     print()
-    plot_transport(transport, parse_env_text(transport), args.scale)
-    plot_drivers(drivers, parse_env_text(drivers), args.scale)
+    env = parse_env_text(text)
+    plot_transport(text, env, args.scale)
+    plot_drivers(text, env, args.scale)
 
 
 def parse_env_text(text):
