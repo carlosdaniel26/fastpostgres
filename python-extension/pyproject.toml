@@ -13,3 +13,6 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.entry-points."sqlalchemy.dialects"]
+"postgresql.fastpostgres" = "fastpostgres.dialect:PGDialect_fastpostgres"

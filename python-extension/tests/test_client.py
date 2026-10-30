@@ -118,5 +118,44 @@ class RingReadTest(unittest.TestCase):
         self.assertEqual(first, {"id": 1, "big": 2, "f": 1.5, "b": (0, 1), "name": b"row1"})
 
 
+class DbapiTest(unittest.TestCase):
+    def setUp(self):
+        from fastpostgres import dbapi
+
+        self.dbapi = dbapi
+        self.conn = dbapi.connect(CONNINFO)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_parameter_inlining(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT %s::int + %s::int AS total", (2, 3))
+        self.assertEqual(cur.fetchone(), (5,))
+        self.assertEqual(cur.description[0][0], "total")
+        self.assertEqual(cur.rowcount, 1)
+
+    def test_fetchall_and_iter(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT g::int FROM generate_series(1, 3) g")
+        self.assertEqual(cur.fetchall(), [(1,), (2,), (3,)])
+        cur.execute("SELECT g::int FROM generate_series(1, 2) g")
+        self.assertEqual(list(cur), [(1,), (2,)])
+
+    def test_literal_quoting_is_safe(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT %s::text AS s", ("it's; DROP TABLE x --",))
+        self.assertEqual(cur.fetchone(), ("it's; DROP TABLE x --",))
+
+    def test_executemany(self):
+        cur = self.conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS fp_dbapi_t; CREATE TABLE fp_dbapi_t (n int)")
+        cur.executemany("INSERT INTO fp_dbapi_t VALUES (%s)", [(1,), (2,), (3,)])
+        self.assertEqual(cur.rowcount, 3)
+        cur.execute("SELECT count(*)::int FROM fp_dbapi_t")
+        self.assertEqual(cur.fetchone(), (3,))
+        cur.execute("DROP TABLE fp_dbapi_t")
+
+
 if __name__ == "__main__":
     unittest.main()
