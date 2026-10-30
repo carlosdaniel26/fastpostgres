@@ -67,10 +67,10 @@ def setup_table(conn, n):
 
 
 def read_text(conn):
-    """Read rows over libpq; the cost is libpq's text decode plus the row dicts."""
+    """Read rows over libpq; the cost is libpq's text decode plus the row tuples."""
     t0 = now()
     res = conn.exec(QUERY)
-    nbytes = sum(len(r["name"] or "") for r in res.rows)
+    nbytes = sum(len(r[4] or "") for r in res.rows)  # column 4 is `name`
     ms = (now() - t0) * 1000
     if nbytes == 0:
         raise RuntimeError("read: empty result")

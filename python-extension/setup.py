@@ -29,6 +29,7 @@ setup(
             "fastpostgres._client",
             sources=[
                 "src/fastpostgres/_client.cpp",
+                "src/fastpostgres/codec.cpp",
                 "src/fastpostgres/synth.cpp",
             ],
             include_dirs=include_dirs,

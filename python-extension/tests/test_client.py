@@ -38,9 +38,23 @@ class ConnectionTest(unittest.TestCase):
     def test_exec_returns_rows_and_metadata(self):
         res = self.conn.exec("SELECT g::int4 AS n, ('x' || g)::text AS s FROM generate_series(1, 3) g")
         self.assertEqual(res.fields, ["n", "s"])
-        self.assertEqual(res.rows[0], {"n": "1", "s": "x1"})
-        self.assertEqual(res.rows[-1], {"n": "3", "s": "x3"})
+        self.assertEqual(res.field_types, [23, 25])
+        self.assertEqual(res.rows[0], (1, "x1"))
+        self.assertEqual(res.rows[-1], (3, "x3"))
         self.assertEqual(res.row_count, 3)  # PQcmdTuples: rows returned by the SELECT
+
+    def test_exec_types(self):
+        res = self.conn.exec(
+            "SELECT true AS b, 42::int8 AS big, 1.5::float8 AS f, 2.5::numeric AS n, "
+            "'x'::text AS s, '2026-10-30 12:00:00+00'::timestamptz AS ts"
+        )
+        b, big, f, n, s, ts = res.rows[0]
+        self.assertIs(b, True)
+        self.assertEqual(big, 42)
+        self.assertAlmostEqual(f, 1.5)
+        self.assertEqual(str(n), "2.5")
+        self.assertEqual(s, "x")
+        self.assertEqual((ts.year, ts.month, ts.day, ts.hour), (2026, 10, 30, 12))
 
     def test_exec_command_row_count(self):
         self.conn.exec("DROP TABLE IF EXISTS fp_py_t; CREATE TABLE fp_py_t (id int)")
@@ -50,7 +64,7 @@ class ConnectionTest(unittest.TestCase):
 
     def test_exec_null(self):
         res = self.conn.exec("SELECT NULL::int4 AS n")
-        self.assertIsNone(res.rows[0]["n"])
+        self.assertEqual(res.rows, [(None,)])
 
 
 class RingReadTest(unittest.TestCase):

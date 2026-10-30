@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "codec.hpp"
 #include "fastpostgres_shm.h"
 #include "ring.h"
 #include "shm_map.h"
@@ -78,14 +79,33 @@ static PyMemberDef Result_members[] = {
 
 static PyTypeObject ResultType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
+static PyObject *row_tuple(PGresult *res, int r, int ncols)
+{
+    PyObject *row = PyTuple_New(ncols);
+    if (!row) return nullptr;
+    for (int f = 0; f < ncols; f++)
+    {
+        PyObject *v = fp_decode_value(res, r, f);
+        if (!v)
+        {
+            Py_DECREF(row);
+            return nullptr;
+        }
+        PyTuple_SET_ITEM(row, f, v);
+    }
+    return row;
+}
+
 static PyObject *result_from_pg(PGresult *res)
 {
-    int nrows = PQntuples(res);
-    int ncols = PQnfields(res);
+    int         nrows = PQntuples(res);
+    int         ncols = PQnfields(res);
+    const char *tuples = PQcmdTuples(res);
+    long        row_count = (tuples && tuples[0]) ? strtol(tuples, nullptr, 10) : 0;
+    PyObject   *fields = PyList_New(ncols);
+    PyObject   *types = PyList_New(ncols);
+    PyObject   *rows = PyList_New(nrows);
 
-    PyObject *fields = PyList_New(ncols);
-    PyObject *types = PyList_New(ncols);
-    PyObject *rows = PyList_New(nrows);
     if (!fields || !types || !rows)
     {
         Py_XDECREF(fields);
@@ -102,7 +122,7 @@ static PyObject *result_from_pg(PGresult *res)
 
     for (int r = 0; r < nrows; r++)
     {
-        PyObject *row = PyDict_New();
+        PyObject *row = row_tuple(res, r, ncols);
         if (!row)
         {
             Py_DECREF(fields);
@@ -110,26 +130,8 @@ static PyObject *result_from_pg(PGresult *res)
             Py_DECREF(rows);
             return nullptr;
         }
-        for (int f = 0; f < ncols; f++)
-        {
-            PyObject *v = PQgetisnull(res, r, f) ? Py_NewRef(Py_None)
-                                                 : PyUnicode_FromString(PQgetvalue(res, r, f));
-            if (PyDict_SetItemString(row, PQfname(res, f), v) != 0)
-            {
-                Py_DECREF(v);
-                Py_DECREF(row);
-                Py_DECREF(fields);
-                Py_DECREF(types);
-                Py_DECREF(rows);
-                return nullptr;
-            }
-            Py_DECREF(v);
-        }
         PyList_SET_ITEM(rows, r, row);
     }
-
-    const char *tuples = PQcmdTuples(res);
-    long row_count = (tuples && tuples[0]) ? strtol(tuples, nullptr, 10) : 0;
 
     ResultObject *result = PyObject_New(ResultObject, &ResultType);
     if (!result)
@@ -767,6 +769,7 @@ static bool init_type(PyTypeObject *type, const char *name, Py_ssize_t basicsize
 
 PyMODINIT_FUNC PyInit__client(void)
 {
+    if (!fp_codec_init()) return nullptr;
     if (!init_type(&ResultType, "fastpostgres.Result", sizeof(ResultObject), (destructor)Result_dealloc,
                    nullptr, Result_members))
         return nullptr;
