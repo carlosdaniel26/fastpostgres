@@ -157,5 +157,38 @@ class DbapiTest(unittest.TestCase):
         cur.execute("DROP TABLE fp_dbapi_t")
 
 
+    def test_shm_select_path_batches(self):
+        # 120000 rows crosses the 100000-row shm batch boundary
+        cur = self.conn.cursor()
+        cur.execute("SELECT g::int AS id, ('x' || g)::text AS s FROM generate_series(1, 120000) g")
+        rows = cur.fetchall()
+        self.assertEqual(len(rows), 120000)
+        self.assertEqual(rows[0], (1, "x1"))
+        self.assertEqual(rows[-1], (120000, "x120000"))
+        self.assertGreater(self.conn.shm_reads, 0)
+
+    def test_shm_types(self):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT NULL::int4 AS n, 1.5::float8 AS f, (2 % 2 = 0)::bool AS b, "
+            "'2026-10-30 12:00:00+00'::timestamptz AS ts"
+        )
+        n, f, b, ts = cur.fetchone()
+        self.assertIsNone(n)
+        self.assertAlmostEqual(f, 1.5)
+        self.assertIs(b, True)
+        self.assertEqual((ts.year, ts.month, ts.day, ts.hour), (2026, 10, 30, 12))
+        self.assertGreater(self.conn.shm_reads, 0)
+
+    def test_dml_stays_on_libpq(self):
+        cur = self.conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS fp_shm_t; CREATE TABLE fp_shm_t (n int)")
+        before = self.conn.shm_reads
+        cur.execute("INSERT INTO fp_shm_t VALUES (%s)", (1,))
+        self.assertEqual(cur.rowcount, 1)
+        self.assertEqual(self.conn.shm_reads, before)
+        cur.execute("DROP TABLE fp_shm_t")
+
+
 if __name__ == "__main__":
     unittest.main()

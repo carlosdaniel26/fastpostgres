@@ -210,3 +210,77 @@ PyObject *fp_decode_value(PGresult *res, int row, int col)
             return PyUnicode_FromString(s);
     }
 }
+
+PyObject *fp_decode_column(const FastpostgresColumn *c, uint64_t row)
+{
+    if (fastpostgres_col_isnull(c, row)) Py_RETURN_NONE;
+
+    switch (c->kind)
+    {
+        case FASTPOSTGRES_KIND_BOOL:
+            return PyBool_FromLong(((const uint8_t *)c->data)[row] != 0);
+        case FASTPOSTGRES_KIND_INT16: {
+            int16_t v;
+            memcpy(&v, c->data + row * 2, 2);
+            return PyLong_FromLong(v);
+        }
+        case FASTPOSTGRES_KIND_INT32: {
+            int32_t v;
+            memcpy(&v, c->data + row * 4, 4);
+            return PyLong_FromLong(v);
+        }
+        case FASTPOSTGRES_KIND_INT64: {
+            int64_t v;
+            memcpy(&v, c->data + row * 8, 8);
+            return PyLong_FromLongLong(v);
+        }
+        case FASTPOSTGRES_KIND_FLOAT4: {
+            float v;
+            memcpy(&v, c->data + row * 4, 4);
+            return PyFloat_FromDouble((double)v);
+        }
+        case FASTPOSTGRES_KIND_FLOAT8: {
+            double v;
+            memcpy(&v, c->data + row * 8, 8);
+            return PyFloat_FromDouble(v);
+        }
+        default: { /* text: int32 offset table, then the raw bytes */
+            const int32_t *off = (const int32_t *)c->data;
+            const char    *base = (const char *)c->bytes;
+            int32_t        s0 = off[row];
+            int32_t        s1 = off[row + 1];
+            const char    *s = base + s0;
+            Py_ssize_t     len = (Py_ssize_t)(s1 - s0);
+
+            switch (c->pgtype)
+            {
+                case OID_DATE:
+                case OID_TIME:
+                case OID_TIMESTAMP:
+                case OID_TIMESTAMPTZ:
+                case OID_BYTEA: {
+                    /* the parsers need a NUL-terminated string */
+                    char      buf[96];
+                    Py_ssize_t n = len < (Py_ssize_t)sizeof(buf) - 1 ? len : (Py_ssize_t)sizeof(buf) - 1;
+                    memcpy(buf, s, (size_t)n);
+                    buf[n] = 0;
+                    switch (c->pgtype)
+                    {
+                        case OID_DATE:
+                            return parse_datetime(buf, 0, 0);
+                        case OID_TIME:
+                            return parse_time(buf);
+                        case OID_TIMESTAMP:
+                            return parse_datetime(buf, 1, 0);
+                        case OID_TIMESTAMPTZ:
+                            return parse_datetime(buf, 1, 1);
+                        default:
+                            return bytes_from_bytea(buf);
+                    }
+                }
+                default:
+                    return PyUnicode_FromStringAndSize(s, len);
+            }
+        }
+    }
+}

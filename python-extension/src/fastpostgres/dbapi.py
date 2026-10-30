@@ -14,6 +14,7 @@ shared-memory ring executes text and has no bind step (a small scanner leaves
 """
 import datetime
 import decimal
+import os
 import re
 from typing import Any, Optional, Sequence
 
@@ -245,11 +246,43 @@ def _inline(sql: str, params: Sequence[Any]) -> str:
 
 # ---- Connection / Cursor --------------------------------------------------
 
+_SHM_BATCH = 100000
+_READ_RE = re.compile(r"^(select|values|table)\b", re.I | re.S)
+
+
+def _is_read_only(sql: str) -> bool:
+    """True for statements the ring's read-only cursor can serve."""
+    s = sql.strip()
+    if s.endswith(";"):
+        s = s[:-1]
+    if ";" in s:  # more than one statement
+        return False
+    if _READ_RE.match(s) or s.startswith("("):
+        return True
+    if re.match(r"^with\b", s, re.I | re.S):
+        return not re.search(r"\b(insert|update|delete|merge)\b", s, re.I)
+    return False
+
+
+class _Result:
+    __slots__ = ("fields", "field_types", "rows", "row_count")
+
+    def __init__(self, fields, field_types, rows, row_count):
+        self.fields = fields
+        self.field_types = field_types
+        self.rows = rows
+        self.row_count = row_count
+
 
 class Connection:
-    """A DB-API connection over one libpq control channel (autocommit)."""
+    """A DB-API connection over one libpq control channel (autocommit).
 
-    def __init__(self, conninfo: str = "", **kwargs):
+    Read-only SELECTs are served by the /dev/shm ring; everything else (DML,
+    DDL, SET, ...) takes libpq. If the extension is absent the ring fails to
+    start and every statement stays on libpq.
+    """
+
+    def __init__(self, conninfo: str = "", shm: bool = True, **kwargs):
         if not conninfo and kwargs:
             conninfo = " ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
         try:
@@ -257,6 +290,46 @@ class Connection:
         except Exception as exc:  # pragma: no cover - exercised via connect()
             raise _translate(exc) from exc
         self._closed = False
+        self._shm = shm
+        self._ring = None
+        name = f"fp_dbapi_{os.getpid()}_{id(self) & 0xFFFFF:x}"
+        self._ring_name = name
+        self._seg = name + "_seg"
+        self.shm_reads = 0
+
+    def _ring_handle(self):
+        if self._ring is None and self._shm:
+            try:
+                ring = _client.Ring(self._ring_name)
+                ring.start(self._conn)
+                self._ring = ring
+            except Exception:
+                self._shm = False  # no extension / no ring: stay on libpq
+        return self._ring
+
+    def _shm_read(self, sql):
+        ring = self._ring_handle()
+        if ring is None:
+            return None
+        try:
+            fields = field_types = None
+            rows = []
+            ring.open(self._seg, sql)
+            try:
+                while True:
+                    n = ring.next(_SHM_BATCH)
+                    chunk = _client.read_rows(self._seg)
+                    if fields is None:
+                        fields, field_types = chunk.fields, chunk.field_types
+                    rows.extend(chunk.rows)
+                    if n == 0:
+                        break
+            finally:
+                ring.close()
+        except Exception:
+            return None  # re-run on libpq so the caller sees the real error
+        self.shm_reads += 1
+        return _Result(fields or [], field_types or [], rows, len(rows))
 
     def cursor(self):
         return Cursor(self)
@@ -270,6 +343,12 @@ class Connection:
 
     def close(self):
         if not self._closed:
+            if self._ring is not None:
+                try:
+                    self._ring.stop()
+                except Exception:
+                    pass
+                self._ring = None
             self._conn.close()
             self._closed = True
 
@@ -297,10 +376,16 @@ class Cursor:
 
     def execute(self, operation: str, parameters=None):
         sql = operation if parameters is None else _inline(operation, parameters)
-        try:
-            result = self.connection._conn.exec(sql)
-        except Exception as exc:
-            raise _translate(exc) from exc
+
+        result = None
+        if self.connection._shm and _is_read_only(sql):
+            result = self.connection._shm_read(sql)
+        if result is None:
+            try:
+                result = self.connection._conn.exec(sql)
+            except Exception as exc:
+                raise _translate(exc) from exc
+
         self.description = [(name, oid, None, None, None, None, None) for name, oid in zip(result.fields, result.field_types)]
         self._rows = result.rows
         self.rowcount = result.row_count  # rows returned (SELECT) or affected (DML)

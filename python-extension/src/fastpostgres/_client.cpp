@@ -504,8 +504,108 @@ static PyObject *module_read(PyObject *, PyObject *args)
     return (PyObject *)segment;
 }
 
-/* -------------------------------------------------------------- Ring type */
+/* Materialize a columnar chunk as typed row tuples (the DB-API fast path). */
+static PyObject *module_read_rows(PyObject *, PyObject *args)
+{
+    const char *name;
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
 
+    std::string path = "/" + std::string(name);
+    size_t      size = 0;
+    void       *map = read_map_get(path.c_str(), name, &size);
+    if (map == nullptr)
+    {
+        PyErr_SetString(PyExc_OSError, "cannot map /dev/shm segment");
+        return nullptr;
+    }
+
+    uint64_t payload_len = 0;
+    if (!fastpostgres_shm_validate(map, size, &payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres segment");
+        return nullptr;
+    }
+
+    const uint8_t     *payload = (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+    FastpostgresReader rd;
+    if (!fastpostgres_reader_init(&rd, payload, payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        return nullptr;
+    }
+
+    std::vector<FastpostgresColumn> cols(rd.ncols);
+    uint32_t                        got = 0;
+    for (uint32_t c = 0; c < rd.ncols; c++)
+    {
+        if (!fastpostgres_reader_next(&rd, &cols[c])) break;
+        got++;
+    }
+    if (got != rd.ncols)
+    {
+        PyErr_SetString(PyExc_ValueError, "truncated columnar payload");
+        return nullptr;
+    }
+
+    PyObject *fields = PyList_New(rd.ncols);
+    PyObject *types = PyList_New(rd.ncols);
+    PyObject *rows = PyList_New((Py_ssize_t)rd.nrows);
+    if (!fields || !types || !rows)
+    {
+        Py_XDECREF(fields);
+        Py_XDECREF(types);
+        Py_XDECREF(rows);
+        return nullptr;
+    }
+
+    for (uint32_t c = 0; c < rd.ncols; c++)
+    {
+        PyList_SET_ITEM(fields, c, PyUnicode_FromStringAndSize(cols[c].name, cols[c].name_len));
+        PyList_SET_ITEM(types, c, PyLong_FromLong((long)cols[c].pgtype));
+    }
+
+    for (uint64_t r = 0; r < rd.nrows; r++)
+    {
+        PyObject *row = PyTuple_New(rd.ncols);
+        if (!row)
+        {
+            Py_DECREF(fields);
+            Py_DECREF(types);
+            Py_DECREF(rows);
+            return nullptr;
+        }
+        for (uint32_t c = 0; c < rd.ncols; c++)
+        {
+            PyObject *v = fp_decode_column(&cols[c], r);
+            if (!v)
+            {
+                Py_DECREF(row);
+                Py_DECREF(fields);
+                Py_DECREF(types);
+                Py_DECREF(rows);
+                return nullptr;
+            }
+            PyTuple_SET_ITEM(row, c, v);
+        }
+        PyList_SET_ITEM(rows, r, row);
+    }
+
+    ResultObject *result = PyObject_New(ResultObject, &ResultType);
+    if (!result)
+    {
+        Py_DECREF(fields);
+        Py_DECREF(types);
+        Py_DECREF(rows);
+        return nullptr;
+    }
+    result->fields = fields;
+    result->field_types = types;
+    result->rows = rows;
+    result->row_count = PyLong_FromLongLong((long long)rd.nrows);
+    return (PyObject *)result;
+}
+
+/* -------------------------------------------------------------- Ring type */
 typedef struct
 {
     PyObject_HEAD
@@ -747,6 +847,7 @@ static PyTypeObject RingType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 static PyMethodDef module_methods[] = {
     {"read", module_read, METH_VARARGS, "read(segName) -> Segment (zero-copy column views)"},
+    {"read_rows", module_read_rows, METH_VARARGS, "read_rows(segName) -> Result (typed tuple rows)"},
     {nullptr},
 };
 
