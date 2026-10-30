@@ -15,7 +15,9 @@ shared-memory ring executes text and has no bind step (a small scanner leaves
 import datetime
 import decimal
 import os
+import queue
 import re
+import threading
 from typing import Any, Optional, Sequence
 
 from . import _client
@@ -274,6 +276,65 @@ class _Result:
         self.row_count = row_count
 
 
+# ---- ring pool ------------------------------------------------------------
+#
+# A ring is a worker-backed channel that serves one stream at a time, so it is
+# shared process-wide instead of being tied to a connection: a read checks one
+# out, runs open/next*/close, and hands it back. The pool bounds how many
+# workers a process can spawn, whatever the connection pool size; when it is
+# exhausted (or the extension is absent) reads fall back to libpq.
+
+_SHM_POOL_SIZE = int(os.environ.get("FASTPOSTGRES_SHM_POOL", "4"))
+
+_pool_idle = queue.Queue()
+_pool_lock = threading.Lock()
+_pool_created = 0
+_pool_broken = False
+_pool_prefix = f"fp_dbapi_{os.getpid()}"
+
+
+def pool_size():
+    """Maximum number of worker-backed rings this process will create."""
+    return _SHM_POOL_SIZE
+
+
+def pool_created():
+    """Rings created so far (idle + checked out)."""
+    return _pool_created
+
+
+def _ring_acquire(bootstrap):
+    """Check out a (ring, segment) pair; None when there is none to give."""
+    global _pool_created, _pool_broken
+    if _pool_broken:
+        return None
+    try:
+        return _pool_idle.get_nowait()
+    except queue.Empty:
+        pass
+
+    with _pool_lock:
+        if _pool_created >= _SHM_POOL_SIZE:
+            return None
+        index = _pool_created
+        _pool_created += 1
+
+    name = f"{_pool_prefix}_{index}"
+    try:
+        ring = _client.Ring(name)
+        ring.start(bootstrap)
+    except Exception:
+        with _pool_lock:
+            _pool_created -= 1
+            _pool_broken = True
+        return None
+    return (ring, name + "_seg")
+
+
+def _ring_release(info):
+    _pool_idle.put_nowait(info)
+
+
 class Connection:
     """A DB-API connection over one libpq control channel (autocommit).
 
@@ -291,34 +352,23 @@ class Connection:
             raise _translate(exc) from exc
         self._closed = False
         self._shm = shm
-        self._ring = None
-        name = f"fp_dbapi_{os.getpid()}_{id(self) & 0xFFFFF:x}"
-        self._ring_name = name
-        self._seg = name + "_seg"
         self.shm_reads = 0
 
-    def _ring_handle(self):
-        if self._ring is None and self._shm:
-            try:
-                ring = _client.Ring(self._ring_name)
-                ring.start(self._conn)
-                self._ring = ring
-            except Exception:
-                self._shm = False  # no extension / no ring: stay on libpq
-        return self._ring
-
     def _shm_read(self, sql):
-        ring = self._ring_handle()
-        if ring is None:
+        if not self._shm:
             return None
+        info = _ring_acquire(self._conn)
+        if info is None:
+            return None  # pool exhausted, or the extension is absent
+        ring, seg = info
         try:
             fields = field_types = None
             rows = []
-            ring.open(self._seg, sql)
+            ring.open(seg, sql)
             try:
                 while True:
                     n = ring.next(_SHM_BATCH)
-                    chunk = _client.read_rows(self._seg)
+                    chunk = _client.read_rows(seg)
                     if fields is None:
                         fields, field_types = chunk.fields, chunk.field_types
                     rows.extend(chunk.rows)
@@ -328,6 +378,8 @@ class Connection:
                 ring.close()
         except Exception:
             return None  # re-run on libpq so the caller sees the real error
+        finally:
+            _ring_release(info)
         self.shm_reads += 1
         return _Result(fields or [], field_types or [], rows, len(rows))
 
@@ -343,12 +395,6 @@ class Connection:
 
     def close(self):
         if not self._closed:
-            if self._ring is not None:
-                try:
-                    self._ring.stop()
-                except Exception:
-                    pass
-                self._ring = None
             self._conn.close()
             self._closed = True
 

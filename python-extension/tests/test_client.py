@@ -190,5 +190,22 @@ class DbapiTest(unittest.TestCase):
         cur.execute("DROP TABLE fp_shm_t")
 
 
+    def test_shm_pool_reuses_rings_across_connections(self):
+        other = self.dbapi.connect(CONNINFO)
+        try:
+            self.conn.cursor().execute("SELECT 1::int AS n")  # warm: creates/reuses a ring
+            created = self.dbapi.pool_created()
+            self.assertGreater(created, 0)
+
+            cur = other.cursor()
+            cur.execute("SELECT g::int AS n FROM generate_series(1, 3) g")
+            self.assertEqual(cur.fetchall(), [(1,), (2,), (3,)])
+
+            self.assertEqual(self.dbapi.pool_created(), created)  # reused, none new
+            self.assertLessEqual(created, self.dbapi.pool_size())
+        finally:
+            other.close()
+
+
 if __name__ == "__main__":
     unittest.main()
