@@ -7,7 +7,7 @@ changes. Two phases, to show where the transport shows through:
   CORE  select(cols)  -> Row tuples       (driver-bound)
 
 Usage: python3 benchmark/sqlalchemy_bench.py [nrows ...]
-       (default 10000 50000 200000)
+       (default 100000 1000000 10000000)
 """
 import os
 import statistics
@@ -33,6 +33,9 @@ URLS = {
 }
 DRIVERS = ("psycopg2", "fastpostgres")
 REPS = 3
+# Repeats are cheap for small loads; at 1M+ a single read is already slow, so one
+# run suffices (and bounds the memory a full materialisation needs).
+REPS_MAX_ROWS = 1_000_000
 
 
 class Base(DeclarativeBase):
@@ -127,7 +130,8 @@ def measure(sizes, read):
         setup(n)  # a fresh table of exactly n rows, so each read returns n
         times = {name: [] for name in DRIVERS}
         counts = {}
-        for r in range(REPS):
+        reps = REPS if n <= REPS_MAX_ROWS else 1
+        for r in range(reps):
             order = DRIVERS if r % 2 == 0 else DRIVERS[::-1]
             for name in order:
                 ms, count = read(engines[name])
@@ -144,7 +148,7 @@ def measure(sizes, read):
 def main():
     sizes = [int(a) for a in sys.argv[1:] if a.isdigit() and int(a) > 0]
     if not sizes:
-        sizes = [10000, 50000, 200000]
+        sizes = [100000, 1000000, 10000000]
 
     measure(sizes, read_orm)
     measure(sizes, read_core)

@@ -8,11 +8,11 @@ set -euo pipefail
 # Emits an "### ENV" block before the numbers so the environment travels with
 # the measurements.
 #
-# Usage: scripts/bench-sqlalchemy-docker.sh [nrows ...]  (default: 10000 50000 200000)
+# Usage: scripts/bench-sqlalchemy-docker.sh [nrows ...]  (default: 100000 1000000 10000000)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="fastpostgres-sqlalchemy-bench"
-SIZES="${*:-10000 50000 200000}"
+SIZES="${*:-100000 1000000 10000000}"
 
 echo "==> building image (postgres:18 + extension + Python client + SQLAlchemy)"
 docker build -t "$IMG" -f - "$ROOT" <<'DOCKERFILE'
@@ -31,7 +31,7 @@ RUN python3 setup.py build_ext --inplace
 DOCKERFILE
 
 echo "==> running the benchmark (rows: $SIZES)"
-docker run --rm --shm-size=1g -e SIZES="$SIZES" -i "$IMG" bash -s <<'SCRIPT'
+docker run --rm --shm-size=2g -e SIZES="$SIZES" -i "$IMG" bash -s <<'SCRIPT'
 set -euo pipefail
 export PGDATA=/tmp/pgdata
 rm -rf "$PGDATA"; mkdir -p "$PGDATA"; chown -R postgres:postgres "$PGDATA"
