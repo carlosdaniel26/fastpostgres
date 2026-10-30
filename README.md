@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/logo.png" width="220" alt="fastpostgres"></p>
+<p align="center"><img src="assets/logo.png" width="600" alt="FastPostgres"></p>
 
-# fastpostgres
+# FastPostgres
 
 PostgreSQL query results delivered through POSIX shared memory as columnar
 typed arrays, instead of the socket's text protocol.
