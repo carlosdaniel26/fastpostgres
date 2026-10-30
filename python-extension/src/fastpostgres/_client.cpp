@@ -29,7 +29,8 @@
 
 /* ------------------------------------------------------------------ utils */
 
-static PyObject *raise_libpq(PGresult *res)
+static PyObject *
+raise_libpq(PGresult *res)
 {
     PyErr_Format(PyExc_RuntimeError, "libpq: %s", res ? PQresultErrorMessage(res) : "unknown error");
     return nullptr;
@@ -37,7 +38,8 @@ static PyObject *raise_libpq(PGresult *res)
 
 /* A read-only memoryview aliasing a region of a cached mapping (zero-copy).
  * The mapping outlives the process, so the view stays valid. */
-static PyObject *memory_view(const void *p, size_t n)
+static PyObject *
+memory_view(const void *p, size_t n)
 {
     if (p == nullptr) Py_RETURN_NONE;
     PyObject *v = PyMemoryView_FromMemory((char *)p, (Py_ssize_t)n, PyBUF_READ);
@@ -58,7 +60,8 @@ typedef struct {
     PyObject               *rows;
 } ResultObject;
 
-static void Result_dealloc(ResultObject *self)
+static void
+Result_dealloc(ResultObject *self)
 {
     Py_XDECREF(self->fields);
     Py_XDECREF(self->field_types);
@@ -77,7 +80,8 @@ static PyMemberDef Result_members[] = {
 
 static PyTypeObject ResultType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
-static PyObject *row_tuple(PGresult *res, int r, int ncols)
+static PyObject *
+row_tuple(PGresult *res, int r, int ncols)
 {
     PyObject *row = PyTuple_New(ncols);
     if (!row) return nullptr;
@@ -94,7 +98,8 @@ static PyObject *row_tuple(PGresult *res, int r, int ncols)
     return row;
 }
 
-static PyObject *result_from_pg(PGresult *res)
+static PyObject *
+result_from_pg(PGresult *res)
 {
     int         nrows     = PQntuples(res);
     int         ncols     = PQnfields(res);
@@ -152,13 +157,15 @@ typedef struct {
     PyObject_HEAD PGconn *pg;
 } ConnectionObject;
 
-static void Connection_dealloc(ConnectionObject *self)
+static void
+Connection_dealloc(ConnectionObject *self)
 {
     if (self->pg) PQfinish(self->pg);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static int Connection_init(ConnectionObject *self, PyObject *args, PyObject *kwds)
+static int
+Connection_init(ConnectionObject *self, PyObject *args, PyObject *kwds)
 {
     static const char *kwlist[] = {"conninfo", nullptr};
     const char        *conninfo = "";
@@ -178,7 +185,8 @@ static int Connection_init(ConnectionObject *self, PyObject *args, PyObject *kwd
     return 0;
 }
 
-static PyObject *Connection_exec(ConnectionObject *self, PyObject *arg)
+static PyObject *
+Connection_exec(ConnectionObject *self, PyObject *arg)
 {
     if (!self->pg)
     {
@@ -210,7 +218,8 @@ static PyObject *Connection_exec(ConnectionObject *self, PyObject *arg)
 }
 
 /* Stream rows with libpq's COPY protocol, retrying while it needs flushing. */
-static int copy_put(PGconn *pg, const char *buf, size_t n)
+static int
+copy_put(PGconn *pg, const char *buf, size_t n)
 {
     size_t off = 0;
     while (off < n)
@@ -230,7 +239,8 @@ static int copy_put(PGconn *pg, const char *buf, size_t n)
 }
 
 /* Send one bytes-like item; returns 0, or -1 with a Python error set. */
-static int copy_put_object(PGconn *pg, PyObject *item)
+static int
+copy_put_object(PGconn *pg, PyObject *item)
 {
     Py_buffer view;
     if (PyObject_GetBuffer(item, &view, PyBUF_SIMPLE) != 0)
@@ -248,7 +258,8 @@ static int copy_put_object(PGconn *pg, PyObject *item)
     return 0;
 }
 
-static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
+static PyObject *
+Connection_copy_from(ConnectionObject *self, PyObject *args)
 {
     const char *sql;
     PyObject   *data;
@@ -331,7 +342,8 @@ static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
-static PyObject *Connection_close(ConnectionObject *self, PyObject *)
+static PyObject *
+Connection_close(ConnectionObject *self, PyObject *)
 {
     if (self->pg)
     {
@@ -361,7 +373,8 @@ typedef struct {
     PyObject               *nulls; /* 1 bit per row */
 } ColumnObject;
 
-static void Column_dealloc(ColumnObject *self)
+static void
+Column_dealloc(ColumnObject *self)
 {
     Py_XDECREF(self->name);
     Py_XDECREF(self->data);
@@ -389,7 +402,8 @@ typedef struct {
     PyObject               *columns;
 } SegmentObject;
 
-static void Segment_dealloc(SegmentObject *self)
+static void
+Segment_dealloc(SegmentObject *self)
 {
     Py_XDECREF(self->row_count);
     Py_XDECREF(self->columns);
@@ -414,7 +428,8 @@ typedef struct {
 
 static std::vector<ReadMap> g_read_maps;
 
-static void *read_map_get(const char *path, const std::string &name, size_t *size_out)
+static void *
+read_map_get(const char *path, const std::string &name, size_t *size_out)
 {
     for (ReadMap &m : g_read_maps)
     {
@@ -432,7 +447,8 @@ static void *read_map_get(const char *path, const std::string &name, size_t *siz
     return base;
 }
 
-static PyObject *module_read(PyObject *, PyObject *args)
+static PyObject *
+module_read(PyObject *, PyObject *args)
 {
     const char *name;
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
@@ -499,7 +515,8 @@ static PyObject *module_read(PyObject *, PyObject *args)
 }
 
 /* Materialize a columnar chunk as typed row tuples (the DB-API fast path). */
-static PyObject *module_read_rows(PyObject *, PyObject *args)
+static PyObject *
+module_read_rows(PyObject *, PyObject *args)
 {
     const char *name;
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
@@ -607,13 +624,15 @@ typedef struct {
     char                            data[128]; /* the columnar segment of the current stream */
 } RingObject;
 
-static void Ring_dealloc(RingObject *self)
+static void
+Ring_dealloc(RingObject *self)
 {
     if (self->map) munmap(self->map, self->size);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
+static int
+Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 {
     static const char *kwlist[] = {"segment", nullptr};
     const char        *seg;
@@ -676,7 +695,8 @@ static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 
 /* Send one request and block for its response; returns nrows, or -1 with a
  * Python exception set. */
-static long long ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
+static long long
+ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
 {
     FastpostgresRing *r = self->ring;
     size_t            n = 0;
@@ -736,7 +756,8 @@ static long long ring_request(RingObject *self, uint32_t op, const char *a1, con
     return (long long)r->nrows;
 }
 
-static PyObject *Ring_start(RingObject *self, PyObject *conn)
+static PyObject *
+Ring_start(RingObject *self, PyObject *conn)
 {
     if (!PyObject_TypeCheck(conn, &ConnectionType))
     {
@@ -775,7 +796,8 @@ static PyObject *Ring_start(RingObject *self, PyObject *conn)
     Py_RETURN_NONE;
 }
 
-static PyObject *Ring_open(RingObject *self, PyObject *args)
+static PyObject *
+Ring_open(RingObject *self, PyObject *args)
 {
     const char *seg, *query;
     if (!PyArg_ParseTuple(args, "ss", &seg, &query)) return nullptr;
@@ -784,7 +806,8 @@ static PyObject *Ring_open(RingObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
-static PyObject *Ring_next(RingObject *self, PyObject *args)
+static PyObject *
+Ring_next(RingObject *self, PyObject *args)
 {
     long long batch = 100000;
     if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
@@ -794,13 +817,15 @@ static PyObject *Ring_next(RingObject *self, PyObject *args)
     return PyLong_FromLongLong(n);
 }
 
-static PyObject *Ring_close(RingObject *self, PyObject *)
+static PyObject *
+Ring_close(RingObject *self, PyObject *)
 {
     if (ring_request(self, FASTPOSTGRES_OP_CLOSE, self->data, nullptr, 0) < 0) return nullptr;
     Py_RETURN_NONE;
 }
 
-static PyObject *Ring_write(RingObject *self, PyObject *args)
+static PyObject *
+Ring_write(RingObject *self, PyObject *args)
 {
     const char *seg, *table;
     if (!PyArg_ParseTuple(args, "ss", &seg, &table)) return nullptr;
@@ -809,7 +834,8 @@ static PyObject *Ring_write(RingObject *self, PyObject *args)
     return PyLong_FromLongLong(n);
 }
 
-static PyObject *Ring_stop(RingObject *self, PyObject *)
+static PyObject *
+Ring_stop(RingObject *self, PyObject *)
 {
     FastpostgresRing *r = self->ring;
     r->op               = FASTPOSTGRES_OP_STOP;
@@ -850,8 +876,9 @@ static struct PyModuleDef moduledef = {
     nullptr,
 };
 
-static bool init_type(PyTypeObject *type, const char *name, Py_ssize_t basicsize, destructor dealloc,
-                      PyMethodDef *methods, PyMemberDef *members)
+static bool
+init_type(PyTypeObject *type, const char *name, Py_ssize_t basicsize, destructor dealloc,
+          PyMethodDef *methods, PyMemberDef *members)
 {
     type->tp_name      = name;
     type->tp_basicsize = basicsize;
@@ -862,7 +889,8 @@ static bool init_type(PyTypeObject *type, const char *name, Py_ssize_t basicsize
     return PyType_Ready(type) == 0;
 }
 
-PyMODINIT_FUNC PyInit__client(void)
+PyMODINIT_FUNC
+PyInit__client(void)
 {
     if (!fp_codec_init()) return nullptr;
     if (!init_type(&ResultType, "fastpostgres.Result", sizeof(ResultObject), (destructor)Result_dealloc,

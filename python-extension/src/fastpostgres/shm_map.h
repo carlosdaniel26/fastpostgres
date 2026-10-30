@@ -16,7 +16,8 @@
 
 /* Map /dev/shm/<path> read-write, growing the file to `capacity` first and
  * mapping only `map_size` bytes (the file keeps the full capacity). */
-static inline void *fp_map_rw(const char *path, size_t capacity, size_t map_size)
+static inline void *
+fp_map_rw(const char *path, size_t capacity, size_t map_size)
 {
     int         fd = shm_open(path, O_RDWR | O_CREAT, 0666);
     struct stat st;
@@ -40,7 +41,8 @@ static inline void *fp_map_rw(const char *path, size_t capacity, size_t map_size
 
 /* Map the whole of an existing /dev/shm/<path> read-only; *size_out gets the
  * mapped size. */
-static inline void *fp_map_ro(const char *path, size_t *size_out)
+static inline void *
+fp_map_ro(const char *path, size_t *size_out)
 {
     int         fd = shm_open(path, O_RDONLY, 0);
     struct stat st;

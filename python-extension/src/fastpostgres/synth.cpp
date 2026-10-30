@@ -16,7 +16,8 @@
 #include "fastpostgres_shm.h"
 #include "shm_map.h"
 
-static size_t dec_len(uint64_t v)
+static size_t
+dec_len(uint64_t v)
 {
     size_t n = 1;
     while (v >= 10)
@@ -27,7 +28,8 @@ static size_t dec_len(uint64_t v)
     return n;
 }
 
-static size_t put_dec(char *p, uint64_t v)
+static size_t
+put_dec(char *p, uint64_t v)
 {
     char   tmp[24];
     size_t n = 0, i;
@@ -54,7 +56,8 @@ static const int COLS_KIND[8] = {FASTPOSTGRES_KIND_INT32,  FASTPOSTGRES_KIND_INT
 static const int COLS_PGTYPE[8] = {23, 20, 701, 16, 25, 25, 701, 23};
 
 /* Write "user<r><suffix>" as an int32 offset table followed by the bytes. */
-static void put_text_col(char *p, uint64_t n, const char *prefix, size_t pre, const char *suffix, size_t suf)
+static void
+put_text_col(char *p, uint64_t n, const char *prefix, size_t pre, const char *suffix, size_t suf)
 {
     int32_t *off = (int32_t *)p;
     char    *b = p + (n + 1) * 4, *w = b;
@@ -74,7 +77,8 @@ static void put_text_col(char *p, uint64_t n, const char *prefix, size_t pre, co
     }
 }
 
-static PyObject *synth_segment(PyObject *, PyObject *args)
+static PyObject *
+synth_segment(PyObject *, PyObject *args)
 {
     const char        *name;
     unsigned long long n;
@@ -210,7 +214,8 @@ static PyObject *synth_segment(PyObject *, PyObject *args)
 }
 
 /* COPY FROM STDIN payload (tab-separated), built natively in 1 MiB chunks. */
-static PyObject *synth_copy(PyObject *, PyObject *args)
+static PyObject *
+synth_copy(PyObject *, PyObject *args)
 {
     unsigned long long n;
     if (!PyArg_ParseTuple(args, "K", &n)) return nullptr;
@@ -269,7 +274,8 @@ static PyMethodDef synth_methods[] = {
     {nullptr},
 };
 
-void fp_register_synth(PyObject *module)
+void
+fp_register_synth(PyObject *module)
 {
     for (PyMethodDef *m = synth_methods; m->ml_name != nullptr; m++)
     {

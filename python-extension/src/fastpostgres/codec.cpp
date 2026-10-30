@@ -40,7 +40,8 @@ static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
 static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
 
-bool fp_codec_init(void)
+bool
+fp_codec_init(void)
 {
     PyDateTime_IMPORT;
     PyObject *dec = PyImport_ImportModule("decimal");
@@ -57,7 +58,8 @@ bool fp_codec_init(void)
     return s_timezone != nullptr && s_timedelta != nullptr;
 }
 
-static PyObject *decimal_from_text(const char *s)
+static PyObject *
+decimal_from_text(const char *s)
 {
     PyObject *text = PyUnicode_FromString(s);
     if (!text) return nullptr;
@@ -66,7 +68,8 @@ static PyObject *decimal_from_text(const char *s)
     return value;
 }
 
-static PyObject *bytes_from_bytea(const char *s)
+static PyObject *
+bytes_from_bytea(const char *s)
 {
     if (s[0] == '\\' && s[1] == 'x')
     {
@@ -91,7 +94,8 @@ static PyObject *bytes_from_bytea(const char *s)
 }
 
 /* "YYYY-MM-DD [HH:MM:SS[.ffffff]][±HH[:MM]]" -> datetime.date/datetime. */
-static PyObject *parse_datetime(const char *s, int with_time, int with_tz)
+static PyObject *
+parse_datetime(const char *s, int with_time, int with_tz)
 {
     const char *p = s;
     int         y = (int)strtol(p, (char **)&p, 10);
@@ -149,7 +153,8 @@ static PyObject *parse_datetime(const char *s, int with_time, int with_tz)
     return out;
 }
 
-static PyObject *parse_time(const char *s)
+static PyObject *
+parse_time(const char *s)
 {
     const char *p = s;
     int         h = (int)strtol(p, (char **)&p, 10);
@@ -173,7 +178,8 @@ static PyObject *parse_time(const char *s)
     return PyTime_FromTime(h, mi, sec, us);
 }
 
-PyObject *fp_decode_value(PGresult *res, int row, int col)
+PyObject *
+fp_decode_value(PGresult *res, int row, int col)
 {
     if (PQgetisnull(res, row, col)) Py_RETURN_NONE;
 
@@ -211,7 +217,8 @@ PyObject *fp_decode_value(PGresult *res, int row, int col)
     }
 }
 
-PyObject *fp_decode_column(const FastpostgresColumn *c, uint64_t row)
+PyObject *
+fp_decode_column(const FastpostgresColumn *c, uint64_t row)
 {
     if (fastpostgres_col_isnull(c, row)) Py_RETURN_NONE;
 
