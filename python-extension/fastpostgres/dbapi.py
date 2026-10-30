@@ -460,6 +460,9 @@ class Cursor:
         return rows
 
     def fetchall(self):
+        if self._pos == 0:  # the common case: hand the list over instead of copying it
+            self._pos = len(self._rows)
+            return self._rows
         rows = self._rows[self._pos :]
         self._pos = len(self._rows)
         return rows
