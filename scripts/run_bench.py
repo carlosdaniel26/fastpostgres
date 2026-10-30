@@ -153,10 +153,20 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
     return fig
 
 
-def save(fig, path):
+def save(fig, path, points):
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"wrote {path}")
+    print(f"wrote {path}  ({points} loads)")
+
+
+def skip(path, section):
+    """No rows for this section: remove a chart from an earlier run so a stale
+    image cannot pass for current numbers."""
+    if path.exists():
+        path.unlink()
+        print(f"no '{section}' rows in the log -- removed stale {path.name}")
+    else:
+        print(f"no '{section}' rows in the log -- nothing to plot")
 
 
 def spec(env, keys):
@@ -186,12 +196,14 @@ def plot_transport(text, env, scale):
     footer = spec(env, TRANSPORT_KEYS) or "fastpostgres transport benchmark"
     titles = {"read": "Read: rows fetched per second", "write": "Write: rows inserted per second"}
     for section in ("read", "write"):
+        path = OUT / f"bench_chart-{section}.png"
         if not data[section]:
+            skip(path, section)
             continue
         fig = figure(section, data[section], ("tcp", "unix", "shm"), GREY + (ACCENT,),
                      ("tcp", "unix", "fast-postgres"), titles[section],
                      headline_transport(data[section]), footer, scale)
-        save(fig, OUT / f"bench_chart-{section}.png")
+        save(fig, path, len(data[section]))
 
 
 def plot_drivers(text, env, scale):
@@ -200,7 +212,9 @@ def plot_drivers(text, env, scale):
     titles = {"orm": "ORM read: select(Model) -> Python objects",
               "core": "Core read: select(cols) -> Row tuples"}
     for section in ("orm", "core"):
+        path = OUT / f"sqlalchemy_chart-{section}.png"
         if not data[section]:
+            skip(path, section)
             continue
         gain = max((v[1] / v[0] - 1 for v in data[section].values() if v[0] > 0), default=0.0)
         label = "ORM" if section == "orm" else "Core"
@@ -210,7 +224,7 @@ def plot_drivers(text, env, scale):
             headline = f"SQLAlchemy {label} reads — driver makes little difference"
         fig = figure(section, data[section], ("psycopg2", "fastpostgres"), (GREY[0], ACCENT),
                      ("psycopg2", "fast-postgres"), titles[section], headline, footer, scale)
-        save(fig, OUT / f"sqlalchemy_chart-{section}.png")
+        save(fig, path, len(data[section]))
 
 
 # ---- main -----------------------------------------------------------------
