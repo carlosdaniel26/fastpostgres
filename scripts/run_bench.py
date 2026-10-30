@@ -72,13 +72,17 @@ def parse_sections(text, sections, row_re, values_from):
     return data
 
 
+# The trailing comparison columns are a speedup ("1.36x") or, now, a percentage
+# ("+36.0%"); accept both so older logs still plot.
+_RATIO = r"(?:[\d.]+x|[+-][\d.]+%)"
+
 TRANSPORT_SECTIONS = {"READ (rows/s)": "read", "WRITE (rows/s)": "write"}
 TRANSPORT_ROW = re.compile(
-    r"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+([\d.]+)M\s+[\d.]+x\s+[\d.]+x\s*$"
+    rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+{_RATIO}\s*$"
 )
 
 DRIVER_SECTIONS = {"SQLALCHEMY ORM READ": "orm", "SQLALCHEMY CORE READ": "core"}
-DRIVER_ROW = re.compile(r"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+[\d.]+x\s+\S+\s*$")
+DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+\S+\s*$")
 
 
 # ---- drawing --------------------------------------------------------------
@@ -171,9 +175,9 @@ DRIVER_KEYS = TRANSPORT_KEYS[:4] + [("sqlalchemy", "SQLAlchemy {0}")]
 
 
 def headline_transport(data):
-    ratio = max((v[2] / v[0] for v in data.values() if v[0] > 0), default=0.0)
-    if ratio >= 1.5:
-        return f"fast-postgres — up to {ratio:.0f}× the socket transports"
+    gain = max((v[2] / v[0] - 1 for v in data.values() if v[0] > 0), default=0.0)
+    if gain >= 0.5:
+        return f"fast-postgres — up to {gain * 100:.0f}% faster than the socket transports"
     return "fast-postgres — throughput by transport"
 
 
@@ -198,10 +202,10 @@ def plot_drivers(text, env, scale):
     for section in ("orm", "core"):
         if not data[section]:
             continue
-        ratio = max((v[1] / v[0] for v in data[section].values() if v[0] > 0), default=0.0)
+        gain = max((v[1] / v[0] - 1 for v in data[section].values() if v[0] > 0), default=0.0)
         label = "ORM" if section == "orm" else "Core"
-        if ratio >= 1.15:
-            headline = f"SQLAlchemy {label} reads — fast-postgres up to {ratio:.2f}× psycopg2"
+        if gain >= 0.15:
+            headline = f"SQLAlchemy {label} reads — fast-postgres up to {gain * 100:.0f}% faster than psycopg2"
         else:
             headline = f"SQLAlchemy {label} reads — driver makes little difference"
         fig = figure(section, data[section], ("psycopg2", "fastpostgres"), (GREY[0], ACCENT),

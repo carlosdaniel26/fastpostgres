@@ -117,8 +117,13 @@ def col(value, width, right):
 
 
 def header(title):
-    names = ["tcp", "unix", "shm", "shm/tcp", "shm/unix"]
-    print(f"\n{title}: " + " ".join(col(s, 8 if i < 3 else 10, False) for i, s in enumerate(names)) + " ")
+    names = ["tcp", "unix", "shm", "shm vs tcp", "shm vs unix"]
+    print(f"\n{title}: " + " ".join(col(s, 8 if i < 3 else 11, False) for i, s in enumerate(names)) + " ")
+
+
+def pct(ratio):
+    """Improvement over a baseline, in percent (ratio is fast/baseline)."""
+    return f"{(ratio - 1) * 100:+.1f}%"
 
 
 def row(load, a, b, c, ra, rb):
@@ -132,10 +137,9 @@ def row(load, a, b, c, ra, rb):
         + "M "
         + col(f"{c:.2f}", 8, True)
         + "M "
-        + col(f"{ra:.2f}", 8, True)
-        + "x "
-        + col(f"{rb:.2f}", 9, True)
-        + "x"
+        + col(pct(ra), 11, True)
+        + " "
+        + col(pct(rb), 11, True)
     )
 
 

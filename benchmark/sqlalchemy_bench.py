@@ -105,7 +105,12 @@ def read_core(engine):
 
 
 def header(title):
-    print(f"\n{title}: " + " ".join(col(s, 12, False) for s in (*DRIVERS, "fp/psy")))
+    print(f"\n{title}: " + " ".join(col(s, 12, False) for s in (*DRIVERS, "vs psy")))
+
+
+def pct(ratio):
+    """Improvement over psycopg2, in percent (ratio is psy/fastpostgres time)."""
+    return f"{(ratio - 1) * 100:+.1f}%"
 
 
 def row(load, psy, fpg, ratio, ok):
@@ -117,8 +122,8 @@ def row(load, psy, fpg, ratio, ok):
         + "M "
         + col(f"{fpg:.2f}", 11, True)
         + "M "
-        + col(f"{ratio:.2f}", 6, True)
-        + "x  "
+        + col(pct(ratio), 9, True)
+        + "  "
         + ("ok" if ok else "MISMATCH")
     )
 
