@@ -6,6 +6,7 @@ rewritten by the next streamed chunk.
 """
 from enum import IntEnum
 
+from . import _client
 from ._client import (
     Column,
     Connection,
@@ -31,12 +32,12 @@ __all__ = [
 
 
 class Kind(IntEnum):
-    """Wire kinds, matching `FastpostgresKind` in fastpostgres_shm.h."""
+    """Wire kinds, taken from FastpostgresKind in fastpostgres_shm.h."""
 
-    BOOL = 1
-    INT32 = 2
-    INT64 = 3
-    FLOAT8 = 4
-    TEXT = 5
-    INT16 = 6
-    FLOAT4 = 7
+    BOOL = _client.KIND_BOOL
+    INT32 = _client.KIND_INT32
+    INT64 = _client.KIND_INT64
+    FLOAT8 = _client.KIND_FLOAT8
+    TEXT = _client.KIND_TEXT
+    INT16 = _client.KIND_INT16
+    FLOAT4 = _client.KIND_FLOAT4

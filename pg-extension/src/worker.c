@@ -136,8 +136,8 @@ static void ring_set_error(FastpostgresRing *r)
  * completion is signalled in the slot queue instead. */
 static bool ring_handle(FastpostgresRing *r, const char *ring_name, bool *respond)
 {
-    char  *a1 = r->arg;
-    char  *a2 = a1 + strlen(a1) + 1;
+    char  *a1 = (char *)fastpostgres_ring_arg1(r->arg);
+    char  *a2 = (char *)fastpostgres_ring_arg2(r->arg);
     uint64 n  = 0;
 
     *respond = true;

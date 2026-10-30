@@ -17,10 +17,31 @@
 
 #include "codec.hpp"
 #include "connection.hpp"
+#include "fastpostgres_shm.h"
 #include "ring.hpp"
 #include "segment.hpp"
 #include "synth.hpp"
 #include "types.hpp"
+
+/* The wire kinds, so kind values have one source (fastpostgres_shm.h) and the
+ * Python enum can be built from them instead of repeating the numbers. */
+static bool
+add_kind_constants(PyObject *module)
+{
+    struct {
+        const char *name;
+        int         value;
+    } kinds[] = {
+        {"KIND_BOOL", FASTPOSTGRES_KIND_BOOL},     {"KIND_INT16", FASTPOSTGRES_KIND_INT16},
+        {"KIND_INT32", FASTPOSTGRES_KIND_INT32},   {"KIND_INT64", FASTPOSTGRES_KIND_INT64},
+        {"KIND_FLOAT4", FASTPOSTGRES_KIND_FLOAT4}, {"KIND_FLOAT8", FASTPOSTGRES_KIND_FLOAT8},
+        {"KIND_TEXT", FASTPOSTGRES_KIND_TEXT},
+    };
+
+    for (auto &k : kinds)
+        if (PyModule_AddIntConstant(module, k.name, k.value) != 0) return false;
+    return true;
+}
 
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
@@ -44,7 +65,7 @@ PyInit__client(void)
     if (!m) return nullptr;
 
     if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
-        !fp_register_segment(m))
+        !fp_register_segment(m) || !add_kind_constants(m))
     {
         Py_DECREF(m);
         return nullptr;

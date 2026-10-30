@@ -74,16 +74,28 @@ enum FastpostgresKind
 
 /* PostgreSQL builtin type OIDs. Bootstrap-assigned, hence fixed for a given
  * PostgreSQL major version — pinned here so both sides share one mapping. */
-#define FASTPOSTGRES_OID_BOOL    16
-#define FASTPOSTGRES_OID_INT8    20
-#define FASTPOSTGRES_OID_INT2    21
-#define FASTPOSTGRES_OID_INT4    23
-#define FASTPOSTGRES_OID_TEXT    25
-#define FASTPOSTGRES_OID_FLOAT4  700
-#define FASTPOSTGRES_OID_FLOAT8  701
-#define FASTPOSTGRES_OID_BPCHAR  1042
-#define FASTPOSTGRES_OID_VARCHAR 1043
-#define FASTPOSTGRES_OID_NUMERIC 1700
+#define FASTPOSTGRES_OID_BOOL        16
+#define FASTPOSTGRES_OID_BYTEA       17
+#define FASTPOSTGRES_OID_CHAR        18
+#define FASTPOSTGRES_OID_NAME        19
+#define FASTPOSTGRES_OID_INT8        20
+#define FASTPOSTGRES_OID_INT2        21
+#define FASTPOSTGRES_OID_INT4        23
+#define FASTPOSTGRES_OID_TEXT        25
+#define FASTPOSTGRES_OID_OID         26
+#define FASTPOSTGRES_OID_JSON        114
+#define FASTPOSTGRES_OID_FLOAT4      700
+#define FASTPOSTGRES_OID_FLOAT8      701
+#define FASTPOSTGRES_OID_MONEY       790
+#define FASTPOSTGRES_OID_BPCHAR      1042
+#define FASTPOSTGRES_OID_VARCHAR     1043
+#define FASTPOSTGRES_OID_DATE        1082
+#define FASTPOSTGRES_OID_TIME        1083
+#define FASTPOSTGRES_OID_TIMESTAMP   1114
+#define FASTPOSTGRES_OID_TIMESTAMPTZ 1184
+#define FASTPOSTGRES_OID_NUMERIC     1700
+#define FASTPOSTGRES_OID_UUID        2950
+#define FASTPOSTGRES_OID_JSONB       3802
 
 /* PostgreSQL type OID -> wire kind (numeric goes out as a float8). */
 static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)

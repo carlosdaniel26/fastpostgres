@@ -9,34 +9,7 @@
 
 #include <datetime.h>
 
-/* PostgreSQL builtin type OIDs (fixed for a major version). */
-enum
-{
-    OID_BOOL        = 16,
-    OID_BYTEA       = 17,
-    OID_CHAR        = 18,
-    OID_NAME        = 19,
-    OID_INT8        = 20,
-    OID_INT2        = 21,
-    OID_INT4        = 23,
-    OID_TEXT        = 25,
-    OID_OID         = 26,
-    OID_JSON        = 114,
-    OID_FLOAT4      = 700,
-    OID_FLOAT8      = 701,
-    OID_MONEY       = 790,
-    OID_BPCHAR      = 1042,
-    OID_VARCHAR     = 1043,
-    OID_DATE        = 1082,
-    OID_TIME        = 1083,
-    OID_TIMESTAMP   = 1114,
-    OID_TIMESTAMPTZ = 1184,
-    OID_NUMERIC     = 1700,
-    OID_UUID        = 2950,
-    OID_JSONB       = 3802,
-};
-
-static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
+static PyObject *s_decimal = nullptr;   /* decimal.Decimal */
 static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
 
@@ -188,29 +161,29 @@ fp_decode_value(PGresult *res, int row, int col)
 
     switch (type)
     {
-        case OID_BOOL:
+        case FASTPOSTGRES_OID_BOOL:
             if (s[0] == 't') Py_RETURN_TRUE;
             Py_RETURN_FALSE;
-        case OID_INT2:
-        case OID_INT4:
-        case OID_INT8:
-        case OID_OID:
+        case FASTPOSTGRES_OID_INT2:
+        case FASTPOSTGRES_OID_INT4:
+        case FASTPOSTGRES_OID_INT8:
+        case FASTPOSTGRES_OID_OID:
             return PyLong_FromString(s, nullptr, 10);
-        case OID_FLOAT4:
-        case OID_FLOAT8:
+        case FASTPOSTGRES_OID_FLOAT4:
+        case FASTPOSTGRES_OID_FLOAT8:
             return PyFloat_FromDouble(strtod(s, nullptr));
-        case OID_NUMERIC:
-        case OID_MONEY:
+        case FASTPOSTGRES_OID_NUMERIC:
+        case FASTPOSTGRES_OID_MONEY:
             return decimal_from_text(s);
-        case OID_BYTEA:
+        case FASTPOSTGRES_OID_BYTEA:
             return bytes_from_bytea(s);
-        case OID_DATE:
+        case FASTPOSTGRES_OID_DATE:
             return parse_datetime(s, 0, 0);
-        case OID_TIME:
+        case FASTPOSTGRES_OID_TIME:
             return parse_time(s);
-        case OID_TIMESTAMP:
+        case FASTPOSTGRES_OID_TIMESTAMP:
             return parse_datetime(s, 1, 0);
-        case OID_TIMESTAMPTZ:
+        case FASTPOSTGRES_OID_TIMESTAMPTZ:
             return parse_datetime(s, 1, 1);
         default: /* text family, uuid, json, xml, ... */
             return PyUnicode_FromString(s);
@@ -261,11 +234,11 @@ fp_decode_column(const FastpostgresColumn *c, uint64_t row)
 
             switch (c->pgtype)
             {
-                case OID_DATE:
-                case OID_TIME:
-                case OID_TIMESTAMP:
-                case OID_TIMESTAMPTZ:
-                case OID_BYTEA: {
+                case FASTPOSTGRES_OID_DATE:
+                case FASTPOSTGRES_OID_TIME:
+                case FASTPOSTGRES_OID_TIMESTAMP:
+                case FASTPOSTGRES_OID_TIMESTAMPTZ:
+                case FASTPOSTGRES_OID_BYTEA: {
                     /* the parsers need a NUL-terminated string */
                     char       buf[96];
                     Py_ssize_t n = len < (Py_ssize_t)sizeof(buf) - 1 ? len : (Py_ssize_t)sizeof(buf) - 1;
@@ -273,13 +246,13 @@ fp_decode_column(const FastpostgresColumn *c, uint64_t row)
                     buf[n] = 0;
                     switch (c->pgtype)
                     {
-                        case OID_DATE:
+                        case FASTPOSTGRES_OID_DATE:
                             return parse_datetime(buf, 0, 0);
-                        case OID_TIME:
+                        case FASTPOSTGRES_OID_TIME:
                             return parse_time(buf);
-                        case OID_TIMESTAMP:
+                        case FASTPOSTGRES_OID_TIMESTAMP:
                             return parse_datetime(buf, 1, 0);
-                        case OID_TIMESTAMPTZ:
+                        case FASTPOSTGRES_OID_TIMESTAMPTZ:
                             return parse_datetime(buf, 1, 1);
                         default:
                             return bytes_from_bytea(buf);

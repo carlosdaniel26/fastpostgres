@@ -18,6 +18,7 @@
 
 #include <semaphore.h>
 #include <stdint.h>
+#include <string.h>
 
 #define FASTPOSTGRES_RING_MAGIC   "FPRING01"
 #define FASTPOSTGRES_RING_VERSION 1u
@@ -78,5 +79,35 @@ typedef struct FastpostgresRing {
         uint32_t pgtype;
     } push_cols[FASTPOSTGRES_PUSH_MAXCOLS];
 } FastpostgresRing;
+
+/* The request payload every op carries: "<a1>\0<a2>\0" in `arg`. The client
+ * packs with these and the worker unpacks with them, so the convention has a
+ * single definition instead of a matching pair of strlen dances. */
+static inline int fastpostgres_ring_arg_set(char *arg, const char *a1, const char *a2)
+{
+    size_t n = a1 ? strlen(a1) + 1 : 1;
+    size_t m = a2 ? strlen(a2) + 1 : 1;
+
+    if (n + m > FASTPOSTGRES_RING_ARG) return -1;
+    if (a1)
+        memcpy(arg, a1, n);
+    else
+        arg[0] = 0;
+    if (a2)
+        memcpy(arg + n, a2, m);
+    else
+        arg[n] = 0;
+    return 0;
+}
+
+static inline const char *fastpostgres_ring_arg1(const char *arg)
+{
+    return arg;
+}
+
+static inline const char *fastpostgres_ring_arg2(const char *arg)
+{
+    return arg + strlen(arg) + 1;
+}
 
 #endif

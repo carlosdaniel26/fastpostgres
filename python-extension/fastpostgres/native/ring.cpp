@@ -93,33 +93,11 @@ static long long
 ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
 {
     FastpostgresRing *r = self->ring;
-    size_t            n = 0;
 
-    if (a1)
+    if (fastpostgres_ring_arg_set(r->arg, a1, a2) != 0)
     {
-        size_t l = strlen(a1);
-        if (l + 1 > FASTPOSTGRES_RING_ARG)
-        {
-            PyErr_SetString(PyExc_ValueError, "ring: argument too long");
-            return -1;
-        }
-        memcpy(r->arg, a1, l + 1);
-        n = l + 1;
-    }
-    else
-    {
-        r->arg[0] = 0;
-        n         = 1;
-    }
-    if (a2)
-    {
-        size_t l = strlen(a2);
-        if (n + l + 1 > FASTPOSTGRES_RING_ARG)
-        {
-            PyErr_SetString(PyExc_ValueError, "ring: argument too long");
-            return -1;
-        }
-        memcpy(r->arg + n, a2, l + 1);
+        PyErr_SetString(PyExc_ValueError, "ring: argument too long");
+        return -1;
     }
 
     r->op       = op;
