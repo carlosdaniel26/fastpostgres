@@ -53,7 +53,7 @@ echo "sqlalchemy: $(python3 -c 'import sqlalchemy; print(sqlalchemy.__version__)
 echo "### END ENV"
 
 cd /src/python-extension
-gosu postgres env PYTHONPATH=src python3 /src/benchmark/sqlalchemy_bench.py $SIZES
+gosu postgres env PYTHONPATH=. python3 /src/benchmark/sqlalchemy_bench.py $SIZES
 
 gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null
 SCRIPT

@@ -1,7 +1,6 @@
 /* codec.hpp — PostgreSQL type OID -> Python value, for the client's result
  * paths (libpq text rows and the columnar /dev/shm chunks). */
-#ifndef FASTPOSTGRES_CODEC_HPP
-#define FASTPOSTGRES_CODEC_HPP
+#pragma once
 
 #include <Python.h>
 #include <libpq-fe.h>
@@ -16,5 +15,3 @@ PyObject *fp_decode_value(PGresult *res, int row, int col);
 
 /* Decode one value out of a columnar /dev/shm chunk. */
 PyObject *fp_decode_column(const FastpostgresColumn *col, uint64_t row);
-
-#endif

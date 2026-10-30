@@ -41,7 +41,7 @@ gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 \
 run() {
   echo
   echo "### $1"
-  gosu postgres env PYTHONPATH=/src/python-extension/src \
+  gosu postgres env PYTHONPATH=/src/python-extension \
     python3 /src/demo/sqlalchemy_app.py "$2" "$N"
 }
 

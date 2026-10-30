@@ -4,8 +4,7 @@
  * through elog()); here every failure just returns nullptr so the caller can
  * raise a Python exception.
  */
-#ifndef FASTPOSTGRES_PY_SHM_MAP_H
-#define FASTPOSTGRES_PY_SHM_MAP_H
+#pragma once
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -60,5 +59,3 @@ fp_map_ro(const char *path, size_t *size_out)
     *size_out = (size_t)st.st_size;
     return map;
 }
-
-#endif

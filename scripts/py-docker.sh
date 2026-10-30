@@ -36,7 +36,7 @@ gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION fastpostgres;" >/dev/null
 
 cd /src/python-extension
-gosu postgres env PYTHONPATH=src DATABASE_URL="host=/tmp dbname=postgres user=postgres" \
+gosu postgres env PYTHONPATH=. DATABASE_URL="host=/tmp dbname=postgres user=postgres" \
   python3 -m unittest discover -s tests -v
 
 gosu postgres pg_ctl -D "$PGDATA" -w stop >/dev/null

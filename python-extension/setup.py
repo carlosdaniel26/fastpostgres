@@ -28,9 +28,13 @@ setup(
         Extension(
             "fastpostgres._client",
             sources=[
-                "src/fastpostgres/_client.cpp",
-                "src/fastpostgres/codec.cpp",
-                "src/fastpostgres/synth.cpp",
+                "fastpostgres/native/addon.cpp",
+                "fastpostgres/native/connection.cpp",
+                "fastpostgres/native/ring.cpp",
+                "fastpostgres/native/segment.cpp",
+                "fastpostgres/native/codec.cpp",
+                "fastpostgres/native/synth.cpp",
+                "fastpostgres/native/types.cpp",
             ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,
