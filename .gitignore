@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+bench.log
+bench-*.log
+bench_chart*.png
