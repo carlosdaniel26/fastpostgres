@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.png" width="600" alt="FastPostgres"></p>
+<p align="center"><img src="assets/logo-speed.png" width="600" alt="FastPostgres"></p>
 
 # FastPostgres
 
