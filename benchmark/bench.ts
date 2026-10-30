@@ -13,13 +13,13 @@ import { Connection, read, Ring, synthCopy, synthSegment } from '../node-extensi
 
 const QUERY =
   'SELECT id, account_id, balance, active, name, email, score, age FROM bench';
-const SEG = 'npseg';
-const RING = 'np_ring';
+const SEG = 'fastpostgres_seg';
+const RING = 'fastpostgres_ring';
 
 const CONN_TCP =
-  process.env.NP_TCP || 'host=127.0.0.1 dbname=postgres user=postgres';
+  process.env.FASTPOSTGRES_TCP || 'host=127.0.0.1 dbname=postgres user=postgres';
 const CONN_UNIX =
-  process.env.NP_UNIX || 'host=/tmp dbname=postgres user=postgres';
+  process.env.FASTPOSTGRES_UNIX || 'host=/tmp dbname=postgres user=postgres';
 
 const now = (): number => Number(process.hrtime.bigint()) / 1e6;
 const rate = (n: number, ms: number): number => n / (ms / 1000) / 1e6; // M rows/s
@@ -132,6 +132,24 @@ function row(
   );
 }
 
+/* Each transport is measured REPS times, rotating the run order so neither the
+ * warm-up nor the write-ahead log of an earlier run systematically favours one
+ * transport. The reported figure is the median time (hence the median rate). */
+const REPS = 3;
+/* Repeats are cheap and useful for small loads; at 10M a single read takes
+ * minutes, so the relative variance is already tiny and one run suffices. */
+const REPS_MAX_ROWS = 1_000_000;
+const ORDERS = [
+  ['tcp', 'unix', 'shm'],
+  ['shm', 'unix', 'tcp'],
+  ['unix', 'tcp', 'shm'],
+] as const;
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
 function main(): void {
   let sizes = process.argv
     .slice(2)
@@ -151,18 +169,37 @@ function main(): void {
   header('READ (rows/s)');
   for (const n of sizes) {
     setupTable(unix, n);
-    const rt = readText(tcp);
-    const ru = readText(unix);
-    const rs = readShm(ring);
+    const times: Record<'tcp' | 'unix' | 'shm', number[]> = { tcp: [], unix: [], shm: [] };
+    const reps = n <= REPS_MAX_ROWS ? REPS : 1; // long runs are already low-variance
+    if (reps > 1) readText(tcp); // warm-up, discarded
+    for (let r = 0; r < reps; r++) {
+      for (const name of ORDERS[r % ORDERS.length]) {
+        const t = name === 'tcp' ? readText(tcp) : name === 'unix' ? readText(unix) : readShm(ring);
+        times[name].push(t);
+      }
+    }
+    const rt = median(times.tcp);
+    const ru = median(times.unix);
+    const rs = median(times.shm);
     row(n, rate(n, rt), rate(n, ru), rate(n, rs), rt / rs, ru / rs);
   }
 
   console.log();
   header('WRITE (rows/s)');
   for (const n of sizes) {
-    const wt = writeCopy(tcp, n);
-    const wu = writeCopy(unix, n);
-    const ws = writeShm(unix, ring, n);
+    const times: Record<'tcp' | 'unix' | 'shm', number[]> = { tcp: [], unix: [], shm: [] };
+    const reps = n <= REPS_MAX_ROWS ? REPS : 1; // long runs are already low-variance
+    if (reps > 1) writeCopy(tcp, n); // warm-up, discarded
+    for (let r = 0; r < reps; r++) {
+      for (const name of ORDERS[r % ORDERS.length]) {
+        const t =
+          name === 'tcp' ? writeCopy(tcp, n) : name === 'unix' ? writeCopy(unix, n) : writeShm(unix, ring, n);
+        times[name].push(t);
+      }
+    }
+    const wt = median(times.tcp);
+    const wu = median(times.unix);
+    const ws = median(times.shm);
     row(n, rate(n, wt), rate(n, wu), rate(n, ws), wt / ws, wu / ws);
   }
 
