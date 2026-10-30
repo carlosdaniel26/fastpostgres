@@ -232,6 +232,89 @@ static inline int fastpostgres_col_isnull(const FastpostgresColumn *c, uint64_t 
     return (c->nulls[row >> 3] & (1u << (row & 7))) != 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * FPCOLUMN writer — the frame emitted by the extension (from tuples) and by the
+ * client's generators (from synthetic arrays). Both fill only the column data;
+ * the layout, the padding and the backpatched data_len live here once.
+ * ------------------------------------------------------------------------- */
+
+/* Bytes the frame itself occupies: magic, version, flags, ncols, nrows. */
+#define FASTPOSTGRES_COLUMNAR_FRAME (8u + 4u + 4u + 4u + 8u)
+
+typedef struct FastpostgresColumnarWrite {
+    char    *base;  /* payload base (8-byte aligned) */
+    char    *p;     /* current write position */
+    char    *nulls; /* the column being written: its null bitmap, for the caller to fill */
+    char    *lenp;  /* the column being written: its data_len, backpatched by write_end */
+    uint32_t ncols;
+    uint64_t nrows;
+} FastpostgresColumnarWrite;
+
+/* Offset of the next column's header, given the current offset, this column's
+ * frame and its data length — mirrors the padding write_column inserts. */
+static inline uint64_t fastpostgres_columnar_next_offset(uint64_t off, uint32_t name_len, uint32_t null_bytes,
+                                                         uint64_t data_len)
+{
+    return FASTPOSTGRES_ALIGN8(off + 4 + (uint64_t)name_len + 1 + 4 + null_bytes + 8) + data_len;
+}
+
+static inline void fastpostgres_columnar_write_begin(FastpostgresColumnarWrite *w, char *out, uint32_t ncols,
+                                                     uint64_t nrows)
+{
+    char *p = out;
+
+    memcpy(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8);
+    p += 8;
+    fastpostgres_put_u32(p, FASTPOSTGRES_COLUMNAR_VERSION);
+    p += 4;
+    fastpostgres_put_u32(p, 1); /* flags: little-endian */
+    p += 4;
+    fastpostgres_put_u32(p, ncols);
+    p += 4;
+    fastpostgres_put_u64(p, nrows);
+    p += 8;
+
+    w->base  = out;
+    w->p     = p;
+    w->nulls = NULL;
+    w->lenp  = NULL;
+    w->ncols = ncols;
+    w->nrows = nrows;
+}
+
+/* Write one column's frame; returns its 8-byte aligned data pointer and points
+ * `w->nulls` at the bitmap for the caller to fill. Finish with write_end(). */
+static inline char *fastpostgres_columnar_write_column(FastpostgresColumnarWrite *w, const char *name,
+                                                       uint32_t name_len, uint8_t kind, uint32_t pgtype,
+                                                       uint32_t null_bytes)
+{
+    char *p = w->p;
+
+    fastpostgres_put_u32(p, name_len);
+    p += 4;
+    memcpy(p, name, name_len);
+    p += name_len;
+    *p++ = (char)kind;
+    fastpostgres_put_u32(p, pgtype);
+    p += 4;
+    w->nulls = p;
+    memset(p, 0, null_bytes);
+    p += null_bytes;
+    w->lenp = p;
+    p += 8; /* data_len, backpatched by write_end */
+    while (((size_t)(p - w->base)) & 7)
+        *p++ = 0; /* 8-byte aligned column data */
+    w->p = p;
+    return p;
+}
+
+/* Backpatch the current column's data_len and advance past its data. */
+static inline void fastpostgres_columnar_write_end(FastpostgresColumnarWrite *w, uint64_t data_len)
+{
+    fastpostgres_put_u64(w->lenp, data_len);
+    w->p += data_len;
+}
+
 /* Fill in the segment header and publish it with a release barrier. */
 static inline void fastpostgres_shm_publish(void *map, uint64_t capacity, uint64_t payload_size)
 {

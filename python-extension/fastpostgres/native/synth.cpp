@@ -85,7 +85,7 @@ synth_segment(PyObject *, PyObject *args)
     if (!PyArg_ParseTuple(args, "sK", &name, &n)) return nullptr;
 
     std::string path = "/" + std::string(name);
-    uint64_t    data_len[8], null_bytes, off, total;
+    uint64_t    data_len[8], null_bytes, total;
     size_t      pre_user = 4, suf_mail = sizeof("@example.com") - 1;
 
     data_len[0] = n * 4;
@@ -107,14 +107,10 @@ synth_segment(PyObject *, PyObject *args)
     }
 
     null_bytes = (n + 7) / 8;
-    off        = 8 + 4 + 4 + 4 + 8;
+    total      = FASTPOSTGRES_COLUMNAR_FRAME;
     for (int c = 0; c < 8; c++)
-    {
-        off += 4 + strlen(COLS_NAME[c]) + 1 + 4 + null_bytes + 8;
-        off = FASTPOSTGRES_ALIGN8(off);
-        off += data_len[c];
-    }
-    total = off;
+        total = fastpostgres_columnar_next_offset(total, (uint32_t)strlen(COLS_NAME[c]), (uint32_t)null_bytes,
+                                                  data_len[c]);
     if (total + FASTPOSTGRES_SHM_HEADER_SIZE > (uint64_t)FASTPOSTGRES_SEGMENT_BYTES)
     {
         PyErr_SetString(PyExc_ValueError, "synth_segment: result exceeds the 1 GiB segment");
@@ -129,83 +125,62 @@ synth_segment(PyObject *, PyObject *args)
         return nullptr;
     }
 
-    char *base = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
-    char *p    = base;
-    memcpy(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8);
-    p += 8;
-    fastpostgres_put_u32(p, FASTPOSTGRES_COLUMNAR_VERSION);
-    p += 4;
-    fastpostgres_put_u32(p, 1);
-    p += 4; /* flags: little-endian */
-    fastpostgres_put_u32(p, 8);
-    p += 4;
-    fastpostgres_put_u64(p, n);
-    p += 8;
+    FastpostgresColumnarWrite w;
+    fastpostgres_columnar_write_begin(&w, (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE, 8, n);
 
     for (int c = 0; c < 8; c++)
     {
-        size_t nl = strlen(COLS_NAME[c]);
-        fastpostgres_put_u32(p, (uint32_t)nl);
-        p += 4;
-        memcpy(p, COLS_NAME[c], nl);
-        p += nl;
-        *p++ = (char)COLS_KIND[c];
-        fastpostgres_put_u32(p, (uint32_t)COLS_PGTYPE[c]);
-        p += 4;
-        memset(p, 0, null_bytes);
-        p += null_bytes; /* no nulls */
-        fastpostgres_put_u64(p, data_len[c]);
-        p += 8;
-        while (((size_t)(p - base)) & 7)
-            *p++ = 0; /* 8-byte aligned column data */
+        char *data = fastpostgres_columnar_write_column(&w, COLS_NAME[c], (uint32_t)strlen(COLS_NAME[c]),
+                                                        (uint8_t)COLS_KIND[c], (uint32_t)COLS_PGTYPE[c],
+                                                        (uint32_t)null_bytes);
 
         uint64_t r;
         switch (c)
         {
             case 0: {
-                int32_t *v = (int32_t *)p;
+                int32_t *v = (int32_t *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (int32_t)r;
                 break;
             }
             case 1: {
-                int64_t *v = (int64_t *)p;
+                int64_t *v = (int64_t *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (int64_t)(r * 1000);
                 break;
             }
             case 2: {
-                double *v = (double *)p;
+                double *v = (double *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (double)r * 1.5;
                 break;
             }
             case 3: {
-                uint8_t *v = (uint8_t *)p;
+                uint8_t *v = (uint8_t *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (r & 1) ? 0 : 1;
                 break;
             }
             case 4:
-                put_text_col(p, n, "user", pre_user, "", 0);
+                put_text_col(data, n, "user", pre_user, "", 0);
                 break;
             case 5:
-                put_text_col(p, n, "user", pre_user, "@example.com", suf_mail);
+                put_text_col(data, n, "user", pre_user, "@example.com", suf_mail);
                 break;
             case 6: {
-                double *v = (double *)p;
+                double *v = (double *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (double)r * 0.25;
                 break;
             }
             default: {
-                int32_t *v = (int32_t *)p;
+                int32_t *v = (int32_t *)data;
                 for (r = 0; r < n; r++)
                     v[r] = (int32_t)(r % 100);
                 break;
             }
         }
-        p += data_len[c];
+        fastpostgres_columnar_write_end(&w, data_len[c]);
     }
 
     fastpostgres_shm_publish(map, FASTPOSTGRES_SEGMENT_BYTES, total);

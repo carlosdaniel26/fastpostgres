@@ -9,7 +9,7 @@
 
 #include <datetime.h>
 
-static PyObject *s_decimal = nullptr;   /* decimal.Decimal */
+static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
 static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
 
