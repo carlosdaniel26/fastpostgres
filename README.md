@@ -9,6 +9,15 @@ each read with an SPI cursor and publishes batches as `FPCOLUMN` payloads in
 DDL and transactions keep using libpq. The format, its reader and its writer
 live in one header, `pg-extension/fastpostgres_shm.h`.
 
+## Measured
+
+![SQLAlchemy Core reads](assets/core-read.png)
+
+8-core container, PostgreSQL 18.6. Reads run ~6× the socket transports
+(≈7.5M vs ≈1.2M rows/s) and writes ~2.5×. Once rows become Python objects, the
+Core path lands 17–34% ahead of psycopg2 and the ORM 5–13%, because
+materialising and hydrating objects is allocation-bound.
+
 ## Usage
 
 Any SQLAlchemy app, unchanged apart from the URL:
@@ -35,15 +44,6 @@ scripts/dev.sh test          # client test suite
 scripts/dev.sh demo 5000     # the same app on psycopg2 and fastpostgres
 scripts/run_bench.py         # benchmarks + charts
 ```
-
-## Measured
-
-![SQLAlchemy Core reads](assets/core-read.png)
-
-8-core container, PostgreSQL 18.6. Reads run ~6× the socket transports
-(≈7.5M vs ≈1.2M rows/s) and writes ~2.5×. Once rows become Python objects, the
-Core path lands 17–34% ahead of psycopg2 and the ORM 5–13%, because
-materialising and hydrating objects is allocation-bound.
 
 Known limits: ring reads run in the worker's session, so they miss the calling
 connection's uncommitted writes (the driver is autocommit); `numeric` widens to
