@@ -16,3 +16,4 @@ __pycache__/
 bench.log
 bench-*.log
 bench_chart*.png
+sqlalchemy_chart*.png
