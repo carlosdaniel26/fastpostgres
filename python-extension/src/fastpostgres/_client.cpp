@@ -51,13 +51,11 @@ static PyObject *memory_view(const void *p, size_t n)
 
 /* ------------------------------------------------------------- Result type */
 
-typedef struct
-{
-    PyObject_HEAD
-    PyObject *fields;
-    PyObject *field_types;
-    PyObject *row_count;
-    PyObject *rows;
+typedef struct {
+    PyObject_HEAD PyObject *fields;
+    PyObject               *field_types;
+    PyObject               *row_count;
+    PyObject               *rows;
 } ResultObject;
 
 static void Result_dealloc(ResultObject *self)
@@ -98,13 +96,13 @@ static PyObject *row_tuple(PGresult *res, int r, int ncols)
 
 static PyObject *result_from_pg(PGresult *res)
 {
-    int         nrows = PQntuples(res);
-    int         ncols = PQnfields(res);
-    const char *tuples = PQcmdTuples(res);
+    int         nrows     = PQntuples(res);
+    int         ncols     = PQnfields(res);
+    const char *tuples    = PQcmdTuples(res);
     long        row_count = (tuples && tuples[0]) ? strtol(tuples, nullptr, 10) : 0;
-    PyObject   *fields = PyList_New(ncols);
-    PyObject   *types = PyList_New(ncols);
-    PyObject   *rows = PyList_New(nrows);
+    PyObject   *fields    = PyList_New(ncols);
+    PyObject   *types     = PyList_New(ncols);
+    PyObject   *rows      = PyList_New(nrows);
 
     if (!fields || !types || !rows)
     {
@@ -141,19 +139,17 @@ static PyObject *result_from_pg(PGresult *res)
         Py_DECREF(rows);
         return nullptr;
     }
-    result->fields = fields;
+    result->fields      = fields;
     result->field_types = types;
-    result->rows = rows;
-    result->row_count = PyLong_FromLong(row_count);
+    result->rows        = rows;
+    result->row_count   = PyLong_FromLong(row_count);
     return (PyObject *)result;
 }
 
 /* --------------------------------------------------------- Connection type */
 
-typedef struct
-{
-    PyObject_HEAD
-    PGconn *pg;
+typedef struct {
+    PyObject_HEAD PGconn *pg;
 } ConnectionObject;
 
 static void Connection_dealloc(ConnectionObject *self)
@@ -165,15 +161,14 @@ static void Connection_dealloc(ConnectionObject *self)
 static int Connection_init(ConnectionObject *self, PyObject *args, PyObject *kwds)
 {
     static const char *kwlist[] = {"conninfo", nullptr};
-    const char *conninfo = "";
+    const char        *conninfo = "";
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s", (char **)kwlist, &conninfo)) return -1;
 
-    PGconn *pg;
-    Py_BEGIN_ALLOW_THREADS
-    pg = PQconnectdb(conninfo);
+    PGconn                *pg;
+    Py_BEGIN_ALLOW_THREADS pg = PQconnectdb(conninfo);
     Py_END_ALLOW_THREADS
 
-    if (PQstatus(pg) != CONNECTION_OK)
+        if (PQstatus(pg) != CONNECTION_OK)
     {
         PyErr_Format(PyExc_ConnectionError, "libpq: %s", PQerrorMessage(pg));
         PQfinish(pg);
@@ -198,12 +193,11 @@ static PyObject *Connection_exec(ConnectionObject *self, PyObject *arg)
     const char *sql = PyUnicode_AsUTF8(arg);
     if (!sql) return nullptr;
 
-    PGresult *res;
-    Py_BEGIN_ALLOW_THREADS
-    res = PQexec(self->pg, sql);
+    PGresult              *res;
+    Py_BEGIN_ALLOW_THREADS res = PQexec(self->pg, sql);
     Py_END_ALLOW_THREADS
 
-    ExecStatusType st = PQresultStatus(res);
+        ExecStatusType st = PQresultStatus(res);
     if (st != PGRES_TUPLES_OK && st != PGRES_COMMAND_OK)
     {
         PyObject *err = raise_libpq(res);
@@ -257,7 +251,7 @@ static int copy_put_object(PGconn *pg, PyObject *item)
 static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
 {
     const char *sql;
-    PyObject *data;
+    PyObject   *data;
     if (!PyArg_ParseTuple(args, "sO", &sql, &data)) return nullptr;
     if (!self->pg)
     {
@@ -297,7 +291,8 @@ static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
 
     if (rc != 0)
     {
-        while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res); /* resync */
+        while ((res = PQgetResult(self->pg)) != nullptr)
+            PQclear(res); /* resync */
         return nullptr;
     }
 
@@ -306,14 +301,16 @@ static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
         int e = PQputCopyEnd(self->pg, nullptr);
         if (e < 0)
         {
-            while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res);
+            while ((res = PQgetResult(self->pg)) != nullptr)
+                PQclear(res);
             PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(self->pg));
             return nullptr;
         }
         if (e > 0) break;
         if (PQflush(self->pg) != 0)
         {
-            while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res);
+            while ((res = PQgetResult(self->pg)) != nullptr)
+                PQclear(res);
             PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(self->pg));
             return nullptr;
         }
@@ -324,11 +321,13 @@ static PyObject *Connection_copy_from(ConnectionObject *self, PyObject *args)
     {
         PyObject *err = raise_libpq(res);
         if (res) PQclear(res);
-        while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res);
+        while ((res = PQgetResult(self->pg)) != nullptr)
+            PQclear(res);
         return err;
     }
     PQclear(res);
-    while ((res = PQgetResult(self->pg)) != nullptr) PQclear(res);
+    while ((res = PQgetResult(self->pg)) != nullptr)
+        PQclear(res);
     Py_RETURN_NONE;
 }
 
@@ -353,15 +352,13 @@ static PyTypeObject ConnectionType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 /* ------------------------------------------------------------- Column type */
 
-typedef struct
-{
-    PyObject_HEAD
-    PyObject *name;
-    long      kind;
-    long      pgtype;
-    PyObject *data;  /* whole data region (offsets + bytes for text) */
-    PyObject *bytes; /* text only: the raw byte payload */
-    PyObject *nulls; /* 1 bit per row */
+typedef struct {
+    PyObject_HEAD PyObject *name;
+    long                    kind;
+    long                    pgtype;
+    PyObject               *data;  /* whole data region (offsets + bytes for text) */
+    PyObject               *bytes; /* text only: the raw byte payload */
+    PyObject               *nulls; /* 1 bit per row */
 } ColumnObject;
 
 static void Column_dealloc(ColumnObject *self)
@@ -387,11 +384,9 @@ static PyTypeObject ColumnType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 /* ------------------------------------------------------------ Segment type */
 
-typedef struct
-{
-    PyObject_HEAD
-    PyObject *row_count;
-    PyObject *columns;
+typedef struct {
+    PyObject_HEAD PyObject *row_count;
+    PyObject               *columns;
 } SegmentObject;
 
 static void Segment_dealloc(SegmentObject *self)
@@ -411,8 +406,7 @@ static PyTypeObject SegmentType = {PyVarObject_HEAD_INIT(nullptr, 0)};
 
 /* ---------------------------------------------------------- read(segName) */
 
-typedef struct
-{
+typedef struct {
     std::string name;
     void       *base;
     size_t      size;
@@ -445,7 +439,7 @@ static PyObject *module_read(PyObject *, PyObject *args)
 
     std::string path = "/" + std::string(name);
     size_t      size = 0;
-    void       *map = read_map_get(path.c_str(), name, &size);
+    void       *map  = read_map_get(path.c_str(), name, &size);
     if (map == nullptr)
     {
         PyErr_SetString(PyExc_OSError, "cannot map /dev/shm segment");
@@ -459,7 +453,7 @@ static PyObject *module_read(PyObject *, PyObject *args)
         return nullptr;
     }
 
-    const uint8_t *payload = (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+    const uint8_t     *payload = (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
     FastpostgresReader rd;
     if (!fastpostgres_reader_init(&rd, payload, payload_len))
     {
@@ -481,15 +475,15 @@ static PyObject *module_read(PyObject *, PyObject *args)
             Py_DECREF(columns);
             return nullptr;
         }
-        column->name = PyUnicode_FromStringAndSize(col.name, col.name_len);
-        column->kind = col.kind;
-        column->pgtype = (long)col.pgtype;
-        column->data = memory_view(col.data, col.data_len);
+        column->name         = PyUnicode_FromStringAndSize(col.name, col.name_len);
+        column->kind         = col.kind;
+        column->pgtype       = (long)col.pgtype;
+        column->data         = memory_view(col.data, col.data_len);
         size_t offsets_bytes = (size_t)(col.nrows + 1) * 4;
-        column->bytes = (col.kind == FASTPOSTGRES_KIND_TEXT && col.bytes)
-                            ? memory_view(col.bytes, (size_t)col.data_len - offsets_bytes)
-                            : Py_NewRef(Py_None);
-        column->nulls = memory_view(col.nulls, (size_t)((rd.nrows + 7) / 8));
+        column->bytes        = (col.kind == FASTPOSTGRES_KIND_TEXT && col.bytes)
+                                   ? memory_view(col.bytes, (size_t)col.data_len - offsets_bytes)
+                                   : Py_NewRef(Py_None);
+        column->nulls        = memory_view(col.nulls, (size_t)((rd.nrows + 7) / 8));
         PyList_SET_ITEM(columns, c, (PyObject *)column);
     }
 
@@ -499,7 +493,7 @@ static PyObject *module_read(PyObject *, PyObject *args)
         Py_DECREF(columns);
         return nullptr;
     }
-    segment->columns = columns;
+    segment->columns   = columns;
     segment->row_count = PyLong_FromLongLong((long long)rd.nrows);
     return (PyObject *)segment;
 }
@@ -512,7 +506,7 @@ static PyObject *module_read_rows(PyObject *, PyObject *args)
 
     std::string path = "/" + std::string(name);
     size_t      size = 0;
-    void       *map = read_map_get(path.c_str(), name, &size);
+    void       *map  = read_map_get(path.c_str(), name, &size);
     if (map == nullptr)
     {
         PyErr_SetString(PyExc_OSError, "cannot map /dev/shm segment");
@@ -548,8 +542,8 @@ static PyObject *module_read_rows(PyObject *, PyObject *args)
     }
 
     PyObject *fields = PyList_New(rd.ncols);
-    PyObject *types = PyList_New(rd.ncols);
-    PyObject *rows = PyList_New((Py_ssize_t)rd.nrows);
+    PyObject *types  = PyList_New(rd.ncols);
+    PyObject *rows   = PyList_New((Py_ssize_t)rd.nrows);
     if (!fields || !types || !rows)
     {
         Py_XDECREF(fields);
@@ -598,21 +592,19 @@ static PyObject *module_read_rows(PyObject *, PyObject *args)
         Py_DECREF(rows);
         return nullptr;
     }
-    result->fields = fields;
+    result->fields      = fields;
     result->field_types = types;
-    result->rows = rows;
-    result->row_count = PyLong_FromLongLong((long long)rd.nrows);
+    result->rows        = rows;
+    result->row_count   = PyLong_FromLongLong((long long)rd.nrows);
     return (PyObject *)result;
 }
 
 /* -------------------------------------------------------------- Ring type */
-typedef struct
-{
-    PyObject_HEAD
-    FastpostgresRing *ring;
-    void             *map;
-    size_t            size;
-    char              data[128]; /* the columnar segment of the current stream */
+typedef struct {
+    PyObject_HEAD FastpostgresRing *ring;
+    void                           *map;
+    size_t                          size;
+    char                            data[128]; /* the columnar segment of the current stream */
 } RingObject;
 
 static void Ring_dealloc(RingObject *self)
@@ -624,7 +616,7 @@ static void Ring_dealloc(RingObject *self)
 static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 {
     static const char *kwlist[] = {"segment", nullptr};
-    const char *seg;
+    const char        *seg;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "s", (char **)kwlist, &seg)) return -1;
 
     for (const char *p = seg; *p; p++)
@@ -639,7 +631,7 @@ static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     }
 
     std::string path = "/" + std::string(seg);
-    int         fd = shm_open(path.c_str(), O_RDWR | O_CREAT, 0600);
+    int         fd   = shm_open(path.c_str(), O_RDWR | O_CREAT, 0600);
     if (fd < 0)
     {
         PyErr_SetString(PyExc_OSError, "Ring: cannot create /dev/shm segment");
@@ -665,8 +657,7 @@ static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
         /* fresh segment: initialise the semaphores before the worker starts */
         memset(r, 0, FASTPOSTGRES_RING_BYTES);
         if (sem_init(&r->req_ready, 1, 0) != 0 || sem_init(&r->resp_ready, 1, 0) != 0 ||
-            sem_init(&r->push_free, 1, FASTPOSTGRES_PUSH_SLOTS) != 0 ||
-            sem_init(&r->push_ready, 1, 0) != 0)
+            sem_init(&r->push_free, 1, FASTPOSTGRES_PUSH_SLOTS) != 0 || sem_init(&r->push_ready, 1, 0) != 0)
         {
             munmap(map, FASTPOSTGRES_RING_BYTES);
             PyErr_SetString(PyExc_OSError, "Ring: sem_init failed");
@@ -677,7 +668,7 @@ static int Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     }
 
     self->ring = r;
-    self->map = map;
+    self->map  = map;
     self->size = FASTPOSTGRES_RING_BYTES;
     memcpy(self->data, seg, std::strlen(seg) + 1);
     return 0;
@@ -704,7 +695,7 @@ static long long ring_request(RingObject *self, uint32_t op, const char *a1, con
     else
     {
         r->arg[0] = 0;
-        n = 1;
+        n         = 1;
     }
     if (a2)
     {
@@ -717,10 +708,10 @@ static long long ring_request(RingObject *self, uint32_t op, const char *a1, con
         memcpy(r->arg + n, a2, l + 1);
     }
 
-    r->op = op;
-    r->batch = batch;
-    r->status = 0;
-    r->nrows = 0;
+    r->op       = op;
+    r->batch    = batch;
+    r->status   = 0;
+    r->nrows    = 0;
     r->error[0] = 0;
 
     __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
@@ -729,11 +720,9 @@ static long long ring_request(RingObject *self, uint32_t op, const char *a1, con
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 10;
-    int rc;
-    Py_BEGIN_ALLOW_THREADS
-    rc = sem_timedwait(&r->resp_ready, &ts);
-    Py_END_ALLOW_THREADS
-    if (rc != 0)
+    int                    rc;
+    Py_BEGIN_ALLOW_THREADS rc = sem_timedwait(&r->resp_ready, &ts);
+    Py_END_ALLOW_THREADS if (rc != 0)
     {
         PyErr_SetString(PyExc_TimeoutError, "ring: timeout waiting for the worker");
         return -1;
@@ -761,12 +750,10 @@ static PyObject *Ring_start(RingObject *self, PyObject *conn)
         return nullptr;
     }
 
-    std::string sql = "SELECT fastpostgres_ring_start('" + std::string(self->data) + "')";
-    PGresult   *res;
-    Py_BEGIN_ALLOW_THREADS
-    res = PQexec(pg, sql.c_str());
-    Py_END_ALLOW_THREADS
-    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    std::string            sql = "SELECT fastpostgres_ring_start('" + std::string(self->data) + "')";
+    PGresult              *res;
+    Py_BEGIN_ALLOW_THREADS res = PQexec(pg, sql.c_str());
+    Py_END_ALLOW_THREADS if (PQresultStatus(res) != PGRES_TUPLES_OK)
     {
         PyObject *err = raise_libpq(res);
         PQclear(res);
@@ -825,7 +812,7 @@ static PyObject *Ring_write(RingObject *self, PyObject *args)
 static PyObject *Ring_stop(RingObject *self, PyObject *)
 {
     FastpostgresRing *r = self->ring;
-    r->op = FASTPOSTGRES_OP_STOP;
+    r->op               = FASTPOSTGRES_OP_STOP;
     __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
     sem_post(&r->req_ready);
     Py_RETURN_NONE;
@@ -852,19 +839,26 @@ static PyMethodDef module_methods[] = {
 };
 
 static struct PyModuleDef moduledef = {
-    PyModuleDef_HEAD_INIT, "fastpostgres._client", "fastpostgres client (shared memory + libpq)",
-    -1, module_methods, nullptr, nullptr, nullptr, nullptr,
+    PyModuleDef_HEAD_INIT,
+    "fastpostgres._client",
+    "fastpostgres client (shared memory + libpq)",
+    -1,
+    module_methods,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
 };
 
 static bool init_type(PyTypeObject *type, const char *name, Py_ssize_t basicsize, destructor dealloc,
                       PyMethodDef *methods, PyMemberDef *members)
 {
-    type->tp_name = name;
+    type->tp_name      = name;
     type->tp_basicsize = basicsize;
-    type->tp_dealloc = dealloc;
-    type->tp_flags = Py_TPFLAGS_DEFAULT;
-    type->tp_methods = methods;
-    type->tp_members = members;
+    type->tp_dealloc   = dealloc;
+    type->tp_flags     = Py_TPFLAGS_DEFAULT;
+    type->tp_methods   = methods;
+    type->tp_members   = members;
     return PyType_Ready(type) == 0;
 }
 
@@ -883,24 +877,24 @@ PyMODINIT_FUNC PyInit__client(void)
     if (!init_type(&SegmentType, "fastpostgres.Segment", sizeof(SegmentObject), (destructor)Segment_dealloc,
                    nullptr, Segment_members))
         return nullptr;
-    if (!init_type(&RingType, "fastpostgres.Ring", sizeof(RingObject), (destructor)Ring_dealloc,
-                   Ring_methods, nullptr))
+    if (!init_type(&RingType, "fastpostgres.Ring", sizeof(RingObject), (destructor)Ring_dealloc, Ring_methods,
+                   nullptr))
         return nullptr;
     ConnectionType.tp_init = (initproc)Connection_init;
-    ConnectionType.tp_new = PyType_GenericNew;
-    RingType.tp_init = (initproc)Ring_init;
-    RingType.tp_new = PyType_GenericNew;
+    ConnectionType.tp_new  = PyType_GenericNew;
+    RingType.tp_init       = (initproc)Ring_init;
+    RingType.tp_new        = PyType_GenericNew;
 
     PyObject *m = PyModule_Create(&moduledef);
     if (!m) return nullptr;
 
-    struct
-    {
-        const char *name;
+    struct {
+        const char   *name;
         PyTypeObject *type;
     } types[] = {
-        {"Result", &ResultType}, {"Connection", &ConnectionType}, {"Column", &ColumnType},
-        {"Segment", &SegmentType}, {"Ring", &RingType},
+        {"Result", &ResultType}, {"Connection", &ConnectionType},
+        {"Column", &ColumnType}, {"Segment", &SegmentType},
+        {"Ring", &RingType},
     };
     for (auto &t : types)
     {

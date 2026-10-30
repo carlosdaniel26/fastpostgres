@@ -76,7 +76,7 @@ static void put_text_col(char *p, uint64_t n, const char *prefix, size_t pre, co
 
 static PyObject *synth_segment(PyObject *, PyObject *args)
 {
-    const char      *name;
+    const char        *name;
     unsigned long long n;
     if (!PyArg_ParseTuple(args, "sK", &name, &n)) return nullptr;
 
@@ -103,7 +103,7 @@ static PyObject *synth_segment(PyObject *, PyObject *args)
     }
 
     null_bytes = (n + 7) / 8;
-    off = 8 + 4 + 4 + 4 + 8;
+    off        = 8 + 4 + 4 + 4 + 8;
     for (int c = 0; c < 8; c++)
     {
         off += 4 + strlen(COLS_NAME[c]) + 1 + 4 + null_bytes + 8;
@@ -126,7 +126,7 @@ static PyObject *synth_segment(PyObject *, PyObject *args)
     }
 
     char *base = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
-    char *p = base;
+    char *p    = base;
     memcpy(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8);
     p += 8;
     fastpostgres_put_u32(p, FASTPOSTGRES_COLUMNAR_VERSION);
@@ -160,22 +160,26 @@ static PyObject *synth_segment(PyObject *, PyObject *args)
         {
             case 0: {
                 int32_t *v = (int32_t *)p;
-                for (r = 0; r < n; r++) v[r] = (int32_t)r;
+                for (r = 0; r < n; r++)
+                    v[r] = (int32_t)r;
                 break;
             }
             case 1: {
                 int64_t *v = (int64_t *)p;
-                for (r = 0; r < n; r++) v[r] = (int64_t)(r * 1000);
+                for (r = 0; r < n; r++)
+                    v[r] = (int64_t)(r * 1000);
                 break;
             }
             case 2: {
                 double *v = (double *)p;
-                for (r = 0; r < n; r++) v[r] = (double)r * 1.5;
+                for (r = 0; r < n; r++)
+                    v[r] = (double)r * 1.5;
                 break;
             }
             case 3: {
                 uint8_t *v = (uint8_t *)p;
-                for (r = 0; r < n; r++) v[r] = (r & 1) ? 0 : 1;
+                for (r = 0; r < n; r++)
+                    v[r] = (r & 1) ? 0 : 1;
                 break;
             }
             case 4:
@@ -186,12 +190,14 @@ static PyObject *synth_segment(PyObject *, PyObject *args)
                 break;
             case 6: {
                 double *v = (double *)p;
-                for (r = 0; r < n; r++) v[r] = (double)r * 0.25;
+                for (r = 0; r < n; r++)
+                    v[r] = (double)r * 0.25;
                 break;
             }
             default: {
                 int32_t *v = (int32_t *)p;
-                for (r = 0; r < n; r++) v[r] = (int32_t)(r % 100);
+                for (r = 0; r < n; r++)
+                    v[r] = (int32_t)(r % 100);
                 break;
             }
         }
@@ -209,9 +215,9 @@ static PyObject *synth_copy(PyObject *, PyObject *args)
     unsigned long long n;
     if (!PyArg_ParseTuple(args, "K", &n)) return nullptr;
 
-    const size_t cap = 1 << 20;
+    const size_t cap   = 1 << 20;
     char        *chunk = (char *)malloc(cap);
-    PyObject    *list = PyList_New(0);
+    PyObject    *list  = PyList_New(0);
     if (!chunk || !list)
     {
         free(chunk);
@@ -234,8 +240,8 @@ static PyObject *synth_copy(PyObject *, PyObject *args)
             off = 0;
         }
         off += (size_t)snprintf(chunk + off, cap - off,
-                                "%llu\t%lld\t%.1f\t%c\tuser%llu\tuser%llu@example.com\t%.2f\t%llu\n",
-                                i, (long long)(i * 1000), (double)i * 1.5, (i & 1) ? 'f' : 't', i, i,
+                                "%llu\t%lld\t%.1f\t%c\tuser%llu\tuser%llu@example.com\t%.2f\t%llu\n", i,
+                                (long long)(i * 1000), (double)i * 1.5, (i & 1) ? 'f' : 't', i, i,
                                 (double)i * 0.25, (unsigned long long)(i % 100));
     }
     if (off)

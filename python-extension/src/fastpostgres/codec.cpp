@@ -36,8 +36,8 @@ enum
     OID_JSONB       = 3802,
 };
 
-static PyObject *s_decimal = nullptr;   /* decimal.Decimal */
-static PyObject *s_timezone = nullptr;  /* datetime.timezone */
+static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
+static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
 
 bool fp_codec_init(void)
@@ -51,7 +51,7 @@ bool fp_codec_init(void)
 
     PyObject *dt = PyImport_ImportModule("datetime");
     if (!dt) return false;
-    s_timezone = PyObject_GetAttrString(dt, "timezone");
+    s_timezone  = PyObject_GetAttrString(dt, "timezone");
     s_timedelta = PyObject_GetAttrString(dt, "timedelta");
     Py_DECREF(dt);
     return s_timezone != nullptr && s_timedelta != nullptr;
@@ -70,9 +70,9 @@ static PyObject *bytes_from_bytea(const char *s)
 {
     if (s[0] == '\\' && s[1] == 'x')
     {
-        size_t      hexlen = strlen(s + 2);
-        Py_ssize_t  n = (Py_ssize_t)(hexlen / 2);
-        PyObject   *out = PyBytes_FromStringAndSize(nullptr, n);
+        size_t     hexlen = strlen(s + 2);
+        Py_ssize_t n      = (Py_ssize_t)(hexlen / 2);
+        PyObject  *out    = PyBytes_FromStringAndSize(nullptr, n);
         if (!out) return nullptr;
         char *dst = PyBytes_AS_STRING(out);
         for (Py_ssize_t i = 0; i < n; i++)
@@ -143,8 +143,8 @@ static PyObject *parse_datetime(const char *s, int with_time, int with_tz)
     PyObject *tz = PyObject_CallFunctionObjArgs(s_timezone, delta, nullptr);
     Py_DECREF(delta);
     if (!tz) return nullptr;
-    PyObject *out = PyDateTimeAPI->DateTime_FromDateAndTime(y, mo, d, h, mi, sec, us, tz,
-                                                            PyDateTimeAPI->DateTimeType);
+    PyObject *out =
+        PyDateTimeAPI->DateTime_FromDateAndTime(y, mo, d, h, mi, sec, us, tz, PyDateTimeAPI->DateTimeType);
     Py_DECREF(tz);
     return out;
 }
@@ -178,7 +178,7 @@ PyObject *fp_decode_value(PGresult *res, int row, int col)
     if (PQgetisnull(res, row, col)) Py_RETURN_NONE;
 
     Oid         type = PQftype(res, col);
-    const char *s = PQgetvalue(res, row, col);
+    const char *s    = PQgetvalue(res, row, col);
 
     switch (type)
     {
@@ -245,12 +245,12 @@ PyObject *fp_decode_column(const FastpostgresColumn *c, uint64_t row)
             return PyFloat_FromDouble(v);
         }
         default: { /* text: int32 offset table, then the raw bytes */
-            const int32_t *off = (const int32_t *)c->data;
+            const int32_t *off  = (const int32_t *)c->data;
             const char    *base = (const char *)c->bytes;
-            int32_t        s0 = off[row];
-            int32_t        s1 = off[row + 1];
-            const char    *s = base + s0;
-            Py_ssize_t     len = (Py_ssize_t)(s1 - s0);
+            int32_t        s0   = off[row];
+            int32_t        s1   = off[row + 1];
+            const char    *s    = base + s0;
+            Py_ssize_t     len  = (Py_ssize_t)(s1 - s0);
 
             switch (c->pgtype)
             {
@@ -260,7 +260,7 @@ PyObject *fp_decode_column(const FastpostgresColumn *c, uint64_t row)
                 case OID_TIMESTAMPTZ:
                 case OID_BYTEA: {
                     /* the parsers need a NUL-terminated string */
-                    char      buf[96];
+                    char       buf[96];
                     Py_ssize_t n = len < (Py_ssize_t)sizeof(buf) - 1 ? len : (Py_ssize_t)sizeof(buf) - 1;
                     memcpy(buf, s, (size_t)n);
                     buf[n] = 0;
