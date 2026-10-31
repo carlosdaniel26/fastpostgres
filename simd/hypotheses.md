@@ -440,6 +440,62 @@ per batch (the ring is synchronous, no double buffering), so the two sides add
 rather than overlap, and what the worker stops doing comes straight off the
 total.
 
+### The pass that hid in the slot type
+
+The receiver's fast path — one memcpy out of the slot's tuple — only applies to
+slots that have a tuple: `TTSOpsBufferHeapTuple` (a plain scan) and
+`TTSOpsHeapTuple`. Virtual and minimal slots both answer NULL for
+`get_heap_tuple`, so `ExecFetchSlotHeapTuple(.., false)` *materialises* one:
+`heap_form_tuple` out of a projection's values, `heap_tuple_from_minimal_tuple`
+out of a tuplestore's. The receiver then copied that. Every projected row (one
+expression anywhere in the list, a function scan, some joins) and every sorted
+or aggregated row therefore paid two passes over every value plus a palloc —
+invisibly, because the benchmark's plain column lists match the scan's tupdesc
+and never took that path.
+
+Instrumented receiver, counting which branch ran: plain columns, 700,000 fast
+path / 0 values; `id + 0`, `active || ''` and `ORDER BY id` each 0 / 700,000.
+
+The values are now written straight into the segment (`slot_getallattrs` plus
+the `heap_compute_data_size`/`heap_fill_tuple` the rebuild path already used),
+so a projected row is one pass again. A/B on the same probes, fresh process, 0
+fallbacks, best of five:
+
+| row | shape | materialise + copy | values |
+|---|---|---|---|
+| ~100 B | plain columns | 162 ns | 160 ns |
+| ~100 B | one expression | 246 ns | **240 ns** |
+| ~1.2 KB | plain columns | 494 ns | 481 ns |
+| ~1.2 KB | one expression | 651 ns | **585 ns** |
+| ~1.2 KB | ORDER BY | 1690 ns | 1682 ns |
+
+That is the shape of the thing: one pass over the row, so it is worth ~10% of a
+projected read at 1.2 KB, ~2% at 100 B, and nothing at all on the benchmark's
+plain columns (which is why the CORE number did not move). The minimal-slot case
+is a wash in time — a minimal-to-heap conversion is itself a copy — but one
+allocation per row lighter.
+
+What is left, and what each is worth:
+
+- **the memcpy out of the buffer page**: ~90 B/row, 3-5 ns/row, ~1% of a CORE
+  row in this shape. Removing it means the client reading PostgreSQL's own pages,
+  and on Linux those are anonymous — `shared_memory_type=mmap` is the default, a
+  `MAP_SHARED|MAP_ANONYMOUS` segment made before the postmaster forks, with no
+  name, no fd and no shmid, so a process that was not forked from it cannot map
+  it. Even with an fd (SysV plus `shmat`, or `/proc/pid/map_files`, which wants
+  ptrace rights Docker's seccomp profile denies) the frame would owe buffer pins
+  held until the client acks, a buffer-index-to-address translation, and the
+  toast relation. For ~1%.
+- **the value store into the object cell**: this is what H11-v2 would move to
+  the worker — the same stores, plus a client-published CPython layout table and
+  3-4x the server write footprint. ~2-4% at best, on the fragile side of this
+  project's line.
+- **the kernel zero-filling fresh arena pages**: ~200 B/row (118 MiB for 600k
+  rows), ~10-15 ns/row — larger than the server's copy, and the price of an
+  arena whose pages an immortal object can never be recycled out of. The only
+  lever is fewer or smaller objects: views instead of tuples (`stream()`), or the
+  cgroup-sized pool noted below.
+
 Two traps, both of which produced wrong values before they produced a failing
 assertion, both now guarded by the build:
 
