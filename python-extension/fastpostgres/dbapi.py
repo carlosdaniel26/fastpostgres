@@ -367,7 +367,7 @@ class Connection:
             ring.open(seg, sql)
             try:
                 while True:
-                    n = ring.next(_SHM_BATCH)
+                    n = ring.next_rows(_SHM_BATCH)
                     chunk = _client.read_rows(seg)
                     if fields is None:
                         fields, field_types = chunk.fields, chunk.field_types

@@ -34,6 +34,13 @@ PyObject *fp_decode_value(PGresult *res, int row, int col);
 /* Decode one value out of a columnar /dev/shm chunk. */
 PyObject *fp_decode_column(const FastpostgresColumn *col, uint64_t row);
 
-/* The same, without the null test: for callers that already know the column has
- * no nulls (decided once per column, not once per value). */
-PyObject *fp_decode_column_nonull(const FastpostgresColumn *col, uint64_t row);
+/* Fill `rows` (a list of nrows tuples already allocated by the caller) from a
+ * decoded columnar frame: one specialized loop per column, so the kind switch
+ * runs once per column rather than once per value, and the births inline.
+ * Returns false with a Python exception set. */
+bool fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows, PyObject *rows);
+
+/* Fill `rows` (a list of nrows slots, one per tuple in the row frame) by walking
+ * each tuple in place: the server hands over PostgreSQL's own row layout, so
+ * every value is decoded where it lies. Returns false with an exception set. */
+bool fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd, PyObject *rows);

@@ -188,6 +188,19 @@ Ring_next(RingObject *self, PyObject *args)
     return PyLong_FromLongLong(n);
 }
 
+/* The same pull, answered with the row frame: the result tuples themselves, for
+ * callers that build Python objects from them. */
+static PyObject *
+Ring_next_rows(RingObject *self, PyObject *args)
+{
+    long long batch = 100000;
+    if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
+    if (batch <= 0) batch = 100000;
+    long long n = ring_request(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, nullptr, (uint32_t)batch);
+    if (n < 0) return nullptr;
+    return PyLong_FromLongLong(n);
+}
+
 static PyObject *
 Ring_close(RingObject *self, PyObject *)
 {
@@ -218,7 +231,9 @@ Ring_stop(RingObject *self, PyObject *)
 static PyMethodDef Ring_methods[] = {
     {"start", (PyCFunction)Ring_start, METH_O, "start(conn): bootstrap the worker"},
     {"open", (PyCFunction)Ring_open, METH_VARARGS, "open(seg, query): start a stream"},
-    {"next", (PyCFunction)Ring_next, METH_VARARGS, "next(batch=100000) -> int rows"},
+    {"next", (PyCFunction)Ring_next, METH_VARARGS, "next(batch=100000) -> int rows (the columnar frame)"},
+    {"next_rows", (PyCFunction)Ring_next_rows, METH_VARARGS,
+     "next_rows(batch=100000) -> int rows (the row frame; falls back to columnar)"},
     {"close", (PyCFunction)Ring_close, METH_NOARGS, "close(): end the stream"},
     {"write", (PyCFunction)Ring_write, METH_VARARGS, "write(seg, table) -> int rows"},
     {"stop", (PyCFunction)Ring_stop, METH_NOARGS, "stop(): ask the worker to exit"},

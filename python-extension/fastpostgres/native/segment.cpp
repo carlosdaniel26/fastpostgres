@@ -1,7 +1,10 @@
-/* segment.cpp — read a columnar segment (/dev/shm/<seg>) as either zero-copy
- * column views (read) or materialized typed row tuples (read_rows). A mapping
- * is kept for the process lifetime: the worker rewrites the same segment in
- * place, so each read only revalidates the header. */
+/* segment.cpp — read a result segment (/dev/shm/<seg>) as either zero-copy
+ * column views (read) or materialized typed row tuples (read_rows). The worker
+ * answers a row request with the row frame (FPROWS) and falls back to the
+ * columnar frame (FPCOLUMN) when an attribute is not one the client can walk in
+ * place; read_rows takes either. A mapping is kept for the process lifetime:
+ * the worker rewrites the same segment in place, so each read only revalidates
+ * the header. */
 #include "segment.hpp"
 
 #include <cstdint>
@@ -40,43 +43,88 @@ read_map_get(const char *path, const std::string &name, size_t *size_out)
     return base;
 }
 
-/* Map the segment and point a reader at its FPCOLUMN payload. */
-static bool
-segment_reader(const char *name, FastpostgresReader *rd, size_t *mapped_size)
+/* Map the segment and hand back its payload. */
+static const uint8_t *
+segment_payload(const char *name, uint64_t *payload_len)
 {
     std::string path = "/" + std::string(name);
     size_t      size = 0;
     void       *map  = read_map_get(path.c_str(), name, &size);
+
     if (map == nullptr)
     {
         PyErr_SetString(PyExc_OSError, "cannot map /dev/shm segment");
-        return false;
+        return nullptr;
     }
-
-    uint64_t payload_len = 0;
-    if (!fastpostgres_shm_validate(map, size, &payload_len))
+    if (!fastpostgres_shm_validate(map, size, payload_len))
     {
         PyErr_SetString(PyExc_ValueError, "not a fastpostgres segment");
-        return false;
+        return nullptr;
     }
-    if (!fastpostgres_reader_init(rd, (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE, payload_len))
+    return (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+}
+
+/* The field names and type OIDs every Result carries. */
+static bool
+result_meta(const std::vector<FastpostgresColumn> &cols, PyObject **fields, PyObject **types)
+{
+    *fields = PyList_New((Py_ssize_t)cols.size());
+    *types  = PyList_New((Py_ssize_t)cols.size());
+    if (*fields == nullptr || *types == nullptr)
     {
-        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        Py_XDECREF(*fields);
+        Py_XDECREF(*types);
         return false;
     }
-    *mapped_size = size;
+    for (size_t c = 0; c < cols.size(); c++)
+    {
+        PyObject *name = PyUnicode_FromStringAndSize(cols[c].name, cols[c].name_len);
+        PyObject *oid  = PyLong_FromLong((long)cols[c].pgtype);
+
+        if (name == nullptr || oid == nullptr)
+        {
+            Py_XDECREF(name);
+            Py_XDECREF(oid);
+            Py_DECREF(*fields);
+            Py_DECREF(*types);
+            return false;
+        }
+        PyList_SET_ITEM(*fields, (Py_ssize_t)c, name);
+        PyList_SET_ITEM(*types, (Py_ssize_t)c, oid);
+    }
     return true;
 }
 
+static PyObject *
+result_from(const std::vector<FastpostgresColumn> &cols, uint64_t nrows, PyObject *rows)
+{
+    PyObject *fields, *types;
+
+    if (!result_meta(cols, &fields, &types))
+    {
+        Py_DECREF(rows);
+        return nullptr;
+    }
+    return fp_result(fields, types, rows, (long)nrows);
+}
+
+/* read(seg): the columnar frame as zero-copy column views. */
 static PyObject *
 segment_read(PyObject *, PyObject *args)
 {
     const char *name;
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
 
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
+
     FastpostgresReader rd;
-    size_t             size = 0;
-    if (!segment_reader(name, &rd, &size)) return nullptr;
+    if (!fastpostgres_reader_init(&rd, payload, payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        return nullptr;
+    }
 
     PyObject *columns = PyList_New(rd.ncols);
     if (!columns) return nullptr;
@@ -123,12 +171,49 @@ segment_read_rows(PyObject *, PyObject *args)
     const char *name;
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
 
-    FastpostgresReader rd;
-    size_t             size = 0;
-    if (!segment_reader(name, &rd, &size)) return nullptr;
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
 
-    std::vector<FastpostgresColumn> cols(rd.ncols);
-    uint32_t                        got = 0;
+    FastpostgresRowsReader rrd;
+    if (fastpostgres_rows_init(&rrd, payload, payload_len))
+    {
+        /* The row frame: PostgreSQL's own tuple bytes, decoded where they lie.
+         * The tuples are built by the decoder as it walks each one. */
+        FastpostgresRowsDesc            desc;
+        std::vector<FastpostgresColumn> cols(rrd.ncols);
+
+        fastpostgres_rows_desc_begin(&desc, payload, (uint64_t)(rrd.p - rrd.base));
+        for (uint32_t c = 0; c < rrd.ncols; c++)
+            if (!fastpostgres_rows_desc_next(&desc, &cols[c]))
+            {
+                PyErr_SetString(PyExc_ValueError, "truncated row payload");
+                return nullptr;
+            }
+
+        PyObject *rows = PyList_New((Py_ssize_t)rrd.left);
+        if (!rows) return nullptr;
+
+        if (!fp_decode_tuples(cols.data(), rrd.ncols, &rrd, rows))
+        {
+            Py_DECREF(rows);
+            return nullptr;
+        }
+        return result_from(cols, (uint64_t)PyList_GET_SIZE(rows), rows);
+    }
+
+    /* The columnar frame, from the fallback for attributes that have to go
+     * through their output function. */
+    FastpostgresReader              rd;
+    std::vector<FastpostgresColumn> cols;
+
+    if (!fastpostgres_reader_init(&rd, payload, payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres payload");
+        return nullptr;
+    }
+    cols.resize(rd.ncols);
+    uint32_t got = 0;
     for (uint32_t c = 0; c < rd.ncols; c++)
     {
         if (!fastpostgres_reader_next(&rd, &cols[c])) break;
@@ -140,57 +225,30 @@ segment_read_rows(PyObject *, PyObject *args)
         return nullptr;
     }
 
-    PyObject *fields = PyList_New(rd.ncols);
-    PyObject *types  = PyList_New(rd.ncols);
-    PyObject *rows   = PyList_New((Py_ssize_t)rd.nrows);
-    if (!fields || !types || !rows)
-    {
-        Py_XDECREF(fields);
-        Py_XDECREF(types);
-        Py_XDECREF(rows);
-        return nullptr;
-    }
+    PyObject *rows = PyList_New((Py_ssize_t)rd.nrows);
+    if (!rows) return nullptr;
 
-    for (uint32_t c = 0; c < rd.ncols; c++)
-    {
-        PyList_SET_ITEM(fields, c, PyUnicode_FromStringAndSize(cols[c].name, cols[c].name_len));
-        PyList_SET_ITEM(types, c, PyLong_FromLong((long)cols[c].pgtype));
-    }
-
-    /* One bulk null test per column, rather than a bitmap probe per value:
-     * a column with no nulls skips the test for every row it holds. */
-    std::vector<char> nullfree(rd.ncols);
-    for (uint32_t c = 0; c < rd.ncols; c++)
-        nullfree[c] = !fastpostgres_nullmap_any(cols[c].nulls, (size_t)((rd.nrows + 7) / 8));
-
+    /* Every tuple up front, then one specialized pass per column, writing into
+     * the row slots as each column is swept. A tuple with NULL slots is only
+     * reachable through the list, and both the GC and the deallocator walk
+     * tuple items null-safely. */
     for (uint64_t r = 0; r < rd.nrows; r++)
     {
         PyObject *row = PyTuple_New(rd.ncols);
         if (!row)
         {
-            Py_DECREF(fields);
-            Py_DECREF(types);
             Py_DECREF(rows);
             return nullptr;
         }
-        for (uint32_t c = 0; c < rd.ncols; c++)
-        {
-            PyObject *v = nullfree[c] ? fp_decode_column_nonull(&cols[c], r)
-                                      : fp_decode_column(&cols[c], r);
-            if (!v)
-            {
-                Py_DECREF(row);
-                Py_DECREF(fields);
-                Py_DECREF(types);
-                Py_DECREF(rows);
-                return nullptr;
-            }
-            PyTuple_SET_ITEM(row, c, v);
-        }
-        PyList_SET_ITEM(rows, r, row);
+        PyList_SET_ITEM(rows, (Py_ssize_t)r, row);
     }
 
-    return fp_result(fields, types, rows, (long)rd.nrows);
+    if (!fp_decode_columns(cols.data(), rd.ncols, rd.nrows, rows))
+    {
+        Py_DECREF(rows);
+        return nullptr;
+    }
+    return result_from(cols, rd.nrows, rows);
 }
 
 static PyMethodDef segment_methods[] = {

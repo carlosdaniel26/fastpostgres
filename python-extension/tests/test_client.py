@@ -241,6 +241,40 @@ class DbapiTest(unittest.TestCase):
         self.assertEqual(by, b"\x00\x01\x02\x03\xff")
         self.assertIsNone(null_d)
 
+    def test_shm_row_path_detoasts(self):
+        """The row frame carries PostgreSQL's own tuples, so the worker has to
+        resolve what it cannot send in place: a compressed value inline in the
+        tuple and one stored out of line both arrive as their real value."""
+        sql = (
+            "SELECT repeat('y', 20000) AS compressed, repeat(md5(g::text), 700) AS external, "
+            "'2026-10-30'::date AS d FROM generate_series(1, 2) g"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        self.assertGreater(self.conn.shm_reads, 0, "the shm path should have served this read")
+
+        plain = fp.Connection(CONNINFO).exec(sql).rows
+        self.assertEqual(rows, plain)
+        self.assertEqual(len(rows[0][0]), 20000)
+        self.assertEqual(len(rows[0][1]), 32 * 700)
+        self.assertEqual((rows[0][2].year, rows[0][2].month, rows[0][2].day), (2026, 10, 30))
+
+    def test_shm_falls_back_for_types_it_cannot_walk(self):
+        """A type whose storage is not the wire bytes themselves (numeric) makes
+        the batch take the columnar frame; the values and OIDs are unchanged."""
+        sql = "SELECT 1234.5::numeric AS num, 'x'::text AS t, 7::int4 AS n, NULL::int8 AS missing"
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        row = cur.fetchone()
+        self.assertGreater(self.conn.shm_reads, 0, "the shm path should have served this read")
+
+        plain = fp.Connection(CONNINFO).exec(sql).rows[0]
+        self.assertEqual(row, plain)
+        self.assertEqual(str(row[0]), "1234.5")
+        self.assertEqual(row[1:], ("x", 7, None))
+        self.assertEqual(cur.description[0][1], 1700)
+
     def test_typed_views_are_zero_copy(self):
         """Consuming a chunk without materialising it: numpy wraps the segment in
         place, text is sliced straight out of the offset table, and a value is

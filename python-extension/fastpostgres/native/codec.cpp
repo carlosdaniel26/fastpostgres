@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include <sys/mman.h>
 
@@ -656,8 +657,19 @@ fp_objpool_report(void)
             g_pool_on ? "" : " (values use the normal constructors)");
 }
 
-PyObject *
-fp_decode_column_nonull(const FastpostgresColumn *c, uint64_t row)
+/* ---- decoding a whole batch ----------------------------------------------
+ *
+ * A column's values share one kind, so the kind switch belongs outside the row
+ * loop, and the births have to be visible here for the compiler to inline them
+ * into the loop body. The per-value call into one generic decode(kind, row)
+ * cost more than the births themselves on the benchmark's row shape (~175 of
+ * 183 ns/row), which is why these loops live next to the pool rather than in
+ * segment.cpp. `row_column<K>` instantiates once per wire kind.
+ */
+
+/* One value, no null test: the single-value path behind Column.value_at(). */
+static PyObject *
+decode_value(const FastpostgresColumn *c, uint64_t row)
 {
     switch (c->kind)
     {
@@ -688,8 +700,6 @@ fp_decode_column_nonull(const FastpostgresColumn *c, uint64_t row)
             memcpy(&v, c->data + row * 8, 8);
             return fp_birth_float(v);
         }
-        /* The binary kinds: wrap the value that is already in the segment. No
-         * digits, no hex, no NUL-terminated copy — that is the whole gain. */
         case FASTPOSTGRES_KIND_DATE:
             return date_from_days(load_le32(c->data + row * 4));
         case FASTPOSTGRES_KIND_TIME:
@@ -725,5 +735,332 @@ PyObject *
 fp_decode_column(const FastpostgresColumn *c, uint64_t row)
 {
     if (fastpostgres_col_isnull(c, row)) Py_RETURN_NONE;
-    return fp_decode_column_nonull(c, row);
+    return decode_value(c, row);
+}
+
+namespace
+{
+
+template <uint8_t K>
+inline PyObject *
+row_value(const FastpostgresColumn *c, uint64_t r)
+{
+    const uint8_t *data = c->data;
+
+    if constexpr (K == FASTPOSTGRES_KIND_BOOL)
+        return PyBool_FromLong(data[r] != 0);
+    else if constexpr (K == FASTPOSTGRES_KIND_INT16)
+    {
+        int16_t v;
+        memcpy(&v, data + r * 2, 2);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_INT32)
+    {
+        int32_t v;
+        memcpy(&v, data + r * 4, 4);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_INT64)
+    {
+        int64_t v;
+        memcpy(&v, data + r * 8, 8);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
+    {
+        float v;
+        memcpy(&v, data + r * 4, 4);
+        return fp_birth_float((double)v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
+    {
+        double v;
+        memcpy(&v, data + r * 8, 8);
+        return fp_birth_float(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_DATE)
+        return date_from_days(load_le32(data + r * 4));
+    else if constexpr (K == FASTPOSTGRES_KIND_TIME)
+        return time_from_us(load_le64(data + r * 8));
+    else if constexpr (K == FASTPOSTGRES_KIND_TIMESTAMP)
+        return timestamp_from_us(load_le64(data + r * 8), 0);
+    else if constexpr (K == FASTPOSTGRES_KIND_TIMESTAMPTZ)
+        return timestamp_from_us(load_le64(data + r * 8), 1);
+    else if constexpr (K == FASTPOSTGRES_KIND_UUID)
+        return uuid_from_bytes(data + r * 16);
+    else
+    {
+        const int32_t *off  = (const int32_t *)data;
+        const char    *base = (const char *)c->bytes;
+        int32_t        s0   = off[r];
+        int32_t        s1   = off[r + 1];
+
+        if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
+            return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+        else
+        {
+            PyObject *born = fp_birth_text(base + s0, (Py_ssize_t)(s1 - s0));
+
+            if (born != nullptr) return born;
+            return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+        }
+    }
+}
+
+template <uint8_t K>
+inline bool
+row_column(PyObject *rows, uint64_t nrows, const FastpostgresColumn *c, uint32_t cidx, bool nullfree)
+{
+    for (uint64_t r = 0; r < nrows; r++)
+    {
+        PyObject *row = PyList_GET_ITEM(rows, (Py_ssize_t)r);
+        PyObject *v;
+
+        if (!nullfree && fastpostgres_col_isnull(c, r))
+        {
+            v = Py_None;
+            Py_INCREF(v);
+        }
+        else
+        {
+            v = row_value<K>(c, r);
+            if (v == nullptr) return false;
+        }
+        PyTuple_SET_ITEM(row, (Py_ssize_t)cidx, v);
+    }
+    return true;
+}
+
+} /* namespace */
+
+bool
+fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows, PyObject *rows)
+{
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        bool nullfree = !fastpostgres_nullmap_any(cols[c].nulls, (size_t)((nrows + 7) / 8));
+        bool ok;
+
+        switch (cols[c].kind)
+        {
+            case FASTPOSTGRES_KIND_BOOL:
+                ok = row_column<FASTPOSTGRES_KIND_BOOL>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_INT16:
+                ok = row_column<FASTPOSTGRES_KIND_INT16>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_INT32:
+                ok = row_column<FASTPOSTGRES_KIND_INT32>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_INT64:
+                ok = row_column<FASTPOSTGRES_KIND_INT64>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_FLOAT4:
+                ok = row_column<FASTPOSTGRES_KIND_FLOAT4>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_FLOAT8:
+                ok = row_column<FASTPOSTGRES_KIND_FLOAT8>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_DATE:
+                ok = row_column<FASTPOSTGRES_KIND_DATE>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_TIME:
+                ok = row_column<FASTPOSTGRES_KIND_TIME>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_TIMESTAMP:
+                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMP>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_TIMESTAMPTZ:
+                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_UUID:
+                ok = row_column<FASTPOSTGRES_KIND_UUID>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_BYTEA:
+                ok = row_column<FASTPOSTGRES_KIND_BYTEA>(rows, nrows, &cols[c], c, nullfree);
+                break;
+            default:
+                ok = row_column<FASTPOSTGRES_KIND_TEXT>(rows, nrows, &cols[c], c, nullfree);
+                break;
+        }
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/* ---- decoding a row frame -------------------------------------------------
+ *
+ * The server sends PostgreSQL's own tuple bytes (rows.c), so the walk here
+ * mirrors heap_deform_tuple: the offset advances by each attribute's alignment
+ * and length, a null attribute takes no space at all, and the null bitmap sits
+ * at t_bits rather than at the end of the header area. The per-column layout is
+ * worked out once per batch, so a value costs the walk plus one jump-table
+ * switch.
+ */
+
+namespace
+{
+
+struct AttLayout {
+    int32_t  attlen; /* -1 for the varlena kinds */
+    uint32_t alignby;
+};
+
+inline PyObject *
+tuple_value(uint8_t kind, const uint8_t *p)
+{
+    switch (kind)
+    {
+        case FASTPOSTGRES_KIND_BOOL:
+            return PyBool_FromLong(*p != 0);
+        case FASTPOSTGRES_KIND_INT16: {
+            int16_t v;
+            memcpy(&v, p, 2);
+            return fp_birth_long(v);
+        }
+        case FASTPOSTGRES_KIND_INT32: {
+            int32_t v;
+            memcpy(&v, p, 4);
+            return fp_birth_long(v);
+        }
+        case FASTPOSTGRES_KIND_INT64: {
+            int64_t v;
+            memcpy(&v, p, 8);
+            return fp_birth_long(v);
+        }
+        case FASTPOSTGRES_KIND_FLOAT4: {
+            float v;
+            memcpy(&v, p, 4);
+            return fp_birth_float((double)v);
+        }
+        case FASTPOSTGRES_KIND_FLOAT8: {
+            double v;
+            memcpy(&v, p, 8);
+            return fp_birth_float(v);
+        }
+        case FASTPOSTGRES_KIND_DATE:
+            return date_from_days(load_le32(p));
+        case FASTPOSTGRES_KIND_TIME:
+            return time_from_us(load_le64(p));
+        case FASTPOSTGRES_KIND_TIMESTAMP:
+            return timestamp_from_us(load_le64(p), 0);
+        case FASTPOSTGRES_KIND_TIMESTAMPTZ:
+            return timestamp_from_us(load_le64(p), 1);
+        case FASTPOSTGRES_KIND_UUID:
+            return uuid_from_bytes(p);
+        case FASTPOSTGRES_KIND_BYTEA:
+            return PyBytes_FromStringAndSize((const char *)fastpostgres_vardata_any(p),
+                                             (Py_ssize_t)fastpostgres_vardata_len(p));
+        default: {
+            const char *d    = (const char *)fastpostgres_vardata_any(p);
+            Py_ssize_t  n    = (Py_ssize_t)fastpostgres_vardata_len(p);
+            PyObject   *born = fp_birth_text(d, n);
+
+            if (born != nullptr) return born;
+            return PyUnicode_FromStringAndSize(d, n);
+        }
+    }
+}
+
+PyObject *
+decode_tuple(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *layout, const uint8_t *row,
+             uint32_t len)
+{
+    PyObject *out = PyTuple_New((Py_ssize_t)ncols);
+    uint32_t  natts, off;
+    bool      hasnull;
+
+    if (out == nullptr) return nullptr;
+
+    off = fastpostgres_tuple_hoff(row);
+    if (off < FASTPOSTGRES_HT_BITS || off > len)
+    {
+        Py_DECREF(out);
+        PyErr_SetString(PyExc_ValueError, "row tuple: bad header offset");
+        return nullptr;
+    }
+    natts   = fastpostgres_tuple_natts(row);
+    hasnull = fastpostgres_tuple_hasnull(row) != 0;
+
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        PyObject *v;
+
+        if (c >= natts)
+        {
+            /* the writer expands short tuples before sending them, so anything
+             * else is a frame we do not understand */
+            Py_DECREF(out);
+            PyErr_SetString(PyExc_ValueError, "row tuple: fewer attributes than columns");
+            return nullptr;
+        }
+
+        if (hasnull && fastpostgres_tuple_isnull(row, c))
+        {
+            v = Py_None;
+            Py_INCREF(v); /* a null stores nothing: the offset does not move */
+        }
+        else
+        {
+            const uint8_t *p;
+
+            if (layout[c].attlen < 0)
+                off = fastpostgres_att_pointer_align(off, layout[c].alignby, row + off);
+            else
+                off = fastpostgres_att_align(off, layout[c].alignby);
+
+            p = row + off;
+            v = tuple_value(cols[c].kind, p);
+            if (v == nullptr)
+            {
+                Py_DECREF(out);
+                return nullptr;
+            }
+            off = fastpostgres_att_addlength(off, layout[c].attlen, p);
+        }
+        PyTuple_SET_ITEM(out, (Py_ssize_t)c, v);
+    }
+    return out;
+}
+
+} /* namespace */
+
+bool
+fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd, PyObject *rows)
+{
+    std::vector<AttLayout> layout(ncols);
+    const uint8_t         *row;
+    uint32_t               len;
+    uint64_t               expect = rd->left;
+    uint64_t               r      = 0;
+
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        int width = fastpostgres_kind_width(cols[c].kind);
+
+        if (width == 0 && !fastpostgres_kind_is_varlena(cols[c].kind))
+        {
+            PyErr_SetString(PyExc_ValueError, "row frame: unknown wire kind");
+            return false;
+        }
+        layout[c].attlen  = width > 0 ? width : -1;
+        layout[c].alignby = (uint32_t)fastpostgres_kind_alignby(cols[c].kind);
+    }
+
+    while (fastpostgres_rows_next(rd, &row, &len))
+    {
+        PyObject *tup = decode_tuple(cols, ncols, layout.data(), row, len);
+
+        if (tup == nullptr) return false;
+        PyList_SET_ITEM(rows, (Py_ssize_t)r, tup);
+        r++;
+    }
+    if (r != expect)
+    {
+        /* a short frame would leave NULL slots in the caller's list */
+        PyErr_SetString(PyExc_ValueError, "truncated row payload");
+        return false;
+    }
+    return true;
 }
