@@ -12,6 +12,8 @@
 static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
 static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
+static PyObject *s_utc       = nullptr; /* datetime.timezone.utc */
+static PyObject *s_uuid      = nullptr; /* uuid.UUID */
 
 bool
 fp_codec_init(void)
@@ -28,7 +30,119 @@ fp_codec_init(void)
     s_timezone  = PyObject_GetAttrString(dt, "timezone");
     s_timedelta = PyObject_GetAttrString(dt, "timedelta");
     Py_DECREF(dt);
-    return s_timezone != nullptr && s_timedelta != nullptr;
+    if (!s_timezone || !s_timedelta) return false;
+
+    /* timestamptz arrives as UTC microseconds, so its tzinfo is the same object
+     * for every row: build it once rather than per value. */
+    PyObject *zero = PyObject_CallFunction(s_timedelta, "ii", 0, 0);
+    if (!zero) return false;
+    s_utc = PyObject_CallFunctionObjArgs(s_timezone, zero, nullptr);
+    Py_DECREF(zero);
+    if (!s_utc) return false;
+
+    PyObject *ud = PyImport_ImportModule("uuid");
+    if (!ud) return false;
+    s_uuid = PyObject_GetAttrString(ud, "UUID");
+    Py_DECREF(ud);
+    return s_uuid != nullptr;
+}
+
+/* ---- the binary kinds ---------------------------------------------------- */
+
+/* PostgreSQL counts dates in days and timestamps in microseconds, both from
+ * 2000-01-01; the civil calendar needs the same shift for either. */
+#define FP_EPOCH_DAYS 10957 /* 2000-01-01 in days since 1970-01-01 */
+#define FP_US_PER_DAY 86400000000LL
+#define FP_US_PER_SEC 1000000LL
+
+static inline int32_t
+load_le32(const uint8_t *p)
+{
+    int32_t v;
+
+    memcpy(&v, p, 4);
+    return v;
+}
+
+static inline int64_t
+load_le64(const uint8_t *p)
+{
+    int64_t v;
+
+    memcpy(&v, p, 8);
+    return v;
+}
+
+/* Days since 1970-01-01 -> y/m/d (Hinnant's civil_from_days). Integer only: no
+ * allocation, no library call, which is the whole point of the binary kinds. */
+static void
+civil_from_days(int64_t z, int *y, int *m, int *d)
+{
+    int64_t  era;
+    unsigned doe, yoe, doy, mp;
+
+    z += 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = (unsigned)(z - era * 146097);
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp  = (5 * doy + 2) / 153;
+    *d  = (int)(doy - (153 * mp + 2) / 5 + 1);
+    *m  = (int)(mp < 10 ? mp + 3 : mp - 9);
+    *y  = (int)((int64_t)yoe + era * 400 + (*m <= 2));
+}
+
+static PyObject *
+date_from_days(int32_t days)
+{
+    int y, m, d;
+
+    civil_from_days((int64_t)days + FP_EPOCH_DAYS, &y, &m, &d);
+    return PyDate_FromDate(y, m, d);
+}
+
+static PyObject *
+time_from_us(int64_t us)
+{
+    return PyTime_FromTime((int)(us / 3600000000LL), (int)(us / 60000000LL % 60),
+                           (int)(us / FP_US_PER_SEC % 60), (int)(us % FP_US_PER_SEC));
+}
+
+static PyObject *
+timestamp_from_us(int64_t us, int with_tz)
+{
+    int64_t days = us / FP_US_PER_DAY;
+    int64_t rem  = us % FP_US_PER_DAY;
+    int     y, m, d;
+
+    if (rem < 0) /* floor division: PostgreSQL keeps the remainder positive */
+    {
+        rem += FP_US_PER_DAY;
+        days -= 1;
+    }
+    civil_from_days(days + FP_EPOCH_DAYS, &y, &m, &d);
+
+    if (!with_tz)
+        return PyDateTime_FromDateAndTime(y, m, d, (int)(rem / 3600000000LL),
+                                          (int)(rem / 60000000LL % 60), (int)(rem / FP_US_PER_SEC % 60),
+                                          (int)(rem % FP_US_PER_SEC));
+    return PyDateTimeAPI->DateTime_FromDateAndTime(y, m, d, (int)(rem / 3600000000LL),
+                                                   (int)(rem / 60000000LL % 60),
+                                                   (int)(rem / FP_US_PER_SEC % 60),
+                                                   (int)(rem % FP_US_PER_SEC), s_utc,
+                                                   PyDateTimeAPI->DateTimeType);
+}
+
+static PyObject *
+uuid_from_bytes(const uint8_t *p)
+{
+    PyObject *raw = PyBytes_FromStringAndSize((const char *)p, 16);
+    PyObject *out;
+
+    if (!raw) return nullptr;
+    out = PyObject_CallFunction(s_uuid, "OO", Py_None, raw); /* UUID(hex=None, bytes=raw) */
+    Py_DECREF(raw);
+    return out;
 }
 
 static PyObject *
@@ -185,7 +299,9 @@ fp_decode_value(PGresult *res, int row, int col)
             return parse_datetime(s, 1, 0);
         case FASTPOSTGRES_OID_TIMESTAMPTZ:
             return parse_datetime(s, 1, 1);
-        default: /* text family, uuid, json, xml, ... */
+        case FASTPOSTGRES_OID_UUID: /* the columnar path returns uuid.UUID; so must this one */
+            return PyObject_CallFunction(s_uuid, "s", s);
+        default: /* text family, json, xml, ... */
             return PyUnicode_FromString(s);
     }
 }
@@ -222,43 +338,32 @@ fp_decode_column_nonull(const FastpostgresColumn *c, uint64_t row)
             memcpy(&v, c->data + row * 8, 8);
             return PyFloat_FromDouble(v);
         }
+        /* The binary kinds: wrap the value that is already in the segment. No
+         * digits, no hex, no NUL-terminated copy — that is the whole gain. */
+        case FASTPOSTGRES_KIND_DATE:
+            return date_from_days(load_le32(c->data + row * 4));
+        case FASTPOSTGRES_KIND_TIME:
+            return time_from_us(load_le64(c->data + row * 8));
+        case FASTPOSTGRES_KIND_TIMESTAMP:
+            return timestamp_from_us(load_le64(c->data + row * 8), 0);
+        case FASTPOSTGRES_KIND_TIMESTAMPTZ:
+            return timestamp_from_us(load_le64(c->data + row * 8), 1);
+        case FASTPOSTGRES_KIND_UUID:
+            return uuid_from_bytes(c->data + row * 16);
+        case FASTPOSTGRES_KIND_BYTEA: { /* the offset table, raw bytes out */
+            const int32_t *off  = (const int32_t *)c->data;
+            const char    *base = (const char *)c->bytes;
+            int32_t        s0   = off[row];
+            int32_t        s1   = off[row + 1];
+
+            return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+        }
         default: { /* text: int32 offset table, then the raw bytes */
             const int32_t *off  = (const int32_t *)c->data;
             const char    *base = (const char *)c->bytes;
             int32_t        s0   = off[row];
             int32_t        s1   = off[row + 1];
-            const char    *s    = base + s0;
-            Py_ssize_t     len  = (Py_ssize_t)(s1 - s0);
-
-            switch (c->pgtype)
-            {
-                case FASTPOSTGRES_OID_DATE:
-                case FASTPOSTGRES_OID_TIME:
-                case FASTPOSTGRES_OID_TIMESTAMP:
-                case FASTPOSTGRES_OID_TIMESTAMPTZ:
-                case FASTPOSTGRES_OID_BYTEA: {
-                    /* the parsers need a NUL-terminated string */
-                    char       buf[96];
-                    Py_ssize_t n = len < (Py_ssize_t)sizeof(buf) - 1 ? len : (Py_ssize_t)sizeof(buf) - 1;
-                    memcpy(buf, s, (size_t)n);
-                    buf[n] = 0;
-                    switch (c->pgtype)
-                    {
-                        case FASTPOSTGRES_OID_DATE:
-                            return parse_datetime(buf, 0, 0);
-                        case FASTPOSTGRES_OID_TIME:
-                            return parse_time(buf);
-                        case FASTPOSTGRES_OID_TIMESTAMP:
-                            return parse_datetime(buf, 1, 0);
-                        case FASTPOSTGRES_OID_TIMESTAMPTZ:
-                            return parse_datetime(buf, 1, 1);
-                        default:
-                            return bytes_from_bytea(buf);
-                    }
-                }
-                default:
-                    return PyUnicode_FromStringAndSize(s, len);
-            }
+            return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         }
     }
 }

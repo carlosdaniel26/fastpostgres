@@ -96,9 +96,13 @@ segment_read(PyObject *, PyObject *args)
         column->name         = PyUnicode_FromStringAndSize(col.name, col.name_len);
         column->kind         = col.kind;
         column->pgtype       = (long)col.pgtype;
+        column->nrows        = (long)rd.nrows;
+        column->vdata        = col.data; /* the mapping outlives the chunk, so these stay valid */
+        column->vbytes       = col.bytes;
+        column->vnulls       = col.nulls;
         column->data         = fp_memory_view(col.data, col.data_len);
         size_t offsets_bytes = (size_t)(col.nrows + 1) * 4;
-        column->bytes        = (col.kind == FASTPOSTGRES_KIND_TEXT && col.bytes)
+        column->bytes        = (fastpostgres_kind_is_varlena(col.kind) && col.bytes)
                                    ? fp_memory_view(col.bytes, (size_t)col.data_len - offsets_bytes)
                                    : Py_NewRef(Py_None);
         column->nulls        = fp_memory_view(col.nulls, (size_t)((rd.nrows + 7) / 8));

@@ -15,5 +15,4 @@ __pycache__/
 *.egg-info/
 bench.log
 bench-*.log
-bench_chart*.png
 sqlalchemy_chart*.png

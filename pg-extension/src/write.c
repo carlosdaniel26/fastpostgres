@@ -17,8 +17,11 @@
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "nodes/makefuncs.h"
+#include "utils/date.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"
+#include "utils/uuid.h"
 
 #include "fastpostgres_shm.h"
 
@@ -136,7 +139,36 @@ static Datum col_datum(WCol *col, uint64_t r, bool *isnull, char **arena)
             }
         }
 
-        case FASTPOSTGRES_KIND_TEXT: {
+        /* date/time/timestamp/uuid arrive binary: the wire value is the Datum
+         * the table wants, so these are a copy rather than a parse. */
+        case FASTPOSTGRES_KIND_DATE: {
+            int32 v;
+            memcpy(&v, col->data + r * 4, 4);
+            return DateADTGetDatum(v);
+        }
+
+        case FASTPOSTGRES_KIND_TIME: {
+            int64 v;
+            memcpy(&v, col->data + r * 8, 8);
+            return TimeADTGetDatum(v);
+        }
+
+        case FASTPOSTGRES_KIND_TIMESTAMP:
+        case FASTPOSTGRES_KIND_TIMESTAMPTZ: {
+            int64 v;
+            memcpy(&v, col->data + r * 8, 8);
+            return TimestampGetDatum(v);
+        }
+
+        case FASTPOSTGRES_KIND_UUID: {
+            pg_uuid_t *u = palloc(sizeof(pg_uuid_t));
+
+            memcpy(u->data, col->data + r * 16, 16); /* lives in the batch context */
+            return UUIDPGetDatum(u);
+        }
+
+        case FASTPOSTGRES_KIND_TEXT:
+        case FASTPOSTGRES_KIND_BYTEA: {
             const uint32_t *off = (const uint32_t *)col->data;
             uint32_t        s = off[r], e = off[r + 1];
             size_t          len = (size_t)(e - s);

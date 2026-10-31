@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Run the fastpostgres benchmarks and render the charts — one shot.
+"""Run the SQLAlchemy driver benchmark and render the charts — one shot.
 
-Builds the container, runs both benchmarks, then writes four images:
+Builds the container, runs the benchmark, then writes two images:
 
-    bench_chart-read.png / bench_chart-write.png           tcp / unix / shm
     sqlalchemy_chart-orm.png / sqlalchemy_chart-core.png   psycopg2 / fastpostgres
 
-`--compare LOG` also prints the before/after deltas for the same loads and
-writes those four phases again, each load as a before/after bar pair:
+Each bar carries its rate and, except for the baseline it is measured against,
+its improvement over that baseline.
 
-    bench_chart-read-compare.png / bench_chart-write-compare.png
+`--compare LOG` also prints the before/after deltas for the same loads and
+writes those phases again, each load as a before/after bar pair:
+
     sqlalchemy_chart-orm-compare.png / sqlalchemy_chart-core-compare.png
 
 Usage:
-    just charts [nrows ...]        (default: each benchmark's own)
+    just charts [nrows ...]        (default: the benchmark's own)
     just charts --log bench.log    (plot an existing log)
     just charts --log after.log --compare before.log   (before/after deltas + charts)
 
-Both benchmarks run in one container, so their logs share one environment
-block; `--log` skips the run and plots a saved log instead. The 10M default
-takes a few minutes.
+`--log` skips the run and plots a saved log instead; the log's environment block
+travels with it, so the numbers keep their context.
 """
 import argparse
 import re
@@ -39,7 +39,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 OUT = Path.cwd()
 
-# Strategic colour (Knaflic, ch. 4): mute the baselines to grey, spend the one
+# Strategic colour (Knaflic, ch. 4): mute the baseline to grey, spend the one
 # accent on the thing that matters (fast-postgres).
 ACCENT = "#1f77b4"
 GREY = ("#c8c8c8", "#8a8a8a")
@@ -49,7 +49,7 @@ GREY = ("#c8c8c8", "#8a8a8a")
 
 
 def run(cmd):
-    """Run a benchmark harness and return its output."""
+    """Run the benchmark harness and return its output."""
     print(f"==> {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
@@ -80,14 +80,9 @@ def parse_sections(text, sections, row_re, values_from):
     return data
 
 
-# The trailing comparison columns are a speedup ("1.36x") or, now, a percentage
+# The trailing comparison column is a speedup ("1.36x") or a percentage
 # ("+36.0%"); accept both so older logs still plot.
 _RATIO = r"(?:[\d.]+x|[+-][\d.]+%)"
-
-TRANSPORT_SECTIONS = {"READ (rows/s)": "read", "WRITE (rows/s)": "write"}
-TRANSPORT_ROW = re.compile(
-    rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+{_RATIO}\s*$"
-)
 
 DRIVER_SECTIONS = {"SQLALCHEMY ORM READ": "orm", "SQLALCHEMY CORE READ": "core"}
 DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+\S+\s*$")
@@ -98,7 +93,7 @@ DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+
 
 def num_rows(label):
     """'100K' -> 100_000. The comparison charts key their bars by load *and*
-    series ("100K\\ntcp"), so reading stops at the K/M suffix."""
+    series ("100K\\npsycopg2"), so reading stops at the K/M suffix."""
     m = re.match(r"([\d.]+)([KM])", label)
     return float(m.group(1)) * (1_000 if m.group(2) == "K" else 1_000_000)
 
@@ -112,7 +107,19 @@ def fmt_rate(v, _pos=None):
     return f"{rows:g}"
 
 
-def bars(ax, data, series, colors, labels, scale):
+def fmt_pct(now, base):
+    """Improvement over a reference, for a bar label. One decimal below 10% so a
+    real but small change is not rounded away, whole numbers above it."""
+    if base <= 0:
+        return ""
+    pct = (now / base - 1) * 100
+    return f"{pct:+.1f}%" if abs(pct) < 10 else f"{pct:+.0f}%"
+
+
+def bars(ax, data, series, colors, labels, scale, delta_vs=0):
+    """`delta_vs` marks the series every other bar is measured against — the
+    existing driver, or the 'before' bar — so each bar carries its own
+    improvement, not just its rate."""
     loads = sorted(data, key=num_rows)
     if not loads:
         ax.set_visible(False)
@@ -130,7 +137,16 @@ def bars(ax, data, series, colors, labels, scale):
         pos = [x - 0.4 + (i + 0.5) * width for x in xs]
         drawn = ax.bar(pos, vals, width=width, color=colors[i], label=labels[i], zorder=3)
         handles.append(drawn[0])
-        ax.bar_label(drawn, labels=[fmt_rate(v) for v in vals], fontsize=7, padding=2)
+
+        texts = []
+        for load, v in zip(loads, vals):
+            text = fmt_rate(v)
+            if delta_vs is not None and i != delta_vs:
+                pct = fmt_pct(v, data[load][delta_vs])
+                if pct:
+                    text += "\n" + pct
+            texts.append(text)
+        ax.bar_label(drawn, labels=texts, fontsize=6.5, padding=2)
 
     ax.set_xticks(xs)
     ax.set_xticklabels(loads)
@@ -146,13 +162,13 @@ def bars(ax, data, series, colors, labels, scale):
     for side in ("left", "bottom"):
         ax.spines[side].set_color("#cccccc")
     ax.tick_params(colors="#666666", length=0)
-    ax.margins(y=0.16)
+    ax.margins(y=0.22)  # room for the second label line
     return handles
 
 
-def figure(section, data, series, colors, labels, title, headline, footer, scale):
+def figure(section, data, series, colors, labels, title, headline, footer, scale, delta_vs=0):
     fig, ax = plt.subplots(figsize=(7.8, 5.9))
-    handles = bars(ax, data, series, colors, labels, scale)
+    handles = bars(ax, data, series, colors, labels, scale, delta_vs)
     ax.set_title(title)
     fig.suptitle(headline, fontsize=13, y=0.975)
     if handles:
@@ -194,8 +210,7 @@ def paired(before, after, names):
 
 
 def headline_compare(prefix, data, target):
-    """Headline the change on the series the accent marks ("target"), the way
-    the forward charts headline the accented transport/driver."""
+    """Headline the change on the series the accent marks ("target")."""
     gains = [now / was - 1 for key, (was, now) in data.items()
              if key.endswith(f"\n{target}") and was > 0]
     best, worst = max(gains, default=0.0), min(gains, default=0.0)
@@ -206,25 +221,13 @@ def headline_compare(prefix, data, target):
     return f"{prefix} — unchanged before vs after"
 
 
-def plot_compare(tb, ta, db, da, env, scale):
+def plot_compare(db, da, env, scale):
     """One before/after image per phase: grey for before, the accent for after,
     which is all the two-tone key needs — `before`/`after` are the two series."""
     series, colors, labels = ("before", "after"), (GREY[0], ACCENT), ("before", "after")
-
-    footer = spec(env, TRANSPORT_KEYS) or "fastpostgres transport benchmark"
-    titles = {"read": "Read: before vs after", "write": "Write: before vs after"}
-    for section in ("read", "write"):
-        data = paired(tb[section], ta[section], ("tcp", "unix", "shm"))
-        path = OUT / f"bench_chart-{section}-compare.png"
-        if not data:
-            skip(path, section)
-            continue
-        fig = figure(section, data, series, colors, labels, titles[section],
-                     headline_compare("fast-postgres", data, "shm"), footer, scale)
-        save(fig, path, len(data))
-
     footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
     titles = {"orm": "ORM read: before vs after", "core": "Core read: before vs after"}
+
     for section in ("orm", "core"):
         data = paired(db[section], da[section], ("psycopg2", "fastpostgres"))
         path = OUT / f"sqlalchemy_chart-{section}-compare.png"
@@ -241,30 +244,23 @@ def plot_compare(tb, ta, db, da, env, scale):
 
 def compare(before_text, after_text, env=None, scale="auto"):
     """Before/after deltas for the same loads — what a hot-path change is for."""
-    tb = parse_sections(before_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
-    ta = parse_sections(after_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
     db = parse_sections(before_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
     da = parse_sections(after_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
 
     print("\nBEFORE -> AFTER (M rows/s)")
-    for section, names, b, a in (
-        ("read", ("tcp", "unix", "shm"), tb, ta),
-        ("write", ("tcp", "unix", "shm"), tb, ta),
-        ("orm", ("psycopg2", "fastpostgres"), db, da),
-        ("core", ("psycopg2", "fastpostgres"), db, da),
-    ):
-        for load in sorted(b[section], key=num_rows):
-            if load not in a[section]:
+    for section in ("orm", "core"):
+        for load in sorted(db[section], key=num_rows):
+            if load not in da[section]:
                 continue
             cells = []
-            for i, name in enumerate(names):
-                was, now = b[section][load][i], a[section][load][i]
+            for i, name in enumerate(("psycopg2", "fastpostgres")):
+                was, now = db[section][load][i], da[section][load][i]
                 delta = f"{(now / was - 1) * 100:+.1f}%" if was else "n/a"
                 cells.append(f"{name} {was:.2f} -> {now:.2f} ({delta})")
             print(f"  {section:<5} {load:>4}: " + "   ".join(cells))
 
     print()
-    plot_compare(tb, ta, db, da, env if env is not None else parse_env_text(after_text), scale)
+    plot_compare(db, da, env if env is not None else parse_env_text(after_text), scale)
 
 
 def spec(env, keys):
@@ -275,33 +271,10 @@ def spec(env, keys):
     return " · ".join(parts)
 
 
-TRANSPORT_KEYS = [
+DRIVER_KEYS = [
     ("ghz", "{} GHz"), ("cores", "{} cores"), ("postgres", "PostgreSQL {}"),
-    ("python", "Python {}"), ("shm", "/dev/shm {}"),
+    ("python", "Python {}"), ("sqlalchemy", "SQLAlchemy {}"),
 ]
-DRIVER_KEYS = TRANSPORT_KEYS[:4] + [("sqlalchemy", "SQLAlchemy {0}")]
-
-
-def headline_transport(data):
-    gain = max((v[2] / v[0] - 1 for v in data.values() if v[0] > 0), default=0.0)
-    if gain >= 0.5:
-        return f"fast-postgres — up to {gain * 100:.0f}% faster than the socket transports"
-    return "fast-postgres — throughput by transport"
-
-
-def plot_transport(text, env, scale):
-    data = parse_sections(text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
-    footer = spec(env, TRANSPORT_KEYS) or "fastpostgres transport benchmark"
-    titles = {"read": "Read: rows fetched per second", "write": "Write: rows inserted per second"}
-    for section in ("read", "write"):
-        path = OUT / f"bench_chart-{section}.png"
-        if not data[section]:
-            skip(path, section)
-            continue
-        fig = figure(section, data[section], ("tcp", "unix", "shm"), GREY + (ACCENT,),
-                     ("tcp", "unix", "fast-postgres"), titles[section],
-                     headline_transport(data[section]), footer, scale)
-        save(fig, path, len(data[section]))
 
 
 def plot_drivers(text, env, scale):
@@ -332,8 +305,8 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("sizes", nargs="*", help="row counts (default: each benchmark's own)")
-    ap.add_argument("--log", help="plot this log instead of running the benchmarks")
+    ap.add_argument("sizes", nargs="*", help="row counts (default: the benchmark's own)")
+    ap.add_argument("--log", help="plot this log instead of running the benchmark")
     ap.add_argument("--compare", metavar="LOG",
                     help="print before/after deltas against this saved log and chart them")
     ap.add_argument("--scale", choices=("auto", "linear", "log"), default="auto")
@@ -343,7 +316,6 @@ def main():
 
     print()
     env = parse_env_text(text)
-    plot_transport(text, env, args.scale)
     plot_drivers(text, env, args.scale)
     if args.compare:
         compare(Path(args.compare).read_text(), text, env, args.scale)

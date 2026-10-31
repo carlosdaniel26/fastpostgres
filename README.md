@@ -13,10 +13,9 @@ live in one header, `pg-extension/fastpostgres_shm.h`.
 
 ![SQLAlchemy Core reads](assets/core-read.png)
 
-8-core container, PostgreSQL 18.6. Reads run ~6× the socket transports
-(≈7.5M vs ≈1.2M rows/s) and writes ~2.5×. Once rows become Python objects, the
-Core path lands 17–34% ahead of psycopg2 and the ORM 5–13%, because
-materialising and hydrating objects is allocation-bound.
+8-core container, PostgreSQL 18.6. Once rows become Python objects, the Core
+path lands 17–34% ahead of psycopg2 and the ORM 5–13%, because materialising
+and hydrating objects is allocation-bound.
 
 ## Usage
 

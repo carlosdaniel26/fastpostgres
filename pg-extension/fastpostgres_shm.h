@@ -51,7 +51,10 @@ static_assert(sizeof(FastpostgresShmHeader) == 64, "FastpostgresShmHeader must b
  */
 #define FASTPOSTGRES_ALIGN8(x)        (((uint64_t)(x) + 7) & ~(uint64_t)7)
 #define FASTPOSTGRES_COLUMNAR_MAGIC   "FPCOLUMN"
-#define FASTPOSTGRES_COLUMNAR_VERSION 1
+/* 2: the binary kinds (date/time/timestamp/timestamptz/uuid/bytea). A reader
+ * that does not know them must refuse the payload rather than guess — the frame
+ * is checked against this number, so v1 and v2 cannot be mixed silently. */
+#define FASTPOSTGRES_COLUMNAR_VERSION 2
 
 /* ---------------------------------------------------------------------------
  * Wire type helpers — format plumbing, kept out of the codec's core logic.
@@ -68,9 +71,21 @@ enum FastpostgresKind
     FASTPOSTGRES_KIND_INT64  = 3,
     FASTPOSTGRES_KIND_FLOAT8 = 4,
     FASTPOSTGRES_KIND_TEXT   = 5,
-    FASTPOSTGRES_KIND_INT16  = 6, /* verbatim 2-byte integer (int2) */
-    FASTPOSTGRES_KIND_FLOAT4 = 7  /* verbatim 4-byte float (float4) */
+    FASTPOSTGRES_KIND_INT16  = 6,  /* verbatim 2-byte integer (int2) */
+    FASTPOSTGRES_KIND_FLOAT4 = 7,  /* verbatim 4-byte float (float4) */
+    FASTPOSTGRES_KIND_DATE        = 8,  /* int32 DateADT: days since 2000-01-01 */
+    FASTPOSTGRES_KIND_TIME        = 9,  /* int64 TimeADT: microseconds since midnight */
+    FASTPOSTGRES_KIND_TIMESTAMP   = 10, /* int64 Timestamp: microseconds since 2000-01-01 */
+    FASTPOSTGRES_KIND_TIMESTAMPTZ = 11, /* the same, always UTC */
+    FASTPOSTGRES_KIND_UUID        = 12, /* 16 raw bytes */
+    FASTPOSTGRES_KIND_BYTEA       = 13  /* offset table + raw bytes, like text */
 };
+
+/* Kinds that carry an int32 offset table followed by raw bytes. */
+static inline int fastpostgres_kind_is_varlena(uint8_t kind)
+{
+    return kind == FASTPOSTGRES_KIND_TEXT || kind == FASTPOSTGRES_KIND_BYTEA;
+}
 
 /* PostgreSQL builtin type OIDs. Bootstrap-assigned, hence fixed for a given
  * PostgreSQL major version — pinned here so both sides share one mapping. */
@@ -97,7 +112,10 @@ enum FastpostgresKind
 #define FASTPOSTGRES_OID_UUID        2950
 #define FASTPOSTGRES_OID_JSONB       3802
 
-/* PostgreSQL type OID -> wire kind (numeric goes out as a float8). */
+/* PostgreSQL type OID -> wire kind. The binary kinds are the point of the
+ * exercise: the extension already holds these values in binary (a DateADT, a
+ * Timestamp, a pg_uuid_t, the raw bytea), so shipping them as binary leaves the
+ * client wrapping them in a Python object instead of parsing digits and hex. */
 static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)
 {
     switch (oid)
@@ -113,14 +131,26 @@ static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)
         case FASTPOSTGRES_OID_FLOAT4:
             return FASTPOSTGRES_KIND_FLOAT4; /* copied verbatim, not widened */
         case FASTPOSTGRES_OID_FLOAT8:
-        case FASTPOSTGRES_OID_NUMERIC:       /* numeric has no wire kind: converted, lossily */
+        case FASTPOSTGRES_OID_NUMERIC: /* numeric has no wire kind: converted, lossily */
             return FASTPOSTGRES_KIND_FLOAT8;
+        case FASTPOSTGRES_OID_DATE:
+            return FASTPOSTGRES_KIND_DATE;
+        case FASTPOSTGRES_OID_TIME:
+            return FASTPOSTGRES_KIND_TIME;
+        case FASTPOSTGRES_OID_TIMESTAMP:
+            return FASTPOSTGRES_KIND_TIMESTAMP;
+        case FASTPOSTGRES_OID_TIMESTAMPTZ:
+            return FASTPOSTGRES_KIND_TIMESTAMPTZ;
+        case FASTPOSTGRES_OID_UUID:
+            return FASTPOSTGRES_KIND_UUID;
+        case FASTPOSTGRES_OID_BYTEA:
+            return FASTPOSTGRES_KIND_BYTEA;
         default:
             return FASTPOSTGRES_KIND_TEXT; /* varlena text, or an output-function fallback */
     }
 }
 
-/* Width of a wire kind in bytes (0 for text, which has no fixed width). */
+/* Width of a wire kind in bytes (0 for the varlena-shaped kinds). */
 static inline int fastpostgres_kind_width(uint8_t kind)
 {
     switch (kind)
@@ -133,10 +163,20 @@ static inline int fastpostgres_kind_width(uint8_t kind)
             return 4;
         case FASTPOSTGRES_KIND_FLOAT4:
             return 4;
+        case FASTPOSTGRES_KIND_DATE:
+            return 4;
         case FASTPOSTGRES_KIND_INT64:
             return 8;
         case FASTPOSTGRES_KIND_FLOAT8:
             return 8;
+        case FASTPOSTGRES_KIND_TIME:
+            return 8;
+        case FASTPOSTGRES_KIND_TIMESTAMP:
+            return 8;
+        case FASTPOSTGRES_KIND_TIMESTAMPTZ:
+            return 8;
+        case FASTPOSTGRES_KIND_UUID:
+            return 16;
         default:
             return 0;
     }
@@ -189,15 +229,19 @@ typedef struct FastpostgresReader {
     uint64_t       nrows;
 } FastpostgresReader;
 
-/* Point a reader at an FPCOLUMN payload; returns 0 if the magic is wrong. */
+/* Point a reader at an FPCOLUMN payload; returns 0 if the magic or the version
+ * is not ours. */
 static inline int fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
 {
     const uint8_t *p = (const uint8_t *)payload;
+    uint32_t       version;
+
     if (len < 8 || memcmp(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8) != 0) return 0;
     r->base = p;
     r->p    = p + 8;
     r->end  = p + len;
-    (void)fastpostgres_rd_u32(&r->p); /* version */
+    version = fastpostgres_rd_u32(&r->p);
+    if (version != FASTPOSTGRES_COLUMNAR_VERSION) return 0;
     (void)fastpostgres_rd_u32(&r->p); /* flags */
     r->ncols = fastpostgres_rd_u32(&r->p);
     r->nrows = fastpostgres_rd_u64(&r->p);
@@ -219,7 +263,7 @@ static inline int fastpostgres_reader_next(FastpostgresReader *r, FastpostgresCo
     c->data_len = fastpostgres_rd_u64(&p);
     p           = r->base + FASTPOSTGRES_ALIGN8((uint64_t)(p - r->base)); /* data is 8-byte aligned */
     c->data     = p;
-    c->bytes    = (c->kind == FASTPOSTGRES_KIND_TEXT) ? p + (r->nrows + 1) * 4 : NULL;
+    c->bytes    = fastpostgres_kind_is_varlena(c->kind) ? p + (r->nrows + 1) * 4 : NULL;
     p += c->data_len;
     if (p > r->end) return 0;
     c->nrows = r->nrows;

@@ -352,6 +352,14 @@ static void push_startup(DestReceiver *self, int operation, TupleDesc td)
         Oid               type = att->atttypid;
         int               kind = fastpostgres_oid_to_kind(type);
 
+        /* This path was written for the text-era kinds and has no Python
+         * consumer; the binary kinds would silently encode as text here, so
+         * refuse rather than publish a frame the reader cannot interpret. */
+        if (kind == FASTPOSTGRES_KIND_DATE || kind == FASTPOSTGRES_KIND_TIME ||
+            kind == FASTPOSTGRES_KIND_TIMESTAMP || kind == FASTPOSTGRES_KIND_TIMESTAMPTZ ||
+            kind == FASTPOSTGRES_KIND_UUID || kind == FASTPOSTGRES_KIND_BYTEA)
+            elog(ERROR, "fastpostgres: push mode does not carry the binary wire kinds");
+
         d->kinds[i]     = (uint8_t)kind;
         d->types[i]     = type;
         d->typoutput[i] = InvalidOid;

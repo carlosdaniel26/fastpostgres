@@ -117,6 +117,39 @@ class RingReadTest(unittest.TestCase):
         )
         self.assertEqual(first, {"id": 1, "big": 2, "f": 1.5, "b": (0, 1), "name": b"row1"})
 
+    def test_binary_kinds_on_the_wire(self):
+        """The wire form itself: date/time/timestamp/uuid/bytea arrive binary,
+        at their fixed widths, instead of as text to be parsed."""
+        self.ring.open(
+            "fp_py_seg",
+            "SELECT '2026-10-30'::date AS d, '01:02:03.5'::time AS t, "
+            "'2026-10-30 01:02:03.5'::timestamp AS ts, "
+            "'2026-10-30 01:02:03.5+00'::timestamptz AS tstz, "
+            "'0f8fad5b-d9cb-469f-a165-70867728950e'::uuid AS u, "
+            "'\\x00010203ff'::bytea AS by",
+        )
+        n = self.ring.next(10)
+        seg = fp.read("fp_py_seg")
+
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            [c.kind for c in seg.columns],
+            [
+                fp.Kind.DATE,
+                fp.Kind.TIME,
+                fp.Kind.TIMESTAMP,
+                fp.Kind.TIMESTAMPTZ,
+                fp.Kind.UUID,
+                fp.Kind.BYTEA,
+            ],
+        )
+        widths = {c.name: len(c.data) for c in seg.columns}
+        self.assertEqual(
+            widths,
+            {"d": 4, "t": 8, "ts": 8, "tstz": 8, "u": 16, "by": 2 * 4 + 5},  # bytea: offsets + '\x00010203ff'
+        )
+        self.ring.close()
+
 
 class DbapiTest(unittest.TestCase):
     def setUp(self):
@@ -179,6 +212,95 @@ class DbapiTest(unittest.TestCase):
         self.assertIs(b, True)
         self.assertEqual((ts.year, ts.month, ts.day, ts.hour), (2026, 10, 30, 12))
         self.assertGreater(self.conn.shm_reads, 0)
+
+    def test_shm_binary_types_match_libpq(self):
+        """The same query over /dev/shm and over libpq must agree value for
+        value: the binary kinds are a re-encoding, not a reinterpretation."""
+        sql = (
+            "SELECT '2026-10-30'::date AS d, '12:34:56.789012'::time AS t, "
+            "'2026-10-30 12:34:56.789012'::timestamp AS ts, "
+            "'2026-10-30 12:34:56.789012+02'::timestamptz AS tstz, "
+            "'0f8fad5b-d9cb-469f-a165-70867728950e'::uuid AS u, "
+            "'\\x00010203ff'::bytea AS by, NULL::date AS null_d"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        row = cur.fetchone()
+        self.assertGreater(self.conn.shm_reads, 0, "the shm path should have served this read")
+
+        plain = fp.Connection(CONNINFO).exec(sql).rows[0]
+        self.assertEqual(row, plain)
+
+        d, t, ts, tstz, u, by, null_d = row
+        self.assertEqual((d.year, d.month, d.day), (2026, 10, 30))
+        self.assertEqual((t.hour, t.minute, t.second, t.microsecond), (12, 34, 56, 789012))
+        self.assertEqual((ts.year, ts.month, ts.day, ts.hour, ts.microsecond), (2026, 10, 30, 12, 789012))
+        self.assertEqual((tstz.year, tstz.month, tstz.day, tstz.hour), (2026, 10, 30, 10))  # +02 -> UTC
+        self.assertEqual(tstz.utcoffset().total_seconds(), 0)
+        self.assertEqual(str(u), "0f8fad5b-d9cb-469f-a165-70867728950e")
+        self.assertEqual(by, b"\x00\x01\x02\x03\xff")
+        self.assertIsNone(null_d)
+
+    def test_typed_views_are_zero_copy(self):
+        """Consuming a chunk without materialising it: numpy wraps the segment in
+        place, text is sliced straight out of the offset table, and a value is
+        only built when it is asked for."""
+        try:
+            import numpy as np
+        except ImportError:
+            np = None
+
+        cur = self.conn.cursor()
+        cols = None
+        for batch in cur.stream(
+            "SELECT g::int AS id, (g * 1.5)::float8 AS f, (g % 3 = 0)::bool AS b, "
+            "('row' || g)::text AS s FROM generate_series(1, 1000) g",
+            size=1000,
+        ):
+            if not batch.row_count:
+                continue
+            cols = {c.name: c for c in batch.columns}
+            n = batch.row_count
+
+            self.assertEqual(cols["id"].nrows, n)
+            self.assertFalse(cols["id"].has_nulls)
+
+            ids = cols["id"].data.cast("i")  # a typed view, no objects per value
+            self.assertEqual((ids[0], ids[-1]), (1, n))
+
+            if np is not None:
+                arr = np.asarray(cols["id"])
+                self.assertEqual(arr.dtype, np.dtype("<i4"))
+                self.assertEqual((int(arr[0]), int(arr[-1])), (1, n))
+                self.assertEqual(int(arr.sum()), n * (n + 1) // 2)
+                self.assertEqual(float(np.asarray(cols["f"])[0]), 1.5)
+
+            off = cols["s"].offsets.cast("i")
+            self.assertEqual(len(off), n + 1)
+            self.assertEqual(bytes(cols["s"].bytes[off[0] : off[1]]), b"row1")
+            self.assertEqual(cols["s"].value_at(0), "row1")
+            break
+
+        self.assertIsNotNone(cols, "stream() produced no batch")
+
+    def test_typed_view_refuses_a_column_with_nulls(self):
+        cur = self.conn.cursor()
+        for batch in cur.stream(
+            "SELECT g::int AS id, CASE WHEN g = 2 THEN NULL ELSE g END AS maybe "
+            "FROM generate_series(1, 4) g",
+            size=10,
+        ):
+            if not batch.row_count:
+                continue
+            cols = {c.name: c for c in batch.columns}
+
+            self.assertFalse(cols["id"].has_nulls)
+            self.assertTrue(cols["maybe"].has_nulls)
+            with self.assertRaises(ValueError):  # a view would quietly read zeros
+                cols["maybe"].__array_interface__
+            self.assertEqual(cols["maybe"].value_at(0), 1)
+            self.assertIsNone(cols["maybe"].value_at(1))
+            break
 
     def test_dml_stays_on_libpq(self):
         cur = self.conn.cursor()

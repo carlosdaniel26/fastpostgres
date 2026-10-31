@@ -9,7 +9,10 @@
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
+#include "utils/timestamp.h"
+#include "utils/uuid.h"
 #include "varatt.h"
 
 #include "fastpostgres_shm.h"
@@ -24,8 +27,15 @@ bool fastpostgres_is_text_type(Oid typ)
     return typ == TEXTOID || typ == VARCHAROID || typ == BPCHAROID;
 }
 
-/* Text bytes come straight off the varlena; every other type goes through its
- * output function. */
+/* Types whose bytes can be read straight off the varlena: text as itself, and
+ * bytea as the raw bytes the wire kind wants (not its hex output). */
+static bool varlena_bytes(Oid typ)
+{
+    return fastpostgres_is_text_type(typ) || typ == BYTEAOID;
+}
+
+/* Text and bytea bytes come straight off the varlena; every other type goes
+ * through its output function. */
 static void text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char **data, int *len)
 {
     if (isnull)
@@ -34,7 +44,7 @@ static void text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char 
         *len  = 0;
         return;
     }
-    if (fastpostgres_is_text_type(type))
+    if (varlena_bytes(type))
     {
         struct varlena *v = pg_detoast_datum_packed((struct varlena *)DatumGetPointer(d));
 
@@ -80,7 +90,7 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
         size_t            name_len  = strlen(NameStr(att->attname));
         char             *data;
 
-        if (kind == FASTPOSTGRES_KIND_TEXT && !fastpostgres_is_text_type(type))
+        if (fastpostgres_kind_is_varlena((uint8_t)kind) && !varlena_bytes(type))
         {
             bool varlena;
             getTypeOutputInfo(type, &typoutput, &varlena);
@@ -92,7 +102,7 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
         data = fastpostgres_columnar_write_column(&w, NameStr(att->attname), (uint32)name_len, (uint8_t)kind,
                                                   (uint32)type, (uint32)null_bytes);
 
-        if (kind == FASTPOSTGRES_KIND_TEXT)
+        if (fastpostgres_kind_is_varlena((uint8_t)kind))
         {
             uint32 *off;
             char   *bytes;
@@ -174,6 +184,29 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
                                        ? DatumGetFloat8(DirectFunctionCall1(numeric_float8, d))
                                        : DatumGetFloat8(d);
                         memcpy(slot, &v, 8);
+                        break;
+                    }
+                    /* The binary kinds: the Datum already holds the wire value,
+                     * so these are a copy, not a conversion. */
+                    case FASTPOSTGRES_KIND_DATE: {
+                        int32 v = DatumGetDateADT(d);
+                        memcpy(slot, &v, 4);
+                        break;
+                    }
+                    case FASTPOSTGRES_KIND_TIME: {
+                        int64 v = DatumGetTimeADT(d);
+                        memcpy(slot, &v, 8);
+                        break;
+                    }
+                    case FASTPOSTGRES_KIND_TIMESTAMP:
+                    case FASTPOSTGRES_KIND_TIMESTAMPTZ: {
+                        int64 v = DatumGetTimestamp(d);
+                        memcpy(slot, &v, 8);
+                        break;
+                    }
+                    case FASTPOSTGRES_KIND_UUID: {
+                        pg_uuid_t *u = DatumGetUUIDP(d);
+                        memcpy(slot, u->data, 16);
                         break;
                     }
                 }

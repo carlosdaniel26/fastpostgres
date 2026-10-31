@@ -41,3 +41,9 @@ class Kind(IntEnum):
     TEXT = _client.KIND_TEXT
     INT16 = _client.KIND_INT16
     FLOAT4 = _client.KIND_FLOAT4
+    DATE = _client.KIND_DATE
+    TIME = _client.KIND_TIME
+    TIMESTAMP = _client.KIND_TIMESTAMP
+    TIMESTAMPTZ = _client.KIND_TIMESTAMPTZ
+    UUID = _client.KIND_UUID
+    BYTEA = _client.KIND_BYTEA
