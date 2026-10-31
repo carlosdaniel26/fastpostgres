@@ -68,8 +68,7 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     {
         /* fresh segment: initialise the semaphores before the worker starts */
         memset(r, 0, FASTPOSTGRES_RING_BYTES);
-        if (sem_init(&r->req_ready, 1, 0) != 0 || sem_init(&r->resp_ready, 1, 0) != 0 ||
-            sem_init(&r->push_free, 1, FASTPOSTGRES_PUSH_SLOTS) != 0 || sem_init(&r->push_ready, 1, 0) != 0)
+        if (sem_init(&r->req_ready, 1, 0) != 0 || sem_init(&r->resp_ready, 1, 0) != 0)
         {
             munmap(map, FASTPOSTGRES_RING_BYTES);
             PyErr_SetString(PyExc_OSError, "Ring: sem_init failed");

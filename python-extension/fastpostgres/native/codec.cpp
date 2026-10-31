@@ -382,14 +382,21 @@ cell_new(size_t size, PyTypeObject *tp)
     return o;
 }
 
-/* The interpreter's immortal sentinel, taken from a value it made immortal
- * itself, so it is right for this build whatever the encoding is. The plain
- * constant is tried first: Py_None also carries the "static" flag bits, and
- * there is no reason to hand those to objects that live in an arena. */
 static bool pool_verify(void);
 
+/* This build's immortal marker, and the proof that it works: only a value the
+ * interpreter recognizes as immortal keeps the refcount still, and that is the
+ * whole safety argument for handing out arena memory as an object.
+ *
+ * The header's own constant is tried first, but it is not enough on every
+ * version: 3.13 decides immortality in Py_INCREF with a threshold stricter than
+ * Py_DECREF's sign test, so a value the header calls the sentinel can still be
+ * incremented (measured: 0xC0000000 becomes 0xC0000001 on 3.13.5, and the pool
+ * disabled itself). The interpreter's own immortal objects carry the encoding
+ * it actually recognizes, so None is the fallback — and the loser of the two is
+ * caught by the decref proof rather than by a version table. */
 static bool
-pool_sentinels(void)
+pool_sentinel(void)
 {
     Py_ssize_t candidates[2];
     int        i;
@@ -404,13 +411,10 @@ pool_sentinels(void)
     for (i = 0; i < 2; i++)
     {
         Py_ssize_t s = candidates[i];
-        int        j;
 
-        for (j = 0; j < i; j++)
-            if (candidates[j] == s) break;
-        if (j < i) continue; /* already tried */
-        /* a sentinel that is not recognized as immortal still has to be far
-         * out of decref range, or the object would eventually be freed */
+        if (i == 1 && s == candidates[0]) break; /* the same value twice: done */
+        /* even if the build does not call it immortal, it has to be far out of
+         * decref range or the object would eventually be freed */
         if (s == 0 || s == 1) continue;
         if (!(s < 0 || (uint64_t)s >= (1ULL << 31))) continue;
         g_pool_immortal = s;
@@ -466,10 +470,10 @@ pool_templates(void)
 }
 
 /* Break one of each kind and check it behaves, then break the refcount rule:
- * only a sentinel the interpreter recognizes keeps the count still, and that
- * is the whole safety argument for handing out arena memory as an object. */
+ * decrefs must not move the count, or the object is one stray reference away
+ * from being handed to the allocator it did not come from. */
 static bool
-pool_one_kind(void)
+pool_verify(void)
 {
     static const long long longs[] = {12345, -12345, ((long long)1 << 30) + 7, -(((long long)1 << 30) + 7),
                                       ((long long)1 << 60) + 7, 1LL << 62};
@@ -524,12 +528,6 @@ pool_one_kind(void)
     return true;
 }
 
-static bool
-pool_verify(void)
-{
-    return pool_one_kind();
-}
-
 void
 fp_objpool_init(void)
 {
@@ -556,7 +554,7 @@ fp_objpool_init(void)
     g_pool_used = 0;
     g_pool_on   = true;
 
-    if (!pool_templates() || !pool_sentinels())
+    if (!pool_templates() || !pool_sentinel())
     {
         g_pool_on        = false;
         g_pool_exhausted = false;
@@ -613,34 +611,18 @@ fp_birth_text(const char *p, Py_ssize_t n)
     char      *cell;
     PyObject  *o;
 
-    if (n <= 0) /* the empty string is the interpreter's singleton */
-    {
-        g_pool_fallbacks++;
-        return nullptr;
-    }
+    if (n <= 0) goto fallback; /* the empty string is the interpreter's singleton */
     for (; i + 8 <= n; i += 8)
     {
         uint64_t w;
         memcpy(&w, p + i, 8);
-        if (w & 0x8080808080808080ULL) /* not ASCII: the decode is the normal path's job */
-        {
-            g_pool_fallbacks++;
-            return nullptr;
-        }
+        if (w & 0x8080808080808080ULL) goto fallback; /* not ASCII: the decode is the normal path's job */
     }
     for (; i < n; i++)
-        if (((unsigned char)p[i] & 0x80) != 0)
-        {
-            g_pool_fallbacks++;
-            return nullptr;
-        }
+        if (((unsigned char)p[i] & 0x80) != 0) goto fallback;
 
     cell = (char *)pool_take((size_t)n + (size_t)g_pool_str_data + 1);
-    if (cell == nullptr)
-    {
-        g_pool_fallbacks++;
-        return nullptr;
-    }
+    if (cell == nullptr) goto fallback;
     memcpy(cell, g_pool_str_hdr, sizeof(PyASCIIObject));
     o            = (PyObject *)cell;
     o->ob_type   = &PyUnicode_Type;
@@ -651,6 +633,10 @@ fp_birth_text(const char *p, Py_ssize_t n)
     cell[g_pool_str_data + n] = 0;
     g_pool_births++;
     return o;
+
+fallback:
+    g_pool_fallbacks++;
+    return nullptr;
 }
 
 /* One line per process, so a benchmark log says how it was read. */

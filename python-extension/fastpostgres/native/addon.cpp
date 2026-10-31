@@ -6,7 +6,6 @@
  *   ring.cpp         Ring(seg)              drive the worker through /dev/shm
  *   segment.cpp      read / read_rows       columnar segment -> Python
  *   codec.cpp        type OID -> Python value
- *   synth.cpp        benchmark generators
  *   types.cpp        the shared Result / Column / Segment types
  *
  * The segment format lives in the extension's header
@@ -21,7 +20,6 @@
 #include "kernels.h"
 #include "ring.hpp"
 #include "segment.hpp"
-#include "synth.hpp"
 #include "types.hpp"
 
 /* The wire kinds, so kind values have one source (fastpostgres_shm.h) and the
@@ -89,6 +87,5 @@ PyInit__client(void)
         Py_DECREF(m);
         return nullptr;
     }
-    fp_register_synth(m);
     return m;
 }

@@ -14,8 +14,6 @@ from ._client import (
     Ring,
     Segment,
     read,
-    synth_copy,
-    synth_segment,
 )
 
 __all__ = [
@@ -26,8 +24,6 @@ __all__ = [
     "Ring",
     "Segment",
     "read",
-    "synth_copy",
-    "synth_segment",
 ]
 
 

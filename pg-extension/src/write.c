@@ -241,7 +241,7 @@ uint64 fastpostgres_write_segment(const char *seg, const char *tab)
         wcols[c].data     = col.data;
         wcols[c].bytes    = col.bytes;
         wcols[c].atttypid = TupleDescAttr(tupdesc, c)->atttypid;
-        wcols[c].no_nulls = !fp_kernels->nullmap_any(col.nulls, (size_t)((nrows + 7) / 8));
+        wcols[c].no_nulls = !fastpostgres_nullmap_any(col.nulls, (size_t)((nrows + 7) / 8));
     }
 
     cid   = GetCurrentCommandId(false);

@@ -10,7 +10,6 @@
 
 #include "codec.hpp"
 #include "fastpostgres_shm.h"
-#include "kernels.h"
 #include "shm_map.h"
 #include "types.hpp"
 
@@ -97,10 +96,7 @@ segment_read(PyObject *, PyObject *args)
         column->kind         = col.kind;
         column->pgtype       = (long)col.pgtype;
         column->nrows        = (long)rd.nrows;
-        column->vdata        = col.data; /* the mapping outlives the chunk, so these stay valid */
-        column->vbytes       = col.bytes;
-        column->vnulls       = col.nulls;
-        column->data         = fp_memory_view(col.data, col.data_len);
+        column->data         = fp_memory_view(col.data, col.data_len); /* the mapping outlives the chunk */
         size_t offsets_bytes = (size_t)(col.nrows + 1) * 4;
         column->bytes        = (fastpostgres_kind_is_varlena(col.kind) && col.bytes)
                                    ? fp_memory_view(col.bytes, (size_t)col.data_len - offsets_bytes)
@@ -165,7 +161,7 @@ segment_read_rows(PyObject *, PyObject *args)
      * a column with no nulls skips the test for every row it holds. */
     std::vector<char> nullfree(rd.ncols);
     for (uint32_t c = 0; c < rd.ncols; c++)
-        nullfree[c] = !fp_kernels->nullmap_any(cols[c].nulls, (size_t)((rd.nrows + 7) / 8));
+        nullfree[c] = !fastpostgres_nullmap_any(cols[c].nulls, (size_t)((rd.nrows + 7) / 8));
 
     for (uint64_t r = 0; r < rd.nrows; r++)
     {

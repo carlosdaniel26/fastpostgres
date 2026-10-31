@@ -17,10 +17,10 @@ typedef struct {
     PyObject               *rows;
 } ResultObject;
 
-/* One column of a columnar segment: zero-copy memoryviews for Python, plus the
- * raw pointers so a consumer can take a typed view (numpy, .offsets) instead of
- * materialising one Python object per value. segment.cpp caches the mapping for
- * the process lifetime and never unmaps it, so the pointers stay valid. */
+/* One column of a columnar segment: zero-copy memoryviews for Python. The bytes
+ * behind them are read through fp_col_bytes(), so there is one source of truth
+ * for the three regions. segment.cpp caches the mapping for the process
+ * lifetime and never unmaps it, so the pointers stay valid. */
 typedef struct {
     PyObject_HEAD PyObject *name;
     long                    kind;
@@ -29,10 +29,15 @@ typedef struct {
     PyObject               *data;  /* whole data region (offsets + bytes for the varlena kinds) */
     PyObject               *bytes; /* varlena kinds: the raw byte payload */
     PyObject               *nulls; /* 1 bit per row */
-    const uint8_t          *vdata; /* the same three regions, for the C helpers */
-    const uint8_t          *vbytes;
-    const uint8_t          *vnulls;
 } ColumnObject;
+
+/* The bytes behind one of a column's views, NULL when the view is None. */
+static inline const uint8_t *
+fp_col_bytes(PyObject *view)
+{
+    if (view == nullptr || view == Py_None) return nullptr;
+    return (const uint8_t *)PyMemoryView_GET_BUFFER(view)->buf;
+}
 
 /* A columnar chunk: row count plus the column views. */
 typedef struct {

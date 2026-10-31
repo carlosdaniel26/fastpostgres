@@ -276,6 +276,18 @@ static inline int fastpostgres_col_isnull(const FastpostgresColumn *c, uint64_t 
     return (c->nulls[row >> 3] & (1u << (row & 7))) != 0;
 }
 
+/* 1 when any bit is set in the first nbytes: a column with no nulls skips every
+ * per-row null test. The scan lives in the header both sides include, so the
+ * writer and the reader ask the same question of the same bytes. */
+static inline int fastpostgres_nullmap_any(const uint8_t *bits, size_t nbytes)
+{
+    size_t i;
+
+    for (i = 0; i < nbytes; i++)
+        if (bits[i] != 0) return 1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------------------
  * FPCOLUMN writer — the frame emitted by the extension (from tuples) and by the
  * client's generators (from synthetic arrays). Both fill only the column data;

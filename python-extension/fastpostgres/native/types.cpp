@@ -48,8 +48,10 @@ column_has_nulls(ColumnObject *self)
 {
     size_t nbytes = (size_t)(((size_t)self->nrows + 7) / 8);
 
-    if (self->vnulls == nullptr || nbytes == 0) return 0;
-    return fp_kernels->nullmap_any(self->vnulls, nbytes);
+    const uint8_t *bits = fp_col_bytes(self->nulls);
+
+    if (bits == nullptr || nbytes == 0) return 0;
+    return fastpostgres_nullmap_any(bits, nbytes);
 }
 
 /* The numpy dtype for a fixed-width kind; nullptr for the varlena kinds. The
@@ -100,9 +102,9 @@ Column_value_at(ColumnObject *self, PyObject *arg)
     memset(&c, 0, sizeof(c));
     c.kind   = (uint8_t)self->kind;
     c.pgtype = (uint32_t)self->pgtype;
-    c.data   = self->vdata;
-    c.bytes  = self->vbytes;
-    c.nulls  = self->vnulls;
+    c.data   = fp_col_bytes(self->data);
+    c.bytes  = fp_col_bytes(self->bytes);
+    c.nulls  = fp_col_bytes(self->nulls);
     c.nrows  = (uint64_t)self->nrows;
     return fp_decode_column(&c, (uint64_t)row);
 }
@@ -122,7 +124,8 @@ Column_get_offsets(ColumnObject *self, void *)
     PyObject *v;
 
     if (!fastpostgres_kind_is_varlena((uint8_t)self->kind)) Py_RETURN_NONE;
-    v = PyMemoryView_FromMemory((char *)self->vdata, (Py_ssize_t)(((size_t)self->nrows + 1) * 4), PyBUF_READ);
+    v = PyMemoryView_FromMemory((char *)fp_col_bytes(self->data), (Py_ssize_t)(((size_t)self->nrows + 1) * 4),
+                                PyBUF_READ);
     if (v == nullptr)
     {
         PyErr_Clear();
@@ -154,7 +157,7 @@ Column_get_array_interface(ColumnObject *self, void *)
 
     dict  = PyDict_New();
     shape = Py_BuildValue("(n)", (Py_ssize_t)self->nrows);
-    data  = Py_BuildValue("(NK)", PyLong_FromVoidPtr((void *)self->vdata), (unsigned long long)1);
+    data  = Py_BuildValue("(NK)", PyLong_FromVoidPtr((void *)fp_col_bytes(self->data)), (unsigned long long)1);
     ts    = PyUnicode_FromString(typestr);
     ver   = PyLong_FromLong(3);
     if (!dict || !shape || !data || !ts || !ver)

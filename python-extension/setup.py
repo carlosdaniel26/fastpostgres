@@ -68,7 +68,6 @@ setup(
                 "fastpostgres/native/ring.cpp",
                 "fastpostgres/native/segment.cpp",
                 "fastpostgres/native/codec.cpp",
-                "fastpostgres/native/synth.cpp",
                 "fastpostgres/native/types.cpp",
             ],
             include_dirs=include_dirs,

@@ -22,22 +22,15 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "access/tupdesc.h"
 #include "access/xact.h"
-#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
 #include "fmgr.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
-#include "tcop/dest.h"
 #include "utils/builtins.h"
-#include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
-#include "varatt.h"
 
 #include "fastpostgres_shm.h"
 
@@ -52,8 +45,6 @@ static volatile sig_atomic_t got_sigterm   = false;
 static bool                  have_txn      = false;
 static bool                  have_stream   = false;
 static bool                  have_snapshot = false;
-
-static bool push_run(FastpostgresRing *r, const char *query);
 
 static void ring_sigterm(SIGNAL_ARGS)
 {
@@ -132,15 +123,12 @@ static void ring_set_error(FastpostgresRing *r)
     FreeErrorData(edata);
 }
 
-/* Returns false when the worker should stop; *respond is false for push, whose
- * completion is signalled in the slot queue instead. */
-static bool ring_handle(FastpostgresRing *r, const char *ring_name, bool *respond)
+/* Returns false when the worker should stop. */
+static bool ring_handle(FastpostgresRing *r, const char *ring_name)
 {
     char  *a1 = (char *)fastpostgres_ring_arg1(r->arg);
     char  *a2 = (char *)fastpostgres_ring_arg2(r->arg);
     uint64 n  = 0;
-
-    *respond = true;
 
     /* never let a data write clobber the ring itself */
     if ((r->op == FASTPOSTGRES_OP_OPEN || r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_CLOSE ||
@@ -156,11 +144,6 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name, bool *respon
     {
         case FASTPOSTGRES_OP_STOP:
             return false;
-
-        case FASTPOSTGRES_OP_PUSH:
-            *respond = false; /* the slot queue carries the result */
-            push_run(r, a1);
-            break;
 
         case FASTPOSTGRES_OP_OPEN:
             begin_txn(); /* drop any previous stream and open a new transaction */
@@ -299,257 +282,15 @@ PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg)
         r->nrows    = 0;
         r->error[0] = 0;
 
-        {
-            bool respond = true;
-
-            if (!ring_handle(r, seg, &respond)) break;
-            if (respond)
-            {
-                __atomic_store_n(&r->resp_seq, handled, __ATOMIC_RELEASE);
-                sem_post(&r->resp_ready);
-            }
-        }
+        if (!ring_handle(r, seg)) break;
+        __atomic_store_n(&r->resp_seq, handled, __ATOMIC_RELEASE);
+        sem_post(&r->resp_ready);
     }
 
     abort_txn();
     __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
     munmap(r, rsize);
     proc_exit(0);
-}
-
-/* ---- push mode: one JS object per row, as the executor produces it -------- */
-
-typedef struct {
-    DestReceiver      pub;
-    FastpostgresRing *r;
-    char             *slots;
-    uint32_t          head;
-    uint32_t          ncols;
-    uint8_t           kinds[FASTPOSTGRES_PUSH_MAXCOLS];
-    Oid               types[FASTPOSTGRES_PUSH_MAXCOLS];
-    Oid               typoutput[FASTPOSTGRES_PUSH_MAXCOLS];
-    bool              failed;
-} FastpostgresPushDest;
-
-static bool push_receive(TupleTableSlot *slot, DestReceiver *self);
-static void push_startup(DestReceiver *self, int operation, TupleDesc td);
-static void push_noop(DestReceiver *self)
-{
-}
-
-static void push_startup(DestReceiver *self, int operation, TupleDesc td)
-{
-    FastpostgresPushDest *d = (FastpostgresPushDest *)self;
-    int                   i, n = td->natts;
-
-    if (n > FASTPOSTGRES_PUSH_MAXCOLS) n = FASTPOSTGRES_PUSH_MAXCOLS;
-    d->ncols         = (uint32_t)n;
-    d->r->push_ncols = (uint32_t)n;
-
-    for (i = 0; i < n; i++)
-    {
-        Form_pg_attribute att  = TupleDescAttr(td, i);
-        Oid               type = att->atttypid;
-        int               kind = fastpostgres_oid_to_kind(type);
-
-        /* This path was written for the text-era kinds and has no Python
-         * consumer; the binary kinds would silently encode as text here, so
-         * refuse rather than publish a frame the reader cannot interpret. */
-        if (kind == FASTPOSTGRES_KIND_DATE || kind == FASTPOSTGRES_KIND_TIME ||
-            kind == FASTPOSTGRES_KIND_TIMESTAMP || kind == FASTPOSTGRES_KIND_TIMESTAMPTZ ||
-            kind == FASTPOSTGRES_KIND_UUID || kind == FASTPOSTGRES_KIND_BYTEA)
-            elog(ERROR, "fastpostgres: push mode does not carry the binary wire kinds");
-
-        d->kinds[i]     = (uint8_t)kind;
-        d->types[i]     = type;
-        d->typoutput[i] = InvalidOid;
-        if (kind == FASTPOSTGRES_KIND_TEXT && !fastpostgres_is_text_type(type))
-        {
-            bool varlena;
-            getTypeOutputInfo(type, &d->typoutput[i], &varlena);
-        }
-        snprintf(d->r->push_cols[i].name, FASTPOSTGRES_PUSH_NAME, "%s", NameStr(att->attname));
-        d->r->push_cols[i].kind   = (uint8_t)kind;
-        d->r->push_cols[i].pgtype = (uint32_t)type;
-    }
-}
-
-static bool push_receive(TupleTableSlot *slot, DestReceiver *self)
-{
-    FastpostgresPushDest *d         = (FastpostgresPushDest *)self;
-    uint32_t              ncol      = d->ncols;
-    int                   nullbytes = (int)((ncol + 7) / 8);
-    char                 *s         = d->slots + (size_t)d->head * FASTPOSTGRES_PUSH_SLOT;
-    size_t                p         = 1 + (size_t)nullbytes;
-    struct timespec       ts;
-    uint32_t              i;
-
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 10;
-    if (sem_timedwait(&d->r->push_free, &ts) != 0)
-    {
-        d->failed = true;
-        return false; /* stop execution: the client stalled */
-    }
-
-    slot_getallattrs(slot);
-    s[0] = (char)FASTPOSTGRES_PUSH_ROW;
-    memset(s + 1, 0, (size_t)nullbytes);
-
-    for (i = 0; i < ncol; i++)
-    {
-        Datum v;
-
-        if (p + 16 > FASTPOSTGRES_PUSH_SLOT) goto too_big;
-        if (slot->tts_isnull[i])
-        {
-            s[1 + (i >> 3)] |= (char)(1 << (i & 7));
-            continue;
-        }
-        v = slot->tts_values[i];
-
-        switch (d->kinds[i])
-        {
-            case FASTPOSTGRES_KIND_BOOL:
-                s[p++] = DatumGetBool(v) ? 1 : 0;
-                break;
-            case FASTPOSTGRES_KIND_INT16: {
-                int16 x = DatumGetInt16(v);
-                memcpy(s + p, &x, 2);
-                p += 2;
-                break;
-            }
-            case FASTPOSTGRES_KIND_INT32: {
-                int32 x = DatumGetInt32(v);
-                memcpy(s + p, &x, 4);
-                p += 4;
-                break;
-            }
-            case FASTPOSTGRES_KIND_INT64: {
-                int64 x = DatumGetInt64(v);
-                memcpy(s + p, &x, 8);
-                p += 8;
-                break;
-            }
-            case FASTPOSTGRES_KIND_FLOAT4: {
-                float4 x = DatumGetFloat4(v);
-                memcpy(s + p, &x, 4);
-                p += 4;
-                break;
-            }
-            case FASTPOSTGRES_KIND_FLOAT8: {
-                double x = (d->types[i] == NUMERICOID)
-                               ? DatumGetFloat8(DirectFunctionCall1(numeric_float8, v))
-                               : DatumGetFloat8(v);
-                memcpy(s + p, &x, 8);
-                p += 8;
-                break;
-            }
-            default: /* text */
-            {
-                const char *data;
-                int         len;
-
-                if (fastpostgres_is_text_type(d->types[i]))
-                {
-                    struct varlena *vv = pg_detoast_datum_packed((struct varlena *)DatumGetPointer(v));
-                    data               = VARDATA_ANY(vv);
-                    len                = VARSIZE_ANY_EXHDR(vv);
-                }
-                else
-                {
-                    char *out = OidOutputFunctionCall(d->typoutput[i], v);
-                    data      = out ? out : "";
-                    len       = out ? (int)strlen(out) : 0;
-                }
-                if (p + 4 + (size_t)len > FASTPOSTGRES_PUSH_SLOT) goto too_big;
-                {
-                    uint32 l = (uint32)len;
-                    memcpy(s + p, &l, 4);
-                    p += 4;
-                    memcpy(s + p, data, (size_t)len);
-                    p += (size_t)len;
-                }
-                break;
-            }
-        }
-    }
-
-    d->head = (d->head + 1) % FASTPOSTGRES_PUSH_SLOTS;
-    sem_post(&d->r->push_ready);
-    return true;
-
-too_big:
-    d->failed = true;
-    return false;
-}
-
-/* Run the query with our receiver; returns true when the stream completed. */
-static bool push_run(FastpostgresRing *r, const char *query)
-{
-    FastpostgresPushDest d;
-    SPIExecuteOptions    opts;
-    bool                 ok = false;
-
-    memset(&d, 0, sizeof(d));
-    d.r               = r;
-    d.slots           = (char *)r + FASTPOSTGRES_PUSH_OFFSET;
-    d.pub.receiveSlot = push_receive;
-    d.pub.rStartup    = push_startup;
-    d.pub.rShutdown   = push_noop;
-    d.pub.rDestroy    = push_noop;
-    d.pub.mydest      = DestNone;
-
-    begin_txn();
-    memset(&opts, 0, sizeof(opts));
-    opts.read_only          = true;
-    opts.must_return_tuples = true;
-    opts.dest               = &d.pub;
-
-    PG_TRY();
-    {
-        int rc;
-
-        if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "push: SPI_connect failed");
-        rc = SPI_execute_extended(query, &opts);
-        SPI_finish();
-        if (rc < 0) elog(ERROR, "push: %s", SPI_result_code_string(rc));
-        ok = true;
-    }
-    PG_CATCH();
-    {
-        ring_set_error(r);
-        r->push_status = 1;
-        strlcpy(r->push_error, r->error, sizeof(r->push_error));
-        FlushErrorState();
-        abort_txn();
-    }
-    PG_END_TRY();
-
-    if (ok) commit_txn();
-
-    if (d.failed && ok)
-    {
-        r->push_status = 1;
-        strlcpy(r->push_error, "row too large or client stalled", sizeof(r->push_error));
-        ok = false;
-    }
-
-    /* final marker: DONE, or ERROR with the message in push_error */
-    {
-        char           *s = d.slots + (size_t)d.head * FASTPOSTGRES_PUSH_SLOT;
-        struct timespec ts;
-
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 10;
-        if (sem_timedwait(&r->push_free, &ts) == 0)
-        {
-            s[0]   = ok ? (char)FASTPOSTGRES_PUSH_DONE : (char)FASTPOSTGRES_PUSH_ERROR;
-            d.head = (d.head + 1) % FASTPOSTGRES_PUSH_SLOTS;
-            sem_post(&r->push_ready);
-        }
-    }
-    return ok;
 }
 
 /* ---- SQL: start / stop --------------------------------------------------- */
