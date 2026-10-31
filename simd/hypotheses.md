@@ -600,6 +600,31 @@ rows/s from 1.86M at 100k, because the 512 MiB immortal arena fills and every
 value after that falls back to the normal constructors. Every measurement above
 is at 100k for that reason; the fix is the cgroup-sized pool noted below.
 
+### The CORE read without CORE
+
+Since the CORE layer's 375 ns is its own Result and Row machinery, a statement can
+be compiled once — SQLAlchemy's compiler, literal binds — and run as the plain
+SQL the ring already speaks, which hands back the driver's tuples.
+`Connection.fetchall(select(...))` in `dbapi.py` is that, and it lands where the
+driver does:
+
+| | ns/row | rows/s |
+|---|---|---|
+| driver, cursor execute + fetchall | 152.9 | 0.65M |
+| **CORE stand-in** (`conn.fetchall(select(...))`) | **159-166** | **6.0-6.3M** |
+| SQLAlchemy CORE | 524.2 | 0.19M |
+| SQLAlchemy ORM | 5620.2 | 0.02M |
+
+**-69%** against CORE, and ~**-82%** against psycopg2's CORE (943 ns/row in the
+table above), on the same SQL with the same values — the test asserts the
+stand-in returns CORE's rows row for row. The only thing it adds to the driver is
+one compile per call, and that is a hit in SQLAlchemy's compiled cache as long as
+the dialect instance is a singleton (a fresh `postgresql.dialect()` per call
+defeats the cache: it cost 24 ns/row before this, 6 after).
+
+The trade is the Row wrapper: the rows are tuples, with no named access and no
+Result API. Which is the point — that wrapper is the whole of CORE's 375 ns.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
