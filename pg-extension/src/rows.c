@@ -122,14 +122,19 @@ row_needs_build(RowReceiver *rx, HeapTuple tup)
     return false;
 }
 
-/* Deform, detoast what is extended, and return the rebuilt tuple's length. */
+/* Deform, detoast what is extended, and return the rebuilt tuple's length.
+ *
+ * The values are copied into the receiver's own arrays first: the ones handed in
+ * belong to the executor (a virtual slot's values are the projection's output),
+ * and resolving a value means replacing it. */
 static uint32
-row_prepare(RowReceiver *rx, HeapTuple tup)
+row_prepare(RowReceiver *rx, const Datum *values, const bool *isnull)
 {
     TupleDesc td = rx->tdesc;
     int       i;
 
-    heap_deform_tuple(tup, td, rx->values, rx->isnull); /* fills missing attributes too */
+    memcpy(rx->values, values, sizeof(Datum) * td->natts);
+    memcpy(rx->isnull, isnull, sizeof(bool) * td->natts);
     for (i = 0; i < rx->nvarlena; i++)
     {
         int a = rx->varlena[i];
@@ -170,30 +175,40 @@ row_receive(TupleTableSlot *slot, DestReceiver *self)
 {
     RowReceiver  *rx  = (RowReceiver *)self;
     MemoryContext old = MemoryContextSwitchTo(rx->tmpctx);
-    HeapTuple     tup = ExecFetchSlotHeapTuple(slot, false, NULL);
-    char         *row = NULL;
+    HeapTuple     tup = NULL;
+    char         *row;
     uint32        len;
     bool          ok = true;
 
-    if (tup != NULL)
-    {
-        if (row_needs_build(rx, tup))
-        {
-            len = row_prepare(rx, tup); /* materialises into rx->tmpctx */
-            row = fastpostgres_rows_reserve(&rx->w, len, rx->end);
-            if (row != NULL) row_build(rx, row, len);
-        }
-        else
-        {
-            row = fastpostgres_rows_reserve(&rx->w, (uint32)tup->t_len, rx->end);
-            if (row != NULL) memcpy(row, tup->t_data, (size_t)tup->t_len);
-        }
+    /* A slot holding a heap tuple already in the shape the reader expects costs
+     * one memcpy — straight out of the buffer page, for a plain scan. A slot
+     * without one (virtual and minimal slots both answer NULL here, so a
+     * projection or a tuplestore) or one whose values need resolving writes its
+     * values instead: materialising a heap tuple first would copy every value
+     * twice, and allocate for the privilege. */
+    if (slot->tts_ops->get_heap_tuple != NULL) tup = ExecFetchSlotHeapTuple(slot, false, NULL);
 
-        if (row == NULL)
-        {
-            if (rx->w.nrows == 0) elog(ERROR, "fastpostgres: result row exceeds the segment");
-            ok = false; /* the batch is full: the client asks again for the rest */
-        }
+    if (tup != NULL && !row_needs_build(rx, tup))
+        len = (uint32)tup->t_len;
+    else
+    {
+        slot_getallattrs(slot); /* a no-op for a virtual slot */
+        len = row_prepare(rx, slot->tts_values, slot->tts_isnull);
+        tup = NULL; /* row_build writes this one */
+    }
+
+    row = fastpostgres_rows_reserve(&rx->w, len, rx->end);
+    if (row != NULL)
+    {
+        if (tup != NULL)
+            memcpy(row, tup->t_data, (size_t)len);
+        else
+            row_build(rx, row, len);
+    }
+    else
+    {
+        if (rx->w.nrows == 0) elog(ERROR, "fastpostgres: result row exceeds the segment");
+        ok = false; /* the batch is full: the client asks again for the rest */
     }
 
     MemoryContextSwitchTo(old);
