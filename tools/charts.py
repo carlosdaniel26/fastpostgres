@@ -7,8 +7,8 @@ Builds the container, runs both benchmarks, then writes four images:
     sqlalchemy_chart-orm.png / sqlalchemy_chart-core.png   psycopg2 / fastpostgres
 
 Usage:
-    scripts/run_bench.py [nrows ...]        (default: each benchmark's own)
-    scripts/run_bench.py --log bench.log    (plot an existing log)
+    just charts [nrows ...]        (default: each benchmark's own)
+    just charts --log bench.log    (plot an existing log)
 
 Both benchmarks run in one container, so their logs share one environment
 block; `--log` skips the run and plots a saved log instead. The 10M default
@@ -240,8 +240,7 @@ def main():
     ap.add_argument("--scale", choices=("auto", "linear", "log"), default="auto")
     args = ap.parse_args()
 
-    text = Path(args.log).read_text() if args.log else run(
-        [str(ROOT / "scripts/dev.sh"), "bench", *args.sizes])
+    text = Path(args.log).read_text() if args.log else run(["just", "bench", *args.sizes])
 
     print()
     env = parse_env_text(text)
