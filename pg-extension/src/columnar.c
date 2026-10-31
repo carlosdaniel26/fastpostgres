@@ -17,8 +17,6 @@
 
 #include "fastpostgres_shm.h"
 
-#include "kernels.h"
-
 #include "columnar.h"
 #include "shm.h"
 
@@ -127,12 +125,7 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
                 else
                 {
                     if (p + len > end) elog(ERROR, "fastpostgres: result exceeds the segment");
-                    /* values are short here (a name, an email); the ladder beats
-                     * memcpy's dispatch, and reads/writes exactly len bytes */
-                    if (len <= 32)
-                        fp_kernels->copy_small(p, d, (size_t)len);
-                    else
-                        memcpy(p, d, (size_t)len);
+                    memcpy(p, d, (size_t)len);
                     p += len;
                     off[r + 1] = (uint32)(p - bytes);
                 }

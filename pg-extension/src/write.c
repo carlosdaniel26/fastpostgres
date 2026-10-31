@@ -25,8 +25,6 @@
 
 #include "fastpostgres_shm.h"
 
-#include "kernels.h"
-
 #include "shm.h"
 #include "write.h"
 
@@ -175,10 +173,7 @@ static Datum col_datum(WCol *col, uint64_t r, bool *isnull, char **arena)
             text           *t   = (text *)*arena; /* bump-allocate from the batch arena */
 
             SET_VARSIZE(t, len + VARHDRSZ);
-            if (len <= 32)
-                fp_kernels->copy_small(VARDATA(t), col->bytes + s, len);
-            else
-                memcpy(VARDATA(t), col->bytes + s, len);
+            memcpy(VARDATA(t), col->bytes + s, len);
             *arena += MAXALIGN(len + VARHDRSZ);
             return PointerGetDatum(t);
         }

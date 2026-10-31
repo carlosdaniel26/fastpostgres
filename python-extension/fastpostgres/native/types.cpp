@@ -5,7 +5,6 @@
 #include <cstring>
 
 #include "codec.hpp"
-#include "kernels.h"
 
 /* ------------------------------------------------------------------ Result */
 

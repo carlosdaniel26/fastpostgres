@@ -52,15 +52,6 @@ demo n="5000":
 charts *sizes:
     tools/charts.py {{sizes}}
 
-# build and run the SIMD micro-benchmarks (freestanding, no container)
-kernels:
-    @mkdir -p build/simd
-    cc -O3 -Isimd -o build/simd/kernels_bench simd/kernels_bench.c simd/kernels.c simd/cpu.c simd/kernels_avx2.S simd/kernels_avx512.S
-    cc -O3 -Isimd -o build/simd/layout_bench simd/layout_bench.c
-    @./build/simd/kernels_bench
-    @echo
-    @./build/simd/layout_bench
-
 # drop the built image
 clean:
     -docker rmi {{image}}

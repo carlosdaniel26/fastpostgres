@@ -17,7 +17,6 @@
 #include "codec.hpp"
 #include "connection.hpp"
 #include "fastpostgres_shm.h"
-#include "kernels.h"
 #include "ring.hpp"
 #include "segment.hpp"
 #include "types.hpp"
@@ -62,7 +61,6 @@ PyInit__client(void)
 {
     if (!fp_codec_init()) return nullptr;
     if (!fp_types_init()) return nullptr;
-    fp_kernels_init();
     fp_objpool_init();              /* off unless the layouts verify (FASTPOSTGRES_OBJ_ARENA) */
     Py_AtExit(fp_objpool_report);   /* one line per process: how values were read */
 
@@ -71,13 +69,6 @@ PyInit__client(void)
 
     if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
         !fp_register_segment(m) || !add_kind_constants(m))
-    {
-        Py_DECREF(m);
-        return nullptr;
-    }
-    /* Which marshalling kernels this process chose (also reported in the
-     * benchmark ENV block, so a run says how it was built). */
-    if (PyModule_AddStringConstant(m, "simd", fp_kernels->name) != 0)
     {
         Py_DECREF(m);
         return nullptr;

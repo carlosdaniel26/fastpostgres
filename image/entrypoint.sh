@@ -40,7 +40,6 @@ echo "postgres: $(psql --version | awk '{print $3}')"
 echo "python: $(python3 --version | awk '{print $2}')"
 python3 -c 'import sqlalchemy; print("sqlalchemy:", sqlalchemy.__version__)' 2>/dev/null || true
 echo "shm: $(df -h /dev/shm | awk 'NR==2 {print $2}')"
-echo "simd: $(python3 -c 'import fastpostgres._client as c; print(c.simd)' 2>/dev/null || echo unknown)"
 echo "### END ENV"
 
 gosu postgres "$@"

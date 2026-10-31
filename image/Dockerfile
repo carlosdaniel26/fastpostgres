@@ -14,7 +14,6 @@ COPY pg-extension /src/pg-extension
 COPY python-extension /src/python-extension
 COPY benchmark /src/benchmark
 COPY demo /src/demo
-COPY simd /src/simd
 COPY image/entrypoint.sh image/benchmarks.sh image/demo.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 

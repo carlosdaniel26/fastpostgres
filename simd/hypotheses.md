@@ -1,5 +1,19 @@
 # Hot path: hypotheses, not yet measured
 
+## What this directory used to hold
+
+The kernel layer lived here: a CPU probe, a dispatch table, an AVX2 copy ladder,
+an AVX2 and an AVX-512 null test, their scalar twins, and two harnesses.
+Measured end to end it was worth about **0.5%** of the read phase - the null
+scan 0.26 ns/row, the copy 2.6 ns/row on the benchmark's shape - which did not
+pay for the assembly, the dispatch, the scalar twins that kept it honest, the
+harness, or the "reads only what it writes" contract that had to be policed
+(there is a guard-page check for that below). What is left of it is three lines
+of C in `fastpostgres_shm.h` and a `memcpy`.
+
+What the numbers below are still for: they are the record of what a
+micro-optimization is worth against its share of the pipeline.
+
 Static work only: the three hot loops were replicated 1:1 and compiled with the
 flags the extensions actually use (`-O3`, baseline x86-64; `-O2` for the client
 TU), and the generated code was read. No benchmark was run, so every number
