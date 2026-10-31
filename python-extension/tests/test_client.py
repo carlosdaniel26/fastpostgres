@@ -302,6 +302,37 @@ class DbapiTest(unittest.TestCase):
 
         cur.execute("DROP TABLE fp_core_t")
 
+    def test_core_module_mirrors_the_core_read_shape(self):
+        """fastpostgres.core takes the same calls CORE does — engine.connect(),
+        execute(statement), .all() — with the driver's tuples underneath."""
+        from sqlalchemy import Column, Integer, MetaData, String, Table, select
+
+        from fastpostgres.core import create_engine
+
+        cur = self.conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS fp_lean_t; CREATE TABLE fp_lean_t (id int, s text)")
+        cur.execute("INSERT INTO fp_lean_t VALUES (1, 'a'), (2, 'b')")
+
+        md = MetaData()
+        t = Table("fp_lean_t", md, Column("id", Integer), Column("s", String))
+        engine = create_engine(CONNINFO)
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(select(t.c.id, t.c.s).order_by(t.c.id))
+                self.assertEqual(res.all(), [(1, "a"), (2, "b")])
+                self.assertEqual(res.keys(), ("id", "s"))
+                self.assertEqual(res.first(), (1, "a"))
+                self.assertEqual(len(res), 2)
+                self.assertEqual(list(res), [(1, "a"), (2, "b")])
+
+                # SQL text goes through as it is; rowcount survives for DML
+                self.assertEqual(conn.execute("SELECT count(*)::int FROM fp_lean_t").all(), [(2,)])
+                self.assertEqual(conn.execute("UPDATE fp_lean_t SET s = s").rowcount, 2)
+        finally:
+            engine.dispose()
+
+        cur.execute("DROP TABLE fp_lean_t")
+
     def test_typed_views_are_zero_copy(self):
         """Consuming a chunk without materialising it: numpy wraps the segment in
         place, text is sliced straight out of the offset table, and a value is
