@@ -559,6 +559,47 @@ rebuilt with PostgreSQL's own `heap_compute_data_size`/`heap_fill_tuple`, in a
 per-row memory context, so the segment never carries a pointer its reader cannot
 follow.
 
+## End to end: the driver's share, and SQLAlchemy's price
+
+One process, one table of 100k rows in the benchmark's own shape, read through
+the benchmark's own `read_core`/`read_orm`, with the layers underneath timed
+separately as well (median of three, 1 GiB arena, 0 fallbacks):
+
+| stage | fastpostgres | psycopg2 |
+|---|---|---|
+| worker turn (executor, row write, ring) | 38.5 ns | — |
+| client decode (Python objects) | 133.3 | — |
+| **driver: cursor execute + fetchall** | **166.7 ns** (0.60M rows/s) | **521.4 ns** (0.19M) |
+| the same rows over libpq instead of shm | 533.6 | — |
+| **SQLAlchemy CORE** | **542.0 ns** (0.18M) | **943.2 ns** (0.11M) |
+| **SQLAlchemy ORM** | **5409.9 ns** | **6254.0 ns** |
+
+Reading down our column: PostgreSQL's executor plus the one write into the
+segment is 38 ns, the Python objects built out of it are 133, and everything
+above is someone else's. SQLAlchemy's own share is then the same for both
+drivers — 375 ns of the CORE row for fastpostgres against 422 for psycopg2 —
+so the entire headline is the driver's 355 ns gap. The libpq fallback on its own
+lands at psycopg2 parity (534 against 521), which is the other half of the same
+sentence: the shared-memory path is the whole of the +79%.
+
+For the ORM row the arithmetic is starker, and split again:
+
+| SQLAlchemy layer | fastpostgres | psycopg2 |
+|---|---|---|
+| session + result plumbing + `Row` objects, no entities | 1376 ns | 1710 ns |
+| **ORM entities on top of that** | **~4034 ns** | **~4544 ns** |
+
+Three quarters of an ORM row is SQLAlchemy instantiating the model, setting six
+attributes and doing whatever the identity map does — 4.0-4.5 us per row, the
+same whichever driver feeds it. That is the ceiling this project works under:
+nothing on the driver side can move ORM more than ~3%, and CORE is capped near
++40% over psycopg2, as H11 said before the row frame took a bite out of it.
+
+One caveat on sizes: at 1M rows the benchmark's own CORE number falls to 1.16M
+rows/s from 1.86M at 100k, because the 512 MiB immortal arena fills and every
+value after that falls back to the normal constructors. Every measurement above
+is at 100k for that reason; the fix is the cgroup-sized pool noted below.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
