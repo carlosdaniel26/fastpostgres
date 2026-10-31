@@ -170,6 +170,31 @@ def skip(path, section):
         print(f"no '{section}' rows in the log -- nothing to plot")
 
 
+def compare(before_text, after_text):
+    """Before/after deltas for the same loads — what a hot-path change is for."""
+    tb = parse_sections(before_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
+    ta = parse_sections(after_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
+    db = parse_sections(before_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
+    da = parse_sections(after_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
+
+    print("\nBEFORE -> AFTER (M rows/s)")
+    for section, names, b, a in (
+        ("read", ("tcp", "unix", "shm"), tb, ta),
+        ("write", ("tcp", "unix", "shm"), tb, ta),
+        ("orm", ("psycopg2", "fastpostgres"), db, da),
+        ("core", ("psycopg2", "fastpostgres"), db, da),
+    ):
+        for load in sorted(b[section], key=num_rows):
+            if load not in a[section]:
+                continue
+            cells = []
+            for i, name in enumerate(names):
+                was, now = b[section][load][i], a[section][load][i]
+                delta = f"{(now / was - 1) * 100:+.1f}%" if was else "n/a"
+                cells.append(f"{name} {was:.2f} -> {now:.2f} ({delta})")
+            print(f"  {section:<5} {load:>4}: " + "   ".join(cells))
+
+
 def spec(env, keys):
     parts = []
     for key, fmt in keys:
@@ -237,6 +262,7 @@ def main():
     )
     ap.add_argument("sizes", nargs="*", help="row counts (default: each benchmark's own)")
     ap.add_argument("--log", help="plot this log instead of running the benchmarks")
+    ap.add_argument("--compare", metavar="LOG", help="print before/after deltas against this saved log")
     ap.add_argument("--scale", choices=("auto", "linear", "log"), default="auto")
     args = ap.parse_args()
 
@@ -246,6 +272,8 @@ def main():
     env = parse_env_text(text)
     plot_transport(text, env, args.scale)
     plot_drivers(text, env, args.scale)
+    if args.compare:
+        compare(Path(args.compare).read_text(), text)
 
 
 def parse_env_text(text):
