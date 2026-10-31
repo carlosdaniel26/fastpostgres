@@ -625,6 +625,23 @@ defeats the cache: it cost 24 ns/row before this, 6 after).
 The trade is the Row wrapper: the rows are tuples, with no named access and no
 Result API. Which is the point — that wrapper is the whole of CORE's 375 ns.
 
+`fastpostgres.core` is the same thing as an *interface* rather than a method:
+`create_engine` (a conninfo or a `postgresql+fastpostgres://` URL),
+`engine.connect()` as a context manager, `conn.execute(statement)` and
+`.all()`/`.first()`/`.keys()`/`rowcount` — the shape CORE code already has, with
+the driver's tuples underneath. The benchmark's own `read_core()` runs against it
+unchanged:
+
+| engine, through the benchmark's `read_core` | ns/row | rows/s |
+|---|---|---|
+| SQLAlchemy CORE | 524.2 | 0.19M |
+| **fastpostgres.core** | **173.0** | **5.78M** |
+
+-71%, and the 12-15 ns between it and the bare `conn.fetchall` is the engine's
+per-call work (a statement built per call, a cache lookup, the Result object),
+not per row. One connection, reused, and nothing thread-safe: a read path needs
+neither, and a libpq connect per `engine.connect()` would cost milliseconds.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
