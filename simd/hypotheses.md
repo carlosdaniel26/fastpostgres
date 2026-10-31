@@ -496,6 +496,47 @@ What is left, and what each is worth:
   lever is fewer or smaller objects: views instead of tuples (`stream()`), or the
   cgroup-sized pool noted below.
 
+### Where the time is now
+
+`ring.next_rows()` is the worker's whole turn — the executor, the row write into
+the segment, the ring's syscalls — and the `read_rows` after it is the client.
+Timed apart, benchmark shape, 100k rows, one process, best of three:
+
+| batch | worker | client | total | |
+|---|---|---|---|---|
+| 100k | 35.4 | 121.3 | **157 ns/row** | 6.38 M rows/s |
+| 50k | 35.9 | 117.7 | 154 | 6.51M |
+| 25k | 36.0 | 93.4 | 129 | 7.73M |
+| 12.5k | 36.9 | 86.5 | 123 | 8.10M |
+| 3k | 43.8 | 56.9 | 101 | 9.93M |
+
+The client is 67-77% of a read now, and it is the only side batch size moves:
+the segment chunk per batch goes from 10.8 MB to 324 KB, which is a working-set
+and TLB effect, not a per-row one — the client's read-only mapping never gets
+huge pages (`fp_map_ro` does not advise, and a tmpfs mapping cannot be promoted
+after the fact, as the page section below measured: `ShmemPmdMapped` stays 0).
+What the worker pays for small batches is a fixed cost per fetch of ~25 us (the
+ring plus `shm_open`/`fchmod`/`mmap`/`madvise`/`munmap` around every batch),
+visible as 35 -> 44 ns/row at 3k.
+
+**And it is worth nothing at the benchmark level.** `_SHM_BATCH = 25000`, three
+runs: CORE 1.79-1.87M rows/s against 1.78-1.95M at 100k. Hydration reads every
+attribute of every row anyway, so it drags the objects through cache whatever
+the batch's footprint was — the microbenchmark's gain was an upper bound that
+the consumer absorbs. That is the third ring-level win absorbed this way (the
+hoisted loop, the batch size, and H11-v2's premise).
+
+What is left per row at 100k batches: ~20-30 ns of births (already the
+4.4x-cheaper immortal cells, against CPython's 13-24 ns per object), ~25-35 ns
+of tuple and list, ~10-15 ns of the kernel zeroing fresh arena pages, ~5 ns of
+the server's memcpy, and the executor's own per-row cost under the worker's 35.
+The remaining room is the API, not the copies: values that are never
+constructed (`stream()`), or a consumer that does not need a tuple per row. The
+one exception worth naming is latency rather than throughput: at a 3k-row fetch
+the ~25 us per-batch cost is 8 ns/row, so caching the worker's segment mapping
+across batches (the client's mapping is already cached) would pay for small
+interactive reads, and nothing at all for the benchmark's 100k batches.
+
 Two traps, both of which produced wrong values before they produced a failing
 assertion, both now guarded by the build:
 
