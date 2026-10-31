@@ -380,6 +380,88 @@ once it fills, everything falls back. Worth note: the values are *exact* types
 measurement says the loop around the objects (per-value call + switch) is now
 ~165 ns/row of that 183, which is the next safe lever.
 
+## H12 — the row frame: ship the server's own tuple bytes (implemented)
+
+Everything above is about decoding; this one is about not encoding. The worker
+used to lay a result out twice: SPI's `DestSPI` copies every row into a tuptable
+(`heap_copytuple`, the whole row), and `columnar_build` then transposes those
+rows into FPCOLUMN, per value. Neither copy reads a tuple as anything but a byte
+string.
+
+The row frame (`FPROWS`, `rows.c`) drops both. A DestReceiver of our own feeds
+`PortalRunFetch` — the call `SPI_cursor_fetch` wraps, minus its hardcoded
+receiver — and each tuple is memcpy'd once, straight out of the buffer page for
+a plain scan, into the segment: a per-column descriptor, then per row a length
+word, padding to MAXALIGN, and the tuple. The client walks that tuple in place
+(`decode_tuple`, mirroring `heap_deform_tuple`: align, addlength, nulls at
+`t_bits`) and hands each attribute to the same births the columnar path uses.
+Copies from the page to the Python object: **3 -> 2**, and the 8 B per column per
+row `Datum` staging array is gone.
+
+The frame carries only what the client can walk: fixed-width values of their wire
+kind, plus varlena text/bytea. Anything else — numeric, jsonb, name, money,
+arrays, dropped attributes — takes the columnar frame for that batch, so values
+and type OIDs are unchanged. `stream()`/`read()` keep the columnar frame: the
+zero-copy column views need the transpose.
+
+Measured, `just bench 100000`, against `bench-after.log` (same host, same shape,
+object arena not exhausted — 2,690,077 objects, 0 fallbacks, as in the baseline):
+
+| | runs | CORE 100K | vs psycopg2 |
+|---|---|---|---|
+| baseline (per-value loop, columnar frame) | 1 | 1.65M rows/s | +57.5% |
+| the hoisted loop, columnar frame | 2 | 1.59-1.70M | +57..63% |
+| the hoisted loop, row frame | 5 | **1.78-1.86M** | **+72..81%** |
+
+So the whole gain is the frame, not the loop: about **+9%** of the row time
+(606 -> ~545 ns/row), with the loop rewrite inside the noise here. That is worth
+stating plainly, because the estimate was the other way round — item 1 read as
+the big one off the synth harness, where the loop around the births was 165 of
+183 ns/row on an 8-column shape. Against SQLAlchemy CORE the same absolute saving
+is a much smaller fraction: SQLAlchemy's own per-row work is the bulk of the row,
+the driver's share is ~20%, and the client's decode loop is a slice of that. The
+hoisted loops still pay where they are used (the columnar frame: the fallback for
+numeric/jsonb/name, and `read_rows` on a columnar chunk), and `stream()` was
+never on this number at all.
+
+Why the frame is worth ~9%: the worker used to make three passes over every row
+— SPI's `heap_copytuple` into a tuptable, a deform into the `Datum` staging
+array, then the transpose into FPCOLUMN — and now makes one, a memcpy out of the
+buffer page into the segment, which is the copy SPI was already paying. The
+client's decode is unchanged in kind: a tuple walk instead of flat column
+strides (a few more instructions per value) and the same births. The bandwidth
+that disappears is the *middle*: 90-odd bytes of row copied into private memory
+and then re-laid-out per value, for a row the executor had already materialised
+in a slot. Skipping it is a server-side win, so it shows up as a share of the
+row time rather than a share of the driver's work.
+
+Neither frame changes the pipeline's shape: the worker and the client alternate
+per batch (the ring is synchronous, no double buffering), so the two sides add
+rather than overlap, and what the worker stops doing comes straight off the
+total.
+
+Two traps, both of which produced wrong values before they produced a failing
+assertion, both now guarded by the build:
+
+- **the 1-byte varlena header is byte-order dependent.** `varatt.h` keeps two
+  encodings behind `#ifdef WORDS_BIGENDIAN` — tag bit low on little-endian, high
+  on big-endian, and the 4-byte header shifts rather than masks. The first mirror
+  here was written from the big-endian block, so a 6-byte short `bytea` (`0x0d` =
+  tag 0x01, size 6 << 1) decoded as garbage. `rows.c` now fails the build if the
+  mirror's byte order disagrees with the server's.
+- **a tuple must start MAXALIGNed.** `heap_fill_tuple` aligns a datum by its
+  *address*, `heap_deform_tuple` by its *offset*; the two agree only when the
+  tuple starts on an 8-byte boundary. The first frame put each tuple immediately
+  after its 4-byte length word, which broke the rebuild path the moment anything
+  needed detoasting. Hence the padding.
+
+What arrives extended — a toast pointer, or a value compressed inside the tuple
+— is resolved by the worker, because the client cannot detoast in place, and a
+tuple written before an `ADD COLUMN` is expanded for the same reason. Both are
+rebuilt with PostgreSQL's own `heap_compute_data_size`/`heap_fill_tuple`, in a
+per-row memory context, so the segment never carries a pointer its reader cannot
+follow.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
