@@ -22,6 +22,8 @@
 
 #include "fastpostgres_shm.h"
 
+#include "kernels.h"
+
 #include "shm.h"
 #include "write.h"
 
@@ -31,11 +33,12 @@ typedef struct WCol {
     const uint8_t *nulls;
     const uint8_t *data;  /* fixed-width values, or offsets for text */
     const uint8_t *bytes; /* text bytes (NULL for fixed-width) */
+    bool           no_nulls; /* decided once per column, not once per value */
 } WCol;
 
 static Datum col_datum(WCol *col, uint64_t r, bool *isnull, char **arena)
 {
-    *isnull = (col->nulls[r >> 3] & (1 << (r & 7))) != 0;
+    *isnull = col->no_nulls ? false : (col->nulls[r >> 3] & (1 << (r & 7))) != 0;
     if (*isnull) return (Datum)0;
 
     switch (col->kind)
@@ -140,7 +143,10 @@ static Datum col_datum(WCol *col, uint64_t r, bool *isnull, char **arena)
             text           *t   = (text *)*arena; /* bump-allocate from the batch arena */
 
             SET_VARSIZE(t, len + VARHDRSZ);
-            memcpy(VARDATA(t), col->bytes + s, len);
+            if (len <= 32)
+                fp_kernels->copy_small(VARDATA(t), col->bytes + s, len);
+            else
+                memcpy(VARDATA(t), col->bytes + s, len);
             *arena += MAXALIGN(len + VARHDRSZ);
             return PointerGetDatum(t);
         }
@@ -203,6 +209,7 @@ uint64 fastpostgres_write_segment(const char *seg, const char *tab)
         wcols[c].data     = col.data;
         wcols[c].bytes    = col.bytes;
         wcols[c].atttypid = TupleDescAttr(tupdesc, c)->atttypid;
+        wcols[c].no_nulls = !fp_kernels->nullmap_any(col.nulls, (size_t)((nrows + 7) / 8));
     }
 
     cid   = GetCurrentCommandId(false);
