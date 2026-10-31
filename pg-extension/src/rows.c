@@ -1,0 +1,310 @@
+/*
+ * rows.c — publish the executor's own tuple bytes as an FPROWS segment.
+ *
+ * The batch is fetched with this module's DestReceiver instead of
+ * SPI_cursor_fetch, so no SPI tuptable is built on the way: receiveSlot()
+ * copies each tuple straight out of the slot — for a plain scan that is the
+ * shared buffer page itself — into the segment. One memcpy per row, no
+ * per-value work, and no columnar transpose.
+ *
+ * The one thing a client cannot do in place is detoast, so a tuple carrying an
+ * external or compressed value, or one written before an ADD COLUMN (short of
+ * the descriptor's attributes), is rebuilt with its values resolved. That is
+ * the slow path; the memcpy is the fast one.
+ */
+#include "postgres.h"
+
+#include <string.h>
+#include <sys/mman.h>
+
+#include "access/htup_details.h"
+#include "access/tupdesc.h"
+#include "access/tupmacs.h"
+#include "catalog/pg_type.h"
+#include "executor/tuptable.h"
+#include "tcop/dest.h"
+#include "tcop/pquery.h"
+#include "utils/builtins.h"
+#include "utils/memutils.h"
+#include "varatt.h"
+
+#include "fastpostgres_shm.h"
+
+#include "columnar.h"
+#include "rows.h"
+#include "shm.h"
+
+/* The reader mirrors these offsets and flags, so prove they are still ours. */
+StaticAssertDecl(offsetof(HeapTupleHeaderData, t_infomask2) == FASTPOSTGRES_HT_INFOMASK2,
+                 "fastpostgres: HeapTupleHeaderData moved");
+StaticAssertDecl(offsetof(HeapTupleHeaderData, t_infomask) == FASTPOSTGRES_HT_INFOMASK,
+                 "fastpostgres: HeapTupleHeaderData moved");
+StaticAssertDecl(offsetof(HeapTupleHeaderData, t_hoff) == FASTPOSTGRES_HT_HOFF,
+                 "fastpostgres: HeapTupleHeaderData moved");
+StaticAssertDecl(offsetof(HeapTupleHeaderData, t_bits) == FASTPOSTGRES_HT_BITS,
+                 "fastpostgres: HeapTupleHeaderData moved");
+StaticAssertDecl(HEAP_HASNULL == FASTPOSTGRES_HEAP_HASNULL, "fastpostgres: null flag moved");
+StaticAssertDecl(HEAP_NATTS_MASK == FASTPOSTGRES_HEAP_NATTS_MASK, "fastpostgres: natts mask moved");
+
+/* The reader mirrors the varlena encoding, and varatt.h picks between two of
+ * them by byte order: if the mirror guessed the other one, nothing it reads out
+ * of a tuple would be trustworthy. */
+#if defined(WORDS_BIGENDIAN)
+#if !FASTPOSTGRES_BIG_ENDIAN
+#error "fastpostgres: varlena mirror disagrees with PostgreSQL's byte order"
+#endif
+#else
+#if FASTPOSTGRES_BIG_ENDIAN
+#error "fastpostgres: varlena mirror disagrees with PostgreSQL's byte order"
+#endif
+#endif
+
+typedef struct RowReceiver {
+    DestReceiver          pub;
+    TupleDesc             tdesc;
+    int                  *varlena; /* 0-based attribute numbers of the varlena columns */
+    int                   nvarlena;
+    Datum                *values;  /* the build path reuses these for every row */
+    bool                 *isnull;
+    int                   hoff;    /* the built tuple's data offset */
+    bool                  hasnull;
+    MemoryContext         tmpctx;  /* what a row needs while it is being written */
+    FastpostgresRowsWrite w;
+    char                 *end;
+} RowReceiver;
+
+/* Values that have to be resolved before they can be walked in place: one
+ * stored out of line, or one compressed inside the tuple. VARATT_IS_EXTENDED is
+ * deliberately not the test — it is also true of the short 1-byte-header form,
+ * which the reader handles as it is. */
+static inline bool
+row_needs_detoast(const char *val)
+{
+    return VARATT_IS_EXTERNAL(val) || VARATT_IS_COMPRESSED(val);
+}
+
+/* Can this tuple go out as it lies? An external or compressed value has to be
+ * resolved, and neither can be detected from the tuple header alone
+ * (compression has no header flag), so the varlena values themselves are peeked
+ * at — only up to the last varlena column, and only until one needs work. A
+ * short (1-byte header) value is not one of those: the reader handles both
+ * header forms. */
+static bool
+row_needs_build(RowReceiver *rx, HeapTuple tup)
+{
+    HeapTupleHeader th = tup->t_data;
+    uint32          off;
+    int             i, last;
+
+    if (HeapTupleHeaderHasExternal(th)) return true;
+    if (th->t_infomask & HEAP_HASOID_OLD) return true; /* pre-9.2 oid attribute */
+    if (HeapTupleHeaderGetNatts(th) < (uint16)rx->tdesc->natts) return true;
+    if (rx->nvarlena == 0) return false;
+
+    off  = (uint32)th->t_hoff;
+    last = rx->varlena[rx->nvarlena - 1];
+    for (i = 0; i <= last; i++)
+    {
+        CompactAttribute *att = TupleDescCompactAttr(rx->tdesc, i);
+
+        if ((th->t_infomask & HEAP_HASNULL) != 0 && att_isnull(i, th->t_bits))
+            continue; /* a null stores nothing, so the offset does not move */
+
+        if (att->attlen == -1)
+        {
+            off = att_pointer_alignby(off, att->attalignby, -1, (char *)th + off);
+            if (row_needs_detoast((char *)th + off)) return true;
+            off = att_addlength_pointer(off, -1, (char *)th + off);
+        }
+        else
+            off = att_nominal_alignby(off, att->attalignby) + (uint32)att->attlen;
+    }
+    return false;
+}
+
+/* Deform, detoast what is extended, and return the rebuilt tuple's length. */
+static uint32
+row_prepare(RowReceiver *rx, HeapTuple tup)
+{
+    TupleDesc td = rx->tdesc;
+    int       i;
+
+    heap_deform_tuple(tup, td, rx->values, rx->isnull); /* fills missing attributes too */
+    for (i = 0; i < rx->nvarlena; i++)
+    {
+        int a = rx->varlena[i];
+
+        if (!rx->isnull[a] && row_needs_detoast((char *)DatumGetPointer(rx->values[a])))
+            rx->values[a] =
+                PointerGetDatum(pg_detoast_datum_packed((struct varlena *)DatumGetPointer(rx->values[a])));
+    }
+
+    rx->hasnull = false;
+    for (i = 0; i < td->natts; i++)
+        if (rx->isnull[i])
+        {
+            rx->hasnull = true;
+            break;
+        }
+
+    rx->hoff = MAXALIGN(SizeofHeapTupleHeader + (rx->hasnull ? BITMAPLEN(td->natts) : 0));
+    return (uint32)(rx->hoff + heap_compute_data_size(td, rx->values, rx->isnull));
+}
+
+/* Write the tuple row_prepare measured: the same header members heap_form_tuple
+ * sets, then PostgreSQL's own filler for the data area. */
+static void
+row_build(RowReceiver *rx, char *out, uint32 len)
+{
+    HeapTupleHeader th = (HeapTupleHeader)out;
+
+    memset(out, 0, (size_t)rx->hoff); /* xmin/xmax/ctid: not the reader's business */
+    HeapTupleHeaderSetNatts(th, (uint16)rx->tdesc->natts);
+    th->t_hoff = (uint8)rx->hoff;
+    heap_fill_tuple(rx->tdesc, rx->values, rx->isnull, out + rx->hoff, (Size)(len - rx->hoff),
+                    &th->t_infomask, rx->hasnull ? th->t_bits : NULL);
+}
+
+static bool
+row_receive(TupleTableSlot *slot, DestReceiver *self)
+{
+    RowReceiver  *rx  = (RowReceiver *)self;
+    MemoryContext old = MemoryContextSwitchTo(rx->tmpctx);
+    HeapTuple     tup = ExecFetchSlotHeapTuple(slot, false, NULL);
+    char         *row = NULL;
+    uint32        len;
+    bool          ok = true;
+
+    if (tup != NULL)
+    {
+        if (row_needs_build(rx, tup))
+        {
+            len = row_prepare(rx, tup); /* materialises into rx->tmpctx */
+            row = fastpostgres_rows_reserve(&rx->w, len, rx->end);
+            if (row != NULL) row_build(rx, row, len);
+        }
+        else
+        {
+            row = fastpostgres_rows_reserve(&rx->w, (uint32)tup->t_len, rx->end);
+            if (row != NULL) memcpy(row, tup->t_data, (size_t)tup->t_len);
+        }
+
+        if (row == NULL)
+        {
+            if (rx->w.nrows == 0) elog(ERROR, "fastpostgres: result row exceeds the segment");
+            ok = false; /* the batch is full: the client asks again for the rest */
+        }
+    }
+
+    MemoryContextSwitchTo(old);
+    MemoryContextReset(rx->tmpctx);
+    return ok;
+}
+
+static void
+row_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
+{
+    (void)self;
+    (void)operation;
+    (void)typeinfo;
+}
+
+static void
+row_shutdown(DestReceiver *self)
+{
+    (void)self;
+}
+
+static void
+row_destroy(DestReceiver *self)
+{
+    (void)self;
+}
+
+bool
+fastpostgres_rows_native(TupleDesc td)
+{
+    int i;
+
+    for (i = 0; i < td->natts; i++)
+    {
+        CompactAttribute *att   = TupleDescCompactAttr(td, i);
+        Oid               typ   = TupleDescAttr(td, i)->atttypid;
+        uint8_t           kind  = fastpostgres_oid_to_kind((uint32)typ);
+        int               width = fastpostgres_kind_width(kind);
+
+        if (att->attisdropped) return false;
+
+        if (width > 0)
+        {
+            /* the reader reads attlen bytes at the rule's alignment; that is
+             * what the walk uses, by-value or not (uuid is a by-reference
+             * fixed-width type, and it is read the same way) */
+            if (att->attlen != width) return false;
+            if (att->attalignby != fastpostgres_kind_alignby(kind)) return false;
+        }
+        else
+        {
+            /* varlena: the reader slices text/bytea bytes out of the tuple.
+             * numeric, jsonb, arrays, name, money and the rest need their
+             * output function, so those go out as the columnar frame. */
+            if (att->attlen != -1) return false;
+            if (att->attalignby != fastpostgres_kind_alignby(kind)) return false;
+            if (kind == FASTPOSTGRES_KIND_TEXT && !fastpostgres_is_text_type(typ)) return false;
+            if (kind == FASTPOSTGRES_KIND_BYTEA && typ != BYTEAOID) return false;
+        }
+    }
+    return true;
+}
+
+uint64
+fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch)
+{
+    size_t                 cap     = FASTPOSTGRES_SEGMENT_BYTES;
+    void                  *map     = fastpostgres_shm_map_rw(path, cap);
+    char                  *payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+    RowReceiver            rx;
+    FastpostgresRowsWrite *w = &rx.w;
+    uint64                 nrows;
+    int                    i;
+
+    memset(&rx, 0, sizeof(rx));
+    rx.tdesc   = td;
+    rx.end     = (char *)map + cap;
+    rx.tmpctx  = AllocSetContextCreate(CurrentMemoryContext, "fastpostgres_rows_fetch", ALLOCSET_SMALL_SIZES);
+    rx.varlena = palloc(sizeof(int) * td->natts);
+    rx.values  = palloc(sizeof(Datum) * td->natts);
+    rx.isnull  = palloc(sizeof(bool) * td->natts);
+    for (i = 0; i < td->natts; i++)
+        if (TupleDescCompactAttr(td, i)->attlen == -1) rx.varlena[rx.nvarlena++] = i;
+
+    fastpostgres_rows_write_begin(w, payload, (uint32)td->natts);
+    for (i = 0; i < td->natts; i++)
+    {
+        Form_pg_attribute att  = TupleDescAttr(td, i);
+        const char       *name = NameStr(att->attname);
+
+        fastpostgres_rows_write_column(w, name, (uint32)strlen(name),
+                                       fastpostgres_oid_to_kind((uint32)att->atttypid),
+                                       (uint32)att->atttypid);
+    }
+    fastpostgres_rows_write_rows_begin(w);
+
+    rx.pub.receiveSlot = row_receive;
+    rx.pub.rStartup    = row_startup;
+    rx.pub.rShutdown   = row_shutdown;
+    rx.pub.rDestroy    = row_destroy;
+    rx.pub.mydest      = DestNone;
+
+    nrows = PortalRunFetch(portal, FETCH_FORWARD, (long)batch, &rx.pub);
+
+    fastpostgres_rows_write_end(w);
+    fastpostgres_shm_publish(map, cap, (uint64)(w->p - payload));
+
+    pfree(rx.varlena);
+    pfree(rx.values);
+    pfree(rx.isnull);
+    MemoryContextDelete(rx.tmpctx);
+    munmap(map, cap);
+    return nrows;
+}

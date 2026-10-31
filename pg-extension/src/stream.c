@@ -11,6 +11,7 @@
 #include "nodes/parsenodes.h"
 
 #include "columnar.h"
+#include "rows.h"
 #include "shm.h"
 #include "stream.h"
 
@@ -79,4 +80,38 @@ void fastpostgres_stream_close(const char *seg)
     if (portal != NULL) SPI_cursor_close(portal);
 
     SPI_finish();
+}
+
+/* The same batch as the result tuples themselves: the executor's bytes are
+ * copied into the segment once, and the client walks them. */
+uint64 fastpostgres_stream_next_rows(const char *seg, int64 batch)
+{
+    char     *path = fastpostgres_shm_path(seg);
+    char     *name = cursor_name(seg);
+    Portal    portal;
+    TupleDesc td;
+    uint64    nrows;
+
+    if (batch <= 0) elog(ERROR, "fastpostgres_stream_next_rows: batch must be > 0");
+
+    if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_next_rows: SPI_connect failed");
+
+    portal = SPI_cursor_find(name);
+    if (portal == NULL)
+    {
+        SPI_finish();
+        elog(ERROR, "fastpostgres_stream_next_rows: no open stream for segment \"%s\"", seg);
+    }
+    td = portal->tupDesc;
+
+    if (!fastpostgres_rows_native(td))
+    {
+        /* an attribute the client cannot walk in place: the columnar frame */
+        SPI_finish();
+        return fastpostgres_stream_next(seg, batch);
+    }
+
+    nrows = fastpostgres_rows_fetch(portal, td, path, batch);
+    SPI_finish();
+    return nrows;
 }

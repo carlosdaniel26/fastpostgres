@@ -131,8 +131,8 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
     uint64 n  = 0;
 
     /* never let a data write clobber the ring itself */
-    if ((r->op == FASTPOSTGRES_OP_OPEN || r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_CLOSE ||
-         r->op == FASTPOSTGRES_OP_WRITE) &&
+    if ((r->op == FASTPOSTGRES_OP_OPEN || r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_NEXT_ROWS ||
+         r->op == FASTPOSTGRES_OP_CLOSE || r->op == FASTPOSTGRES_OP_WRITE) &&
         strcmp(a1, ring_name) == 0)
     {
         r->status = 1;
@@ -171,6 +171,27 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
             PG_TRY();
             {
                 n         = fastpostgres_stream_next(a1, (int64)r->batch);
+                r->status = 0;
+                r->nrows  = (int64)n;
+            }
+            PG_CATCH();
+            {
+                ring_set_error(r);
+                abort_txn();
+            }
+            PG_END_TRY();
+            break;
+
+        case FASTPOSTGRES_OP_NEXT_ROWS:
+            if (!have_stream)
+            {
+                r->status = 1;
+                strlcpy(r->error, "no open stream", sizeof(r->error));
+                break;
+            }
+            PG_TRY();
+            {
+                n         = fastpostgres_stream_next_rows(a1, (int64)r->batch);
                 r->status = 0;
                 r->nrows  = (int64)n;
             }

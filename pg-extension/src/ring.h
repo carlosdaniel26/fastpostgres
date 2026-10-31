@@ -22,12 +22,13 @@
 
 enum FastpostgresRingOp
 {
-    FASTPOSTGRES_OP_NONE  = 0,
-    FASTPOSTGRES_OP_OPEN  = 1,
-    FASTPOSTGRES_OP_NEXT  = 2,
-    FASTPOSTGRES_OP_CLOSE = 3,
-    FASTPOSTGRES_OP_WRITE = 4,
-    FASTPOSTGRES_OP_STOP  = 5
+    FASTPOSTGRES_OP_NONE      = 0,
+    FASTPOSTGRES_OP_OPEN      = 1,
+    FASTPOSTGRES_OP_NEXT      = 2, /* the columnar frame */
+    FASTPOSTGRES_OP_CLOSE     = 3,
+    FASTPOSTGRES_OP_WRITE     = 4,
+    FASTPOSTGRES_OP_STOP      = 5,
+    FASTPOSTGRES_OP_NEXT_ROWS = 6 /* the row frame (falls back to columnar) */
 };
 
 typedef struct FastpostgresRing {
