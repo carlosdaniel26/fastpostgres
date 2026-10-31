@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Entrypoint: boot a throwaway PostgreSQL with the fastpostgres extension, print
-# the environment the run happened in (so benchmark numbers travel with their
-# context), run the command as the postgres user, then stop the server.
+# The image's ENTRYPOINT (runs inside the image only): boot a throwaway
+# PostgreSQL with the fastpostgres extension, print the environment the run
+# happened in (so benchmark numbers travel with their context), run the command
+# it is given as the postgres user, then stop the server.
 #
 # The command runs as postgres because the /dev/shm ring is created 0600 and
 # must be shared with the backend worker.
