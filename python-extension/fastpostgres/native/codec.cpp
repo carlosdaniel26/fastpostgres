@@ -191,10 +191,8 @@ fp_decode_value(PGresult *res, int row, int col)
 }
 
 PyObject *
-fp_decode_column(const FastpostgresColumn *c, uint64_t row)
+fp_decode_column_nonull(const FastpostgresColumn *c, uint64_t row)
 {
-    if (fastpostgres_col_isnull(c, row)) Py_RETURN_NONE;
-
     switch (c->kind)
     {
         case FASTPOSTGRES_KIND_BOOL:
@@ -263,4 +261,11 @@ fp_decode_column(const FastpostgresColumn *c, uint64_t row)
             }
         }
     }
+}
+
+PyObject *
+fp_decode_column(const FastpostgresColumn *c, uint64_t row)
+{
+    if (fastpostgres_col_isnull(c, row)) Py_RETURN_NONE;
+    return fp_decode_column_nonull(c, row);
 }

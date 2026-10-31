@@ -15,3 +15,7 @@ PyObject *fp_decode_value(PGresult *res, int row, int col);
 
 /* Decode one value out of a columnar /dev/shm chunk. */
 PyObject *fp_decode_column(const FastpostgresColumn *col, uint64_t row);
+
+/* The same, without the null test: for callers that already know the column has
+ * no nulls (decided once per column, not once per value). */
+PyObject *fp_decode_column_nonull(const FastpostgresColumn *col, uint64_t row);

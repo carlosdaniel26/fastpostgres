@@ -10,6 +10,7 @@
 
 #include "codec.hpp"
 #include "fastpostgres_shm.h"
+#include "kernels.h"
 #include "shm_map.h"
 #include "types.hpp"
 
@@ -156,6 +157,12 @@ segment_read_rows(PyObject *, PyObject *args)
         PyList_SET_ITEM(types, c, PyLong_FromLong((long)cols[c].pgtype));
     }
 
+    /* One bulk null test per column, rather than a bitmap probe per value:
+     * a column with no nulls skips the test for every row it holds. */
+    std::vector<char> nullfree(rd.ncols);
+    for (uint32_t c = 0; c < rd.ncols; c++)
+        nullfree[c] = !fp_kernels->nullmap_any(cols[c].nulls, (size_t)((rd.nrows + 7) / 8));
+
     for (uint64_t r = 0; r < rd.nrows; r++)
     {
         PyObject *row = PyTuple_New(rd.ncols);
@@ -168,7 +175,8 @@ segment_read_rows(PyObject *, PyObject *args)
         }
         for (uint32_t c = 0; c < rd.ncols; c++)
         {
-            PyObject *v = fp_decode_column(&cols[c], r);
+            PyObject *v = nullfree[c] ? fp_decode_column_nonull(&cols[c], r)
+                                      : fp_decode_column(&cols[c], r);
             if (!v)
             {
                 Py_DECREF(row);
