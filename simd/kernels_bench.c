@@ -53,12 +53,14 @@ check_one(const char *name, fp_nullmap_any_fn fn, const size_t *sizes, size_t ns
         size_t s = sizes[i];
 
         if (s > sizeof(buf)) continue;
-        for (pos = 0; pos < s; pos++)
+        /* pos == s sets a byte just past the range: a kernel that reads a whole
+         * block for a short range must still report "no bits set". */
+        for (pos = 0; pos <= s; pos++)
         {
             int want, got;
 
             memset(buf, 0, sizeof(buf));
-            buf[pos] = 1;
+            if (pos < sizeof(buf)) buf[pos] = 1;
             want = fp_kernels_scalar.nullmap_any(buf, s);
             got  = fn(buf, s);
             if (want != got) fail(name, s, pos, want, got);
@@ -69,9 +71,10 @@ check_one(const char *name, fp_nullmap_any_fn fn, const size_t *sizes, size_t ns
 /* Every shape that crosses a block boundary, for the tail logic in kernels.c. */
 static const size_t SIZES[] = {0, 1, 7, 31, 32, 33, 63, 64, 65, 95, 96, 127, 128, 129, 1000, 4096};
 /* Exact multiples, so the assembly cores are driven directly (a host with
- * AVX-512 never calls the AVX2 core through the table). */
-static const size_t SIZES_32[] = {32, 64, 96, 128, 4096};
-static const size_t SIZES_64[] = {64, 128, 192, 4096};
+ * AVX-512 never calls the AVX2 core through the table). 0 is a multiple of
+ * both, and is the case a size ladder falls through. */
+static const size_t SIZES_32[] = {0, 32, 64, 96, 128, 4096};
+static const size_t SIZES_64[] = {0, 64, 128, 192, 4096};
 
 static void
 check_copy_small(void)
@@ -79,7 +82,9 @@ check_copy_small(void)
     uint8_t src[64], dst[64];
     size_t  len;
 
-    for (len = 1; len <= 32; len++)
+    /* len == 0 is included on purpose: the ladder must not fall through and
+     * write a byte, which is a fault against a page boundary. */
+    for (len = 0; len <= 32; len++)
     {
         size_t i;
 
