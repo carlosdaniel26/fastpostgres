@@ -20,6 +20,15 @@
  * baseline x86-64 too), and the transpose is a blocked scalar 8x8 — a
  * hand-written AVX-512 transpose would be faster, so B's cost here is a ceiling.
  *
+ * Built and integrated, B LOST, and this model is why it looked good: it
+ * assumes a working set that outgrows last-level cache and a scratch that is
+ * already warm. Neither holds. The worker encodes in 100k-row chunks, so the
+ * scratch is ~6 MiB and column A's repeated sweeps are L3 hits, not DRAM
+ * traffic; and a fresh per-chunk allocation is page-faulted every time. The
+ * integrated version measured 5.96/7.06 M rows/s against 7.83/8.39 and was
+ * reverted — it would only pay for results wide enough that the chunk's
+ * working set leaves last-level cache.
+ *
  * Run with `just kernels`.
  */
 #include <stdint.h>
