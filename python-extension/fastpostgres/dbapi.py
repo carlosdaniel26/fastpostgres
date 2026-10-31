@@ -11,6 +11,12 @@ shared-memory ring executes text and has no bind step (a small scanner leaves
     cur = conn.cursor()
     cur.execute("select %s::int + %s::int", (2, 3))
     cur.fetchone()            # (5,)
+
+For a read that only wants rows, `Connection.fetchall(statement)` compiles a
+SQLAlchemy statement with SQLAlchemy's own compiler and returns the driver's
+tuples — the CORE read without CORE's per-row Result/Row machinery:
+
+    conn.fetchall(select(Row.id, Row.sku))    # [(1, 'SKU-1'), (2, 'SKU-2')]
 """
 import datetime
 import decimal
@@ -246,6 +252,28 @@ def _inline(sql: str, params: Sequence[Any]) -> str:
     return "".join(out)
 
 
+_PGDIALECT = None
+
+
+def _compiled(statement) -> str:
+    """A SQLAlchemy statement as the SQL text to run, or SQL text as it is.
+
+    Literal binds, because the ring has no bind step and `execute()` would inline
+    the values anyway — and the compile itself is build-time work, not per row.
+    One dialect instance for the process, so a statement compiled again is a hit
+    in SQLAlchemy's own compiled cache rather than a fresh compile.
+    """
+    global _PGDIALECT
+
+    if isinstance(statement, str):
+        return statement
+    if _PGDIALECT is None:
+        from sqlalchemy.dialects import postgresql
+
+        _PGDIALECT = postgresql.dialect()
+    return str(statement.compile(dialect=_PGDIALECT, compile_kwargs={"literal_binds": True}))
+
+
 # ---- Connection / Cursor --------------------------------------------------
 
 _SHM_BATCH = 100000
@@ -385,6 +413,39 @@ class Connection:
 
     def cursor(self):
         return Cursor(self)
+
+    # ---- the CORE read without CORE --------------------------------------
+    #
+    # SQLAlchemy's CORE layer costs ~375 ns/row on the benchmark's shape, all of
+    # it its own Result and Row machinery once the driver is subtracted. These
+    # three do the same job — a statement in, its rows out — by compiling once
+    # and running the plain SQL the ring already speaks, so what comes back is
+    # the driver's list of tuples: no Result, no Row, nothing per row.
+    #
+    #     rows = conn.fetchall(select(Row.id, Row.sku))
+    #
+    # `params` are bound into the statement before compiling (they are literals
+    # in the SQL, which is what the ring requires); SQL text passes through.
+
+    def compile(self, statement, **params) -> str:
+        """The SQL text a statement would run, for logging or a plain cursor."""
+        if params:
+            if isinstance(statement, str):
+                raise ValueError("compile(sql, **params): bind them into the SQL text yourself")
+            statement = statement.params(**params)
+        return _compiled(statement)
+
+    def fetchall(self, statement, **params) -> list:
+        """Run a SQLAlchemy statement (or SQL text) and return the driver's rows."""
+        cur = self.cursor()
+        cur.execute(self.compile(statement, **params))
+        return cur.fetchall()
+
+    def first(self, statement, **params):
+        """The first row of a statement, or None."""
+        cur = self.cursor()
+        cur.execute(self.compile(statement, **params))
+        return cur.fetchone()
 
     # autocommit: each statement is its own transaction, so these are no-ops
     def commit(self):

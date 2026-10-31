@@ -275,6 +275,33 @@ class DbapiTest(unittest.TestCase):
         self.assertEqual(row[1:], ("x", 7, None))
         self.assertEqual(cur.description[0][1], 1700)
 
+    def test_core_read_without_core(self):
+        """The CORE stand-in compiles a statement with SQLAlchemy's own compiler
+        and hands back the driver's tuples: same SQL, same values, no Row."""
+        from sqlalchemy import Column, Integer, MetaData, String, Table, bindparam, select
+
+        cur = self.conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS fp_core_t; CREATE TABLE fp_core_t (id int, s text)")
+        cur.execute("INSERT INTO fp_core_t VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+
+        md = MetaData()
+        t = Table("fp_core_t", md, Column("id", Integer), Column("s", String))
+        cols = select(t.c.id, t.c.s).order_by(t.c.id)
+
+        rows = self.conn.fetchall(cols)
+        self.assertEqual(rows, [(1, "a"), (2, "b"), (3, "c")])
+        self.assertGreater(self.conn.shm_reads, 0, "the shm path should have served this read")
+
+        self.assertEqual(self.conn.first(cols), (1, "a"))
+        self.assertIsNone(self.conn.first(select(t.c.s).where(t.c.id == 99)))
+
+        # binds are compiled into the statement, which is the only form the ring takes
+        bound = select(t.c.s).where(t.c.id == bindparam("i"))
+        self.assertIn("id = 2", self.conn.compile(bound, i=2))
+        self.assertEqual(self.conn.fetchall(bound, i=2), [("b",)])
+
+        cur.execute("DROP TABLE fp_core_t")
+
     def test_typed_views_are_zero_copy(self):
         """Consuming a chunk without materialising it: numpy wraps the segment in
         place, text is sliced straight out of the offset table, and a value is
