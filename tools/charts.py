@@ -6,9 +6,16 @@ Builds the container, runs both benchmarks, then writes four images:
     bench_chart-read.png / bench_chart-write.png           tcp / unix / shm
     sqlalchemy_chart-orm.png / sqlalchemy_chart-core.png   psycopg2 / fastpostgres
 
+`--compare LOG` also prints the before/after deltas for the same loads and
+writes those four phases again, each load as a before/after bar pair:
+
+    bench_chart-read-compare.png / bench_chart-write-compare.png
+    sqlalchemy_chart-orm-compare.png / sqlalchemy_chart-core-compare.png
+
 Usage:
     just charts [nrows ...]        (default: each benchmark's own)
     just charts --log bench.log    (plot an existing log)
+    just charts --log after.log --compare before.log   (before/after deltas + charts)
 
 Both benchmarks run in one container, so their logs share one environment
 block; `--log` skips the run and plots a saved log instead. The 10M default
@@ -90,8 +97,10 @@ DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+
 
 
 def num_rows(label):
-    n = float(label[:-1])
-    return n * (1_000 if label.endswith("K") else 1_000_000)
+    """'100K' -> 100_000. The comparison charts key their bars by load *and*
+    series ("100K\\ntcp"), so reading stops at the K/M suffix."""
+    m = re.match(r"([\d.]+)([KM])", label)
+    return float(m.group(1)) * (1_000 if m.group(2) == "K" else 1_000_000)
 
 
 def fmt_rate(v, _pos=None):
@@ -170,7 +179,67 @@ def skip(path, section):
         print(f"no '{section}' rows in the log -- nothing to plot")
 
 
-def compare(before_text, after_text):
+def paired(before, after, names):
+    """{f'{load}\\n{name}': (before, after)} for the loads both logs ran, so one
+    x tick is one bar pair rather than one bar."""
+    data = {}
+    for load in sorted(before, key=num_rows):
+        if load not in after:
+            continue
+        for i, name in enumerate(names):
+            was = before[load][i]
+            if was > 0:
+                data[f"{load}\n{name}"] = (was, after[load][i])
+    return data
+
+
+def headline_compare(prefix, data, target):
+    """Headline the change on the series the accent marks ("target"), the way
+    the forward charts headline the accented transport/driver."""
+    gains = [now / was - 1 for key, (was, now) in data.items()
+             if key.endswith(f"\n{target}") and was > 0]
+    best, worst = max(gains, default=0.0), min(gains, default=0.0)
+    if best >= 0.005:
+        return f"{prefix} — up to {best * 100:.0f}% faster than before"
+    if worst <= -0.005:
+        return f"{prefix} — up to {abs(worst) * 100:.0f}% slower than before"
+    return f"{prefix} — unchanged before vs after"
+
+
+def plot_compare(tb, ta, db, da, env, scale):
+    """One before/after image per phase: grey for before, the accent for after,
+    which is all the two-tone key needs — `before`/`after` are the two series."""
+    series, colors, labels = ("before", "after"), (GREY[0], ACCENT), ("before", "after")
+
+    footer = spec(env, TRANSPORT_KEYS) or "fastpostgres transport benchmark"
+    titles = {"read": "Read: before vs after", "write": "Write: before vs after"}
+    for section in ("read", "write"):
+        data = paired(tb[section], ta[section], ("tcp", "unix", "shm"))
+        path = OUT / f"bench_chart-{section}-compare.png"
+        if not data:
+            skip(path, section)
+            continue
+        fig = figure(section, data, series, colors, labels, titles[section],
+                     headline_compare("fast-postgres", data, "shm"), footer, scale)
+        save(fig, path, len(data))
+
+    footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
+    titles = {"orm": "ORM read: before vs after", "core": "Core read: before vs after"}
+    for section in ("orm", "core"):
+        data = paired(db[section], da[section], ("psycopg2", "fastpostgres"))
+        path = OUT / f"sqlalchemy_chart-{section}-compare.png"
+        if not data:
+            skip(path, section)
+            continue
+        label = "ORM" if section == "orm" else "Core"
+        fig = figure(section, data, series, colors, labels, titles[section],
+                     headline_compare(f"SQLAlchemy {label} reads (fast-postgres)", data,
+                                      "fastpostgres"),
+                     footer, scale)
+        save(fig, path, len(data))
+
+
+def compare(before_text, after_text, env=None, scale="auto"):
     """Before/after deltas for the same loads — what a hot-path change is for."""
     tb = parse_sections(before_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
     ta = parse_sections(after_text, TRANSPORT_SECTIONS, TRANSPORT_ROW, (3, 4, 5))
@@ -193,6 +262,9 @@ def compare(before_text, after_text):
                 delta = f"{(now / was - 1) * 100:+.1f}%" if was else "n/a"
                 cells.append(f"{name} {was:.2f} -> {now:.2f} ({delta})")
             print(f"  {section:<5} {load:>4}: " + "   ".join(cells))
+
+    print()
+    plot_compare(tb, ta, db, da, env if env is not None else parse_env_text(after_text), scale)
 
 
 def spec(env, keys):
@@ -262,7 +334,8 @@ def main():
     )
     ap.add_argument("sizes", nargs="*", help="row counts (default: each benchmark's own)")
     ap.add_argument("--log", help="plot this log instead of running the benchmarks")
-    ap.add_argument("--compare", metavar="LOG", help="print before/after deltas against this saved log")
+    ap.add_argument("--compare", metavar="LOG",
+                    help="print before/after deltas against this saved log and chart them")
     ap.add_argument("--scale", choices=("auto", "linear", "log"), default="auto")
     args = ap.parse_args()
 
@@ -273,7 +346,7 @@ def main():
     plot_transport(text, env, args.scale)
     plot_drivers(text, env, args.scale)
     if args.compare:
-        compare(Path(args.compare).read_text(), text)
+        compare(Path(args.compare).read_text(), text, env, args.scale)
 
 
 def parse_env_text(text):
