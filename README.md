@@ -37,12 +37,12 @@ rows = conn.cursor().execute("select id, name from products").fetchall()
 ```
 
 Read-only `SELECT`s take the ring; everything else goes over libpq. Build and
-run with Docker (Linux host with `/dev/shm`):
+run with Docker and `just` (Linux host with `/dev/shm`):
 
 ```bash
-scripts/dev.sh test          # client test suite
-scripts/dev.sh demo 5000     # the same app on psycopg2 and fastpostgres
-scripts/run_bench.py         # benchmarks + charts
+just test          # client test suite
+just demo 5000     # the same app on psycopg2 and fastpostgres
+just charts        # benchmarks + charts
 ```
 
 Known limits: ring reads run in the worker's session, so they miss the calling
