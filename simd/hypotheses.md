@@ -1,0 +1,442 @@
+# Hot path: hypotheses, not yet measured
+
+Static work only: the three hot loops were replicated 1:1 and compiled with the
+flags the extensions actually use (`-O3`, baseline x86-64; `-O2` for the client
+TU), and the generated code was read. No benchmark was run, so every number
+below is either an instruction count from that assembly or a bound derived from
+it. The `%` are fractions of the loop, not of the pipeline: the pipeline share
+of each loop is the unknown, and it is why the last section exists.
+
+Host: Ryzen 7 7700 (Zen 4) — AVX-512F/DQ/BW/VL/VBMI/VBMI2/BITALG/VPOPCNTDQ, no
+512-bit license downclock, 512-bit ops double-pumped, 32 MiB L3, 1 MiB L2/core.
+Relevant to width choices: masks are cheap here, gathers are not.
+
+## What the compiler emits today
+
+| loop | per value | what the asm shows |
+|---|---|---|
+| `columnar.c` fixed-width pass | **10 instr** | switch **is** unswitched (loop cloned per kind); 1 null byte load + test + branch; 1 strided 8-byte `Datum` load; 1 store of `width`; 3 pointer bumps |
+| `columnar.c` varlena pass | **~25 instr + `call *8(%rax)`** | 14 instr head (null test, `Datum` load, varlena header, length, **per-value `p + len > end` check**), 2 (len ≤ 32), 2 (table load + indirect call), 7 tail; **4 stack-slot accesses per value**, because the call forces the loop's state to memory |
+| `write.c` ingest (`col_datum` inlined) | **~26 instr** | kind switch **not** unswitched (compare chain inside the loop), 6 instr of null bit test, `memcpy` per value, store + bumps |
+| all three, with `-mavx512f,avx512bw,avx512vl` | — | **0 vector instructions emitted** |
+
+Two consequences worth stating plainly:
+
+- The kernel table's indirection costs more than the kernel on the text path: the
+  call is why `p`, `end`, `vals` and the offset base live on the stack, and why
+  there is a `memcpy@PLT` branch at all. Inlining the copy (H2) is worth more
+  than making the copy clever.
+- Enabling the ISA in the C buys nothing (measured 0). The loops are strided-load
+  plus per-value-branch; only a layout change turns them into vectorizable code.
+
+## The allocation finding
+
+`columnar_build` `palloc`s `vals` (`8 B x ncols x nrows`) and `nulls_arr`
+(`1 B x ncols x nrows`) per chunk — 7.2 MiB at 100k rows x 8 cols. Anything
+above `ALLOC_CHUNK_LIMIT` (8 KiB, `aset.c:85`) becomes a dedicated `malloc` block
+that is returned to `malloc` when the context is reset (`aset.c:63-66`), and the
+SPI context is dropped at `SPI_finish` — so the scratch is a fresh multi-MiB
+allocation every chunk. The `b1e4a97` note already blames the page faults for
+the greater part of the R3 loss (167 vs 128 ns/row integrated); the allocator
+path above is the mechanism.
+
+The ingest does not have this problem: `write.c:251` already keeps a `batch_ctx`
+and reuses it with `MemoryContextReset` per batch. The encode is the asymmetric
+one.
+
+## Hypotheses
+
+`F` is the fraction of the loop's time removed; the phase share is the unknown,
+so the estimate is `F x share_loop x share_phase`.
+
+**H1 — nullmaps are k-masks.** The wire bitmap is 1 bit/row, exactly a k-register.
+`movq` + `kmovq` loads 64 rows; `vpmovm2b` expands to bytes; `vptestmb` +
+`kmovq` builds the target bitmap. Sub-product: a `kortestb` accumulator gives a
+`has_nulls` flag for the header, and both readers stop scanning the column
+(`segment.cpp:168`, `write.c:244`).
+*F* ~ 12-23% of the ingest loop (the null bit test is 6 of 26 instr; the
+`no_nulls` flag is invariant per column and is tested per value today).
+Alone: 2-5% of the ingest phase. Its real job is to make H3 possible.
+*Falsifier*: a null-free column where the flag is already hoisted shows no gain.
+
+**H2 — the copy ladder becomes one masked load/store.** `bzhi` + `kmovq` +
+`vmovdqu8 {k}{z}` + `vmovdqu8 {k}` covers 0..64 B with no branch and no fault on
+masked lanes (the same trick `pg_popcount_avx512.c:136-156` uses to clip a tail),
+so it keeps the "reads only what it writes" invariant that `kernels.h:31` wants.
+*F* ~ 40% of the varlena loop (25 instr + call + 4 stack accesses -> ~16, no call,
+no spill, no `memcpy` branch, ceiling raised 32 -> 64 B).
+Estimate: **3-6% of the encode phase and 3-6% of the ingest phase**.
+*Falsifier*: constant lengths — the ladder is then 2 uops and the preditor wins.
+
+**H3 — per-(kind, atttypid) kernels, chosen once per column, iterated in blocks.**
+Ingest: 26 instr/value -> ~5-8 (contiguous load + `vpmovsx`/`vcvtps2pd` +
+masked store). Encode: needs H4/H8 for a contiguous source first.
+Estimate: **10-25% of the ingest phase**, 7-14% of the encode phase when paired
+with H8.
+*Falsifier*: `table_multi_insert` dominating the ingest; then the share is small.
+
+**H4 — tile the transpose (R3 redux).** The R3 failure had two named causes:
+a fresh page-faulted scratch and 6 MiB sweeps in L3. A tile of ~4k rows
+(4k x 16 x 8 = 512 KiB, L2-resident) with a **reused** scratch addresses both,
+and the sweeps become one pass instead of `ncols`.
+Estimate: **2-6% of the encode phase alone**; it exists mainly as H3's enabler.
+*Falsifier*: if H8 lands, H4 is moot — the scratch is gone and there is nothing
+to transpose. H8 > H4.
+
+**H5 — 64-byte column alignment (wire v3).** Today only 8 B is guaranteed
+(`fastpostgres_shm.h:52`, `:264`). Needed for 64 B masked stores to avoid line
+splits, and it falls out for free if H8 reserves the regions.
+Estimate: ~0 alone; prerequisite for H2/H3's 64 B shapes.
+
+**H6 — let the compiler vectorize the surrounding C.** Measured: **0%**, the
+compiler emits no vector code for these loops even with AVX-512 enabled. Postgres
+has the in-tree pattern for it (`pg_attribute_target` + a runtime availability
+function, `pg_popcount_avx512.c:97-111`), but it only pays after the layout work.
+
+**H7 — 256-bit with masks, not 512.** On Zen 4 the masks are the win and 512-bit
+is double-pumped anyway. Zero perf by itself; removes the Intel downclock risk
+and keeps `zmm` pressure low. Any new kernel that dirties `ymm`/`zmm` 0-15 must
+return with `vzeroupper` (the AVX2 kernel avoids the question by staying 128-bit,
+`kernels_avx2.S:5`).
+
+**H8 — the allocation *is* the response buffer.** (The interesting one.)
+
+## H8 in detail
+
+Today the chunk is copied three times: the executor materializes the fetch into
+`SPI_tuptable` (a tuplestore of `HeapTuple`s), `heap_deform_tuple` writes the
+7.2 MiB row-major scratch, and the column passes write the payload into the
+mmap. Per value: one write to the scratch, one strided read back, one write to
+the segment. H8 writes the value once, straight into its column's region — the
+mmap *is* the heap, and the allocator is a bump pointer per column.
+
+Two shapes:
+
+- **A (keeps the pull protocol).** Reserve a region per column up front and
+  backpatch `data_len`; the reader stops walking sequentially and reads a column
+  offset table instead. Removes the scratch, the faults and the strided sweeps;
+  keeps the tuplestore.
+- **B (streams).** Run the query with a `DestReceiver` and publish chunks as they
+  fill — i.e. what `push_receive` (`worker.c:377`) already does, with the
+  per-row frame replaced by per-column regions. Removes the tuplestore as well.
+  Costs a protocol change: `ring.next()` becomes a pull-driven queue, which is
+  what `push_ready`/`push_free` already implement. `simd-hot-path.md` (Stage 3)
+  says "update or delete" push mode; this is the argument for updating it.
+
+The constraint that decides the design: **the byte area of a varlena column has
+no known size until the last row.** The offset table is exact (`(nrows+1) x 4`)
+and can be written in place, but the bytes cannot. Options: a reserved capacity
+per text column with an error if exceeded (chunks are cheap to retry), or a
+sizing pass over the tuples (which the cursor path can do, since the tuplestore
+is random-access). Fixed-width columns are exact and free.
+
+About "free the ones not selected": in this format there is nothing to free. A
+null varlena consumes zero bytes (only an offset entry) and a null fixed-width
+value consumes its slot by design (`columnar.c:154`, so `data_len == nrows x
+width`). The only place a *not-selected* value costs anything is that zeroed
+slot, plus a `memset` per null row. Reclaiming it means a dense-values + bitmap
+layout (the Arrow layout): the writer skips the `memset`, the reader pays a
+prefix `popcount` to map row -> slot — free for a sequential reader, and on
+AVX-512 it is `vpopcntq` over the null mask. Only worth it for null-heavy
+columns; for null-free ones it is identical.
+
+Where a real local heap *is* needed is the temporaries, not the values:
+`pg_detoast_datum_packed` may allocate for toasted/compressed input, and
+`OidOutputFunctionCall` always does. Those want a per-chunk context with
+`MemoryContextReset` (the `batch_ctx` pattern) — and today they land in the SPI
+context, which is fine, as long as the *values* do not.
+
+Note what H8 does to the other hypotheses: on the encode it subsumes H1, H3 and
+H4 (no scratch, no strided loads, no faults — the per-value work becomes 1 load
++ 1 store), so the SIMD work that remains on that path is H2 plus a mask for
+nulls. On the ingest the source is already column-major, so H3 remains the win
+there. Alignment (H5) comes for free, and the client's `synth_segment` generator
+(which builds the same frame) needs the same change.
+
+## H9 — the scan side: the value is already in the page
+
+The script we control is the marshaller; the values themselves are already
+materialised by Postgres, and the honest anatomy is this:
+
+- a heap scan pins the buffer page and the slot can point **into** the pinned
+  page (`TTSOpsBufferHeapTuple` / minimal tuples): `slot_getallattrs` gives
+  Datums that are by-value for fixed width and **pointers into the page** for
+  varlena. There is no copy at that point — PG is already zero-copy at the page.
+- the copies that do exist have reasons: the buffer pin must be released before
+  the page can be evicted or reused; toast/compression makes
+  `pg_detoast_datum_packed` allocate; a sort/hash/spool materialises; and a
+  virtual slot copies the Datums out of the page (varlena still by reference).
+
+So "let the client read the pages the scan walked" is technically a **buffer
+lease**: pin, publish `(relfilenode, block, offset)` into the segment, hand the
+client a COW/shared mapping, unpin when it releases. The pieces already exist in
+this repo — `push_free`/`push_ready` are the release handshake, and the worker
+already detects a dead client (`kill(client_pid, 0)`, `worker.c:290`) to unpin.
+
+Why it probably is not the win it looks like:
+
+- the pages are **row-major**: line pointers, `t_hoff`, a null bitmap, per-value
+  alignment and padding, 1-byte vs 4-byte varlena headers. A columnar consumer
+  still has to gather strided, and it must re-implement the tuple layout in the
+  client (a second deformer, in Python or C) or accept a row-shaped result.
+- it removes one store per value (the write into the segment) — 1 of ~10
+  instructions on the fixed-width pass — and pays with a longer pin lifetime and
+  the deform moved to the reader.
+- hint bits are flipped inside a pinned page (`t_infomask`), so a client may not
+  trust header bits it cached; and TOAST/compressed values are not in the page at
+  all, so the lease needs a copy fallback for them.
+
+Verdict: worth it only for a **row-order** consumer, or if the storage itself is
+columnar — i.e. a custom table AM (the Citus-columnar / zedstore shape), where
+the pages are already per-column runs and a lease hands out exactly what the
+client wants. On the query side, PG's own version of "reuse the value that is
+already there" is an index-only scan; the extension cannot force the planner.
+
+## H10 — reuse is the dictionary, not the pointer
+
+"Boa parte dos valores é reaproveitável" is the implementable half of H9, and it
+does not need pages or COW: it needs a **dictionary per chunk**. Low-cardinality
+columns (bool, status, category, repeated text) can carry a distinct-value table
+plus u32 codes, so the client creates **one object per distinct value** and
+INCREFs it per row (the Arrow dictionary layout is the zero-copy form). The wire
+change is a new column kind; the cost is a hash per value (worker or client, but
+someone pays it), so it only pays when cardinality << nrows — which is exactly
+the case for the columns that currently dominate object creation.
+
+On the Python side this is also the only honest reading of "the object is born
+around the value": a `PyLong`/`PyUnicode` **owns** its digits/chars (inline in
+the object, not a pointer), so no integer or str can alias the segment. Only
+view types can — `memoryview`, numpy, Arrow. For those, reuse means one shared
+value and N codes; for tuple-per-row objects it means one object and N refcount
+bumps.
+
+## H11 — the object is born around the cell
+
+Write only the `PyObject` header in front of a value that is already in its
+final place, so there is no value copy and no allocator. Layout is the first
+half of the question, measured on CPython 3.14.8 (x86-64, 64-bit, GIL build,
+`Py_DEBUG` off):
+
+| wire kind | object | inline field | bytes | verdict |
+|---|---|---|---|---|
+| bool | `Py_True`/`Py_False` | — | 0 | singletons: already 1 INCREF |
+| int16/int32, -5..256 | small-int pool | — | 0 | **immortal since 3.12**: already your trick |
+| int64 (large) | `PyLong` | base-2^30 digits at +24 | 28/32/**36** | the wire int64 is *not* the digit bytes; the client still writes 2-3 digits per value |
+| float4/float8 | `PyFloat` | `double` at +16 | **24** | the perfect fit: 16 B of header and the value is already there |
+| text | `PyUnicode` (compact ASCII) | inline bytes at +40, +NUL | 40+len+1 | works, but the header layout is version-specific (3.12 moved `state`) |
+| date/time/timestamp | `PyDateTime` | several derived fields | 32/40/48 | the client writes 6-7 fields; still kills the allocator |
+| uuid | `uuid.UUID` | an `int` attribute | 64 | not in place: needs an int object plus the wrapper |
+
+The half that is not layout: **lifetime**. A `PyFloat`/`PyLong` handed to the
+user has no dealloc hook into our arena, so its storage can never be reclaimed
+with the chunk — the arena must be immortal, or the storage must be owned by a
+view type with `bf_releasebuffer`. CPython's own answer to this is to make the
+objects immortal (small ints, `None`, `True`/`False`, PEP 683); that is the
+price, and it is why the trick only closes for storage that is *permanently*
+stable.
+
+Two realizations that survive that constraint:
+
+- **Per-distinct-value pool** (this is H10, wearing the cell costume): the cell
+  is born once per distinct value, reused with an INCREF, immortal for the
+  process. Bounded memory, no per-row allocation, no per-row copy. This is
+  literally the CPython small-int cache design, and it needs no ABI knowledge.
+- **Client-owned arena + layout mode**: the client allocates one arena per
+  result and hands it to the worker (`arg` already carries a segment name; a
+  third segment or a memfd fits), the worker writes each value at its cell's
+  *inline offset*, and the client writes only the header. Keeps the shared
+  segment's lifetime out of the picture. Costs: 24-40 B of padding per value, a
+  per-Python-version offset table, and a format committed to CPython's ABI
+  (`Py_DEBUG`, free-threaded 3.13 changes `PyObject_HEAD` to a biased refcount),
+  which poisons the frame for every other consumer (numpy/Arrow, other
+  languages). Values that escape the result still can't be freed with the arena.
+
+If the consumer can take views, H11 is unnecessary — the view *is* the cell, and
+`__array_interface__`/`.offsets`/`.bytes` already do it. If the consumer needs
+real tuples, the cheap 80% of H11 is: allocate the objects from a per-chunk
+arena (one malloc, contiguous, cache-friendly traversal) with the value written
+next to its header — the allocator churn goes away, the 8-byte value store stays,
+and nothing depends on CPython's private layout.
+
+## H11 measured — what variant 2 buys
+
+CPython 3.14.8, this host, per operation, and then the bench table's row shape
+(2 float8, 2 large int, 2 text of 8 and 20 B, 1 bool, 1 cached int, the tuple):
+
+| primitive | ns | | ns/row |
+|---|---|---|---|
+| `PyFloat_FromDouble` | 13.0 | row, objects built | 123.6 |
+| `PyLong_FromLong` (large) | 18.9 | row, headers only | **28.1** |
+| `PyLong_FromLong` (cached) | 2.2 | — of which `PyTuple_New(8)` | 18.0 |
+| `PyUnicode` 8 B | 23.4 | | |
+| `PyUnicode` 20 B | 24.2 | | |
+| `PyTuple_New(8)` | 18.0 | | |
+
+**4.4x on the materialisation step (77% less).** Of the 105 ns of object work,
+the in-place birth of the four fixed-width values costs ~7 ns and the two text
+headers ~8 ns; the remaining 18 ns is the tuple, which is itself in-place-able
+(`PyTupleObject` is a header plus an inline `ob_item[]`) — that is the next
+floor, around 5 ns/row.
+
+Staged, so the fragile part stays optional:
+
+1. **fixed-width cells only** — float and int layouts are stable; a float header
+   is 2 stores, an int is 5 (refcount, type, `ob_size` and its base-2^30 digits,
+   because the wire int64 is *not* the digit bytes). ~45% off, no ABI knowledge.
+2. **+ text in place** — 5 stores for the header, but the `state` bit positions
+   are version-specific (they moved in 3.12). Reaches the measured 77%.
+3. **+ birthed tuples** — past 77%, arena-allocated rows.
+
+Worker-side price, not in the table above: the cells are 3-4x the packed wire
+bytes (24 B for a float8, 40+len+1 for text), so the arena must be reused across
+chunks and pre-faulted, and the worker's store footprint grows.
+
+### H11 safe vs unsafe, and the ceiling inside the real benchmark
+
+Same host, the benchmark's own row shape (`id`, `sku`, `name`, `price`, `stock`,
+`active`), per row, including the tuple and the deallocations:
+
+| | ns/row | |
+|---|---|---|
+| current (allocate + init + copy) | 89.9 | |
+| safe (arena-backed subtypes, value copied into the cell) | 76.7 | **-15%** |
+| in-place, immortal (unsafe) | 20.5 | -77% |
+
+- `PyUnicode_FromKindAndData(1B, …)` 19.5 vs `PyUnicode_FromStringAndSize` 20.4:
+  the UTF-8 scan is not where the text cost is. Nothing to win there.
+- The 4.4x needs objects that are never deallocated. `float_dealloc` on an exact
+  float calls `PyObject_Free()` on the pointer, so an arena-born exact float is
+  heap corruption the first time the user drops a reference. Only a **subtype**
+  with its own `tp_free` is safe (measured: the free hook fires — 10M arena
+  frees for 10M objects), and that costs the `tp_alloc` round trip and the
+  dealloc bookkeeping: -15%, not -77%. A subtype also changes `type(x)` while
+  keeping `isinstance(x, float)` true — a real semantic change for a driver.
+- Tier 2 would be writing the compact-ASCII `PyUnicode` header by hand on a str
+  subtype (~5 stores instead of 19.5 ns), which is safe for the same reason but
+  adds the per-version `state` bit layout. That is where the remaining -30% of
+  the step lives.
+
+Ceiling in `bench-sqlalchemy.log` (100k): CORE 1.27M rows/s = **787 ns/row**, ORM
+0.17M = **5900 ns/row**. The materialisation is ~90 ns/row — 11% of CORE and 1.5%
+of ORM. So H11 is worth about **-9% CORE / -1.5% ORM** unsafe, **-1.5% CORE /
+-0.2% ORM** safe (tier 1), and maybe **-6% CORE** at tier 2. Everything the
+driver controls on the CORE path — server encode, decode loop, object birth — is
+about 28% of it; the rest is SQLAlchemy's own per-row processing. The "vs
+psycopg2" headline (+12.1% at 100k) can move to at most ~+40% if all of it were
+free.
+
+### H11 implemented: an immortal arena in codec.cpp
+
+Client-only, no wire change. `codec.cpp` carves cells out of one append-only
+arena (`FASTPOSTGRES_OBJ_ARENA`, default 512 MiB, `0` turns it off), writes the
+CPython header around a value written on the spot, and stamps the interpreter's
+immortal sentinel on the refcount, so `Py_INCREF`/`Py_DECREF` return early and
+the deallocator is unreachable. No layout is assumed: `fp_objpool_init()` copies
+the string header from a real compact-ASCII string, the int tags from real longs,
+and then proves the born objects (repr, hash, compare, round-trip, and that
+decrefs do not move the refcount). Anything unexpected leaves the pool off and
+every value falls back to its normal constructor.
+
+`read_rows` on the 8-column synth shape, 100k rows, identical checksum with the
+pool off and on (`PYTHONHASHSEED` fixed), 0 fallbacks:
+
+| | ns/row |
+|---|---|
+| pool off | 383.5 |
+| pool on | **183.0** |
+
+**2.10x on the client read path.** In the real benchmark at 100k, fastpostgres
+CORE rows/s, three runs each way:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| pool off | 1.37M | 1.41M | — |
+| pool on | 1.68M | 1.58M | 1.60M |
+
+**+16.5% throughput** (719 -> 617 ns/row); the "vs psycopg2" headline goes from
++30% to +48..62%. ORM is unchanged inside the noise, because that row is
+SQLAlchemy hydration. `just test` is green.
+
+The price is the design: the arena is append-only because an immortal object can
+never be recycled, so the memory is never returned — ~29 MiB per 100k-row read
+of this shape (118 MiB for the benchmark's six reads), mapped for the life of the
+process. With a cap that is a fixed pool, not a leak that grows without bound:
+once it fills, everything falls back. Worth note: the values are *exact* types
+(`type(x) is float` still true), so nothing but memory is given up — and the same
+measurement says the loop around the objects (per-value call + switch) is now
+~165 ns/row of that 183, which is the next safe lever.
+
+## Page mechanisms (measured on this host)
+
+Facts first, because they decide which mechanisms exist:
+
+| | here |
+|---|---|
+| THP anon | `always` |
+| THP shmem | `advise` (the segment is tmpfs: nobody advises it) |
+| THP defrag | `madvise` |
+| PMD | 2 MiB |
+| `unprivileged_userfaultfd` | `0` — needs CAP_SYS_PTRACE, so no fault-driven flow control |
+| `HugePages_Total` | `0` — `MAP_HUGETLB` unavailable without configuring a pool |
+| swap | 63 GiB, so tmpfs pages (the segment) are swappable under pressure |
+
+Where page faults actually are, per 100k-row `read_rows` (faults from
+`getrusage`, RSS from `statm`; the 6.8 MiB segment):
+
+| | cold read | per warm read |
+|---|---|---|
+| pool off | 9336 faults | **8500 faults** (+9.5 MiB RSS) |
+| pool on | 3079 faults | **2400 faults** (+27 MiB RSS) |
+
+- the segment is **fault-once per process**: the cold read pays its ~1700 PTE
+  faults and every read after that pays none. The map-once/reuse design is
+  already page-optimal.
+- the real fault cost is the **Python heap churn**: 8500 faults per read with
+  the normal constructors, 2400 with the immortal pool (the cells are touched
+  once, and `AnonHugePages` shows 26 of 27 MiB backed by 2 MiB pages). The pool
+  was therefore also a page win (-6100 faults/read), and what is left is the
+  tuple per row.
+- `MADV_HUGEPAGE` on an already-populated tmpfs mapping does nothing
+  (`ShmemPmdMapped` stays 0): shmem THP only applies to new allocations, so the
+  worker would have to advise *before* writing, and it would only cover the
+  ramp-up; `MADV_COLLAPSE` would pay a ~1.4 ms copy per 6.8 MiB to save ~1700
+  PTE faults, which loses. It only pays for payloads of ~50 MiB and up, where
+  4 KB pages (25k of them) overflow the ~3k-entry L2 TLB and the strided column
+  sweeps start missing.
+
+**Guard pages as an asm verifier** (the mechanism this project should own). The
+kernel layer's contract is "reads only what it writes", and a wrong hand-written
+kernel is a crash in a backend, not an exception — but `kernels_bench.c` can only
+see wrong *answers*, not an over-read that happened to stay inside the buffer.
+Mapped each buffer so its last byte abuts a `PROT_NONE` page and ran the real
+kernels: `copy_small` at 0..64, `nullmap_any` at 14 sizes (4095/4096/4097/8192),
+the mixed 64+13 tail case, and both **asm cores** at exactly one block. All
+inside, and the harness proves itself first (a deliberate 1-byte over-read dies
+with SIGSEGV). ~150 lines, and it turns the project's biggest risk class from
+silent into deterministic.
+
+Smaller ones:
+
+- **page-aligned columns**: today one payload is one contiguous pack, so reading
+  one column's view faults its neighbours' pages too. Page-aligning column
+  regions makes a selective (numpy/Arrow) consumer fault only what it reads.
+- **a promised slack page instead of the per-value bound check**: if the format
+  guaranteed mapped slack at the end of the payload, the `p + len > end` test in
+  the text loops (~12% of that loop, measured) is the MMU's job instead.
+- **`MADV_DONTNEED`/`MADV_REMOVE` as policy, not speed**: a long-lived worker's
+  touched segment pages are allocated forever; the consumed part can be given
+  back. Related: tmpfs pages are swappable, so a payload under pressure becomes
+  major faults on the next read.
+- **the object pool should size itself from the cgroup**: 512 MiB is hostile in a
+  small container; `memory.max`/MemAvailable is the right input.
+
+## What would close the numbers
+
+The missing term is the pipeline share of each loop. That is not a new benchmark,
+it is three timers and a counter set:
+
+- `clock_gettime` around the fetch, around `columnar_build`, around `write_end`
+  (encode), and around the datum loop vs `table_multi_insert` (ingest);
+- `perf stat -e page-faults,L1-dcache-misses,branch-misses` per phase — the H8
+  claim is a fault/traffic claim, not an instruction claim, so it will show
+  there and not in the instruction counts.

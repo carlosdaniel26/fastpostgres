@@ -34,7 +34,7 @@ _image:
 [private]
 _run *args:
     just _image
-    docker run --rm --shm-size={{shm}} {{image}} {{args}}
+    docker run --rm --shm-size={{shm}} -e FASTPOSTGRES_OBJ_ARENA={{env("OBJ_ARENA", "")}} {{image}} {{args}}
 
 # the Python client's test suite
 test:

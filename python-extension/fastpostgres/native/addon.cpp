@@ -65,6 +65,8 @@ PyInit__client(void)
     if (!fp_codec_init()) return nullptr;
     if (!fp_types_init()) return nullptr;
     fp_kernels_init();
+    fp_objpool_init();              /* off unless the layouts verify (FASTPOSTGRES_OBJ_ARENA) */
+    Py_AtExit(fp_objpool_report);   /* one line per process: how values were read */
 
     PyObject *m = PyModule_Create(&moduledef);
     if (!m) return nullptr;
@@ -78,6 +80,11 @@ PyInit__client(void)
     /* Which marshalling kernels this process chose (also reported in the
      * benchmark ENV block, so a run says how it was built). */
     if (PyModule_AddStringConstant(m, "simd", fp_kernels->name) != 0)
+    {
+        Py_DECREF(m);
+        return nullptr;
+    }
+    if (PyModule_AddStringConstant(m, "objpool", fp_objpool_mode()) != 0)
     {
         Py_DECREF(m);
         return nullptr;
