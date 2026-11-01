@@ -12,6 +12,7 @@ import struct
 import unittest
 
 import fastpostgres as fp
+from fastpostgres import _client
 
 CONNINFO = os.environ.get("DATABASE_URL", "host=/tmp dbname=postgres user=postgres")
 
@@ -116,6 +117,15 @@ class RingReadTest(unittest.TestCase):
             [fp.Kind.INT32, fp.Kind.INT64, fp.Kind.FLOAT8, fp.Kind.BOOL, fp.Kind.TEXT],
         )
         self.assertEqual(first, {"id": 1, "big": 2, "f": 1.5, "b": (0, 1), "name": b"row1"})
+
+    def test_synchronous_row_pull(self):
+        """next_rows() is the one-call pull: post_rows(self->data) + wait()."""
+        self.ring.open("fp_py_seg", QUERY)
+        n = self.ring.next_rows(500)
+        self.assertEqual(n, 500)
+        rows = _client.read_rows("fp_py_seg").rows
+        self.assertEqual(len(rows), 500)
+        self.assertEqual(rows[0], (1, 2, 1.5, False, "row1"))
 
     def test_binary_kinds_on_the_wire(self):
         """The wire form itself: date/time/timestamp/uuid/bytea arrive binary,
