@@ -19,6 +19,12 @@ The Core path lands 73–96% ahead of psycopg2 and the gap widens with the load;
 the ORM lands 1–10%, because there SQLAlchemy's own hydration is ~4 µs of a
 ~5.5 µs row and no driver can move it.
 
+Against that Core read, the paths a consumer can opt into (rows/s, 100K / 1M /
+10M): `stream()`'s zero-copy column views **7.5M / 7.8M / 8.2M**, the lean core
+interface (`fastpostgres.core`, tuples instead of `Row`) **6.8M / 6.5M / —**, and
+Core across four processes **3.7M / 4.2M / —**, for Core's 1.7M / 1.4M / 1.2M.
+`stream()` never builds an object, so it is the path that scales with the load.
+
 ## Usage
 
 Any SQLAlchemy app, unchanged apart from the URL:
