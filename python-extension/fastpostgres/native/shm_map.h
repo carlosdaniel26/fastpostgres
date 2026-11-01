@@ -13,31 +13,6 @@
 
 #include <cstddef>
 
-/* Map /dev/shm/<path> read-write, growing the file to `capacity` first and
- * mapping only `map_size` bytes (the file keeps the full capacity). */
-static inline void *
-fp_map_rw(const char *path, size_t capacity, size_t map_size)
-{
-    int         fd = shm_open(path, O_RDWR | O_CREAT, 0666);
-    struct stat st;
-    void       *map;
-
-    if (capacity == 0) capacity = map_size;
-    if (fd < 0) return nullptr;
-    if (fstat(fd, &st) != 0 || ((size_t)st.st_size < capacity && ftruncate(fd, (off_t)capacity) != 0))
-    {
-        close(fd);
-        return nullptr;
-    }
-    map = mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) return nullptr;
-#ifdef MADV_POPULATE_WRITE
-    (void)madvise(map, map_size, MADV_POPULATE_WRITE); /* pre-fault in one syscall */
-#endif
-    return map;
-}
-
 /* Map the whole of an existing /dev/shm/<path> read-only; *size_out gets the
  * mapped size. */
 static inline void *
