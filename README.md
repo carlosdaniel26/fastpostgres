@@ -2,20 +2,22 @@
 
 # FastPostgres
 
-PostgreSQL query results delivered through POSIX shared memory as columnar
-typed arrays, instead of the socket's text protocol. A background worker runs
-each read with an SPI cursor and publishes batches as `FPCOLUMN` payloads in
-`/dev/shm`; the client maps the segment and reads the columns in place. Writes,
-DDL and transactions keep using libpq. The format, its reader and its writer
-live in one header, `pg-extension/fastpostgres_shm.h`.
+PostgreSQL query results delivered through POSIX shared memory as typed arrays,
+instead of the socket's text protocol. A background worker runs each read with a
+portal and publishes every batch in `/dev/shm`: the result tuples as the executor
+laid them out (`FPROWS`, one memcpy per row) or, for the zero-copy column views,
+a columnar frame (`FPCOLUMN`). The client maps the segment and reads it in place.
+Writes, DDL and transactions keep using libpq. Both formats, their readers and
+their writer live in one header, `pg-extension/fastpostgres_shm.h`.
 
 ## Measured
 
 ![SQLAlchemy Core reads](assets/core-read.png)
 
-8-core container, PostgreSQL 18.6. Once rows become Python objects, the Core
-path lands 17–34% ahead of psycopg2 and the ORM 5–13%, because materialising
-and hydrating objects is allocation-bound.
+8-core container, PostgreSQL 18.6, 100K / 1M / 10M rows. The Core path lands
+74–96% ahead of psycopg2 and the gap widens with the load; the ORM lands 2–10%,
+because there SQLAlchemy's own hydration is ~4 µs of a ~5.5 µs row and no driver
+can move it.
 
 ## Usage
 
@@ -47,5 +49,7 @@ just charts        # benchmarks + charts
 Known limits: ring reads run in the worker's session, so they miss the calling
 connection's uncommitted writes (the driver is autocommit); `numeric` widens to
 `float8` on the wire; a ring serves one stream at a time, with at most
-`FASTPOSTGRES_SHM_POOL` (default 4) per process; `/dev/shm/<seg>` is mode 0600
-and the ring is an SQL-execution endpoint, so it is not for production.
+`FASTPOSTGRES_SHM_POOL` (default 4) per process; the client's object arena is
+sized to half the cgroup limit (8 GiB at most, `FASTPOSTGRES_OBJ_ARENA` to
+override) and is never returned to the OS; `/dev/shm/<seg>` is mode 0600 and the
+ring is an SQL-execution endpoint, so it is not for production.
