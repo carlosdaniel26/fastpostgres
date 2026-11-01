@@ -3,7 +3,7 @@
 Nothing here knows about the transport: the driver is chosen entirely by the
 engine URL, so pointing an existing app at fastpostgres is a one-line change.
 
-    python demo/sqlalchemy_app.py "postgresql+psycopg2://postgres@/postgres?host=/tmp" 5000
+    python demo/sqlalchemy_app.py "postgresql+psycopg://postgres@/postgres?host=/tmp" 5000
     python demo/sqlalchemy_app.py "postgresql+fastpostgres://postgres@/postgres?host=/tmp" 5000
 """
 import datetime

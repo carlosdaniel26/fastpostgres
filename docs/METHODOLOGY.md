@@ -23,7 +23,7 @@ the benchmark and the record of its threats to validity.
 - **ADBC + pyarrow**: `adbc_driver_postgresql` (Arrow Database Connectivity over
   libpq) with `pyarrow`. Results arrive as Arrow record batches; no Python
   object is built per value.
-- PostgreSQL 18.6, Python 3.13. psycopg2 is used only for the harness's own DDL
+- PostgreSQL 18.6, Python 3.13. psycopg 3 is used only for the harness's own DDL
   and inserts; it is not a measured player.
 
 Every run's log carries the exact versions in its `### ENV` block: `cpu`, `ghz`,

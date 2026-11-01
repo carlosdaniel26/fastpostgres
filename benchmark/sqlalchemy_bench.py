@@ -55,7 +55,7 @@ FPG = "fastpostgres"
 ARROW = "adbc+arrow"
 FPG_URL = f"postgresql+fastpostgres://{BASE}"
 ARROW_URI = f"postgresql://{BASE}"
-SETUP_URL = f"postgresql+psycopg2://{BASE}"  # the harness's own DDL and inserts
+SETUP_URL = f"postgresql+psycopg://{BASE}"  # the harness's own DDL and inserts
 # The columns both players read, in one place.
 CORE_SQL = "SELECT id, sku, name, price, stock, active FROM fp_bench_rows"
 # The data behind those columns. The shape is selectable because the row path's

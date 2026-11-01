@@ -2,7 +2,7 @@
 # Runs inside the dev image, never on the host: the justfile's `demo` recipe
 # hands this to the container as its command.
 #
-# Run the same SQLAlchemy app on psycopg2 and on fastpostgres, to compare the
+# Run the same SQLAlchemy app on psycopg 3 and on fastpostgres, to compare the
 # two drivers end to end.
 #
 #   demo.sh [nrows]    default 5000
@@ -16,5 +16,5 @@ demo() {
   python3 /src/demo/sqlalchemy_app.py "$2" "$N"
 }
 
-demo "psycopg2  (the existing driver)" "postgresql+psycopg2://postgres@/postgres?host=/tmp"
+demo "psycopg 3  (the existing driver)" "postgresql+psycopg://postgres@/postgres?host=/tmp"
 demo "fastpostgres  (one URL change)"  "postgresql+fastpostgres://postgres@/postgres?host=/tmp"
