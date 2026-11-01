@@ -819,6 +819,24 @@ The shape of it: the object-free paths are worth 3-6x, the object-building stand
 is worth 3-4x while the arena can hold its cells, and processes are worth 2-3x and
 compose with both.
 
+### Sizing the pool instead of guessing it
+
+The pool was a constant (4). Both bounds are now worked out at first use, per
+process, from things that are measured rather than assumed:
+
+- **the machine**: hardware threads from affinity, capped by the cgroup CPU
+  quota, over the SMT width, divided by the 1.2 threads a stream costs — 16 / 2 /
+  1.2 = **6** here, which is the plateau the process measurement found;
+- **the server**: `max_worker_processes` less the slot it holds back, less the
+  ring workers `pg_stat_activity` already lists (ours or another process's),
+  because that budget is shared by every app process on the server.
+
+The smaller wins, `FASTPOSTGRES_SHM_POOL` still overrides it, 0 still turns the
+shared-memory path off, and a forked child re-resolves for itself. When the
+server's budget is what blocks a ring, the process now warns once and reads over
+libpq — instead of the silence the 8-process measurement showed (slower than six,
+no diagnostic). What it resolves to here: machine 6, server 7 free, pool 6.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:

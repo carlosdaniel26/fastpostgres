@@ -54,10 +54,12 @@ just charts        # benchmarks + charts
 
 Known limits: ring reads run in the worker's session, so they miss the calling
 connection's uncommitted writes (the driver is autocommit); `numeric` widens to
-`float8` on the wire; a ring serves one stream at a time, with at most
-`FASTPOSTGRES_SHM_POOL` (default 4) per process, and concurrent ring reads are
-capped server-side by `max_worker_processes` — one background worker per ring, so
-7 with the default of 8, after which reads fall back to libpq; the client's object
+`float8` on the wire; a ring serves one stream at a time and the
+pool per process is sized on first use from the machine (one stream per ~1.2
+hardware threads, divided by the SMT width — 6 on this box) and from the free
+`max_worker_processes` slots left on the server, `FASTPOSTGRES_SHM_POOL` to
+override; when that worker budget is exhausted the read falls back to libpq and
+says so once; the client's object
 arena is sized to half the cgroup limit (8 GiB at most, `FASTPOSTGRES_OBJ_ARENA`
 to override) and is never returned to the OS; `/dev/shm/<seg>` is mode 0600 and the
 ring is an SQL-execution endpoint, so it is not for production.
