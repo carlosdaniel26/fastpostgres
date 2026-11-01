@@ -697,10 +697,13 @@ fp_objpool_mode(void)
 void
 fp_objpool_report(void)
 {
-    if (g_pool_base == nullptr) return;
-    fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
-            g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
-            g_pool_on ? "" : " (values use the normal constructors)");
+    /* The pool line reports the pool; the cycle line reports the decode, which
+     * runs with the arena off too - that A/B is the one that prices the arena,
+     * so it must not disappear with the pool. */
+    if (g_pool_base != nullptr)
+        fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
+                g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
+                g_pool_on ? "" : " (values use the normal constructors)");
     if (g_read_rows != 0)
         fprintf(stderr, "read_rows: %.1f cycles/row over %llu rows (decode %.1f, frame+desc+list %.1f)\n",
                 (double)g_read_cycles / (double)g_read_rows, g_read_rows,
@@ -952,134 +955,193 @@ fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows
  * The server sends PostgreSQL's own tuple bytes (rows.c), so the walk here
  * mirrors heap_deform_tuple: the offset advances by each attribute's alignment
  * and length, a null attribute takes no space at all, and the null bitmap sits
- * at t_bits rather than at the end of the header area. The per-column layout is
- * worked out once per batch, so a value costs the walk plus one jump-table
- * switch.
+ * at t_bits rather than at the end of the header area.
+ *
+ * The per-column layout (and the null bit's place in the tuple) is worked out
+ * once per batch, and the kind is dispatched once per column per *block* of
+ * rows: a block is walked column by column, each column through the one body
+ * specialised for its kind, so no value pays for a switch — the columnar path's
+ * row_column<K>, over a tuple walk. A block also leaves the walk with one
+ * independent offset chain per row instead of one per row's values, and keeps
+ * the frame bytes it touches in L1: a pass spanning the whole batch would come
+ * back to a row's bytes only after the rest of the batch had gone by.
  */
 
 namespace
 {
 
+/* Rows one kind dispatch covers: enough for the switch not to be per value,
+ * small enough that a block's pointers, offsets and tuples stay in registers. */
+#define FP_ROWS_BLOCK 8
+
 struct AttLayout {
-    int32_t  attlen; /* -1 for the varlena kinds */
+    int32_t  attlen;   /* -1 for the varlena kinds */
     uint32_t alignby;
+    uint32_t nullbyte; /* the tuple byte holding this column's null bit */
+    uint8_t  nullbit;
 };
 
-inline PyObject *
-tuple_value(uint8_t kind, const uint8_t *p)
-{
-    switch (kind)
-    {
-        case FASTPOSTGRES_KIND_BOOL:
-            return PyBool_FromLong(*p != 0);
-        case FASTPOSTGRES_KIND_INT16: {
-            int16_t v;
-            memcpy(&v, p, 2);
-            return fp_birth_long(v);
-        }
-        case FASTPOSTGRES_KIND_INT32: {
-            int32_t v;
-            memcpy(&v, p, 4);
-            return fp_birth_long(v);
-        }
-        case FASTPOSTGRES_KIND_INT64: {
-            int64_t v;
-            memcpy(&v, p, 8);
-            return fp_birth_long(v);
-        }
-        case FASTPOSTGRES_KIND_FLOAT4: {
-            float v;
-            memcpy(&v, p, 4);
-            return fp_birth_float((double)v);
-        }
-        case FASTPOSTGRES_KIND_FLOAT8: {
-            double v;
-            memcpy(&v, p, 8);
-            return fp_birth_float(v);
-        }
-        case FASTPOSTGRES_KIND_DATE:
-            return date_from_days(load_le32(p));
-        case FASTPOSTGRES_KIND_TIME:
-            return time_from_us(load_le64(p));
-        case FASTPOSTGRES_KIND_TIMESTAMP:
-            return timestamp_from_us(load_le64(p), 0);
-        case FASTPOSTGRES_KIND_TIMESTAMPTZ:
-            return timestamp_from_us(load_le64(p), 1);
-        case FASTPOSTGRES_KIND_UUID:
-            return uuid_from_bytes(p);
-        case FASTPOSTGRES_KIND_BYTEA:
-            return PyBytes_FromStringAndSize((const char *)fastpostgres_vardata_any(p),
-                                             (Py_ssize_t)fastpostgres_vardata_len(p));
-        default: {
-            const char *d    = (const char *)fastpostgres_vardata_any(p);
-            Py_ssize_t  n    = (Py_ssize_t)fastpostgres_vardata_len(p);
-            PyObject   *born = fp_birth_text(d, n);
+/* One block being decoded: the rows, where each row's walk has got to, whether
+ * it carries a null bitmap, and the tuple its values are landing in. */
+struct RowBlock {
+    const uint8_t *row[FP_ROWS_BLOCK];
+    PyObject      *tup[FP_ROWS_BLOCK];
+    uint32_t       off[FP_ROWS_BLOCK];
+    bool           hasnull[FP_ROWS_BLOCK];
+    uint32_t       n;
+};
 
-            if (born != nullptr) return born;
-            return PyUnicode_FromStringAndSize(d, n);
-        }
+template <uint8_t K>
+inline PyObject *
+tuple_value(const uint8_t *p)
+{
+    if constexpr (K == FASTPOSTGRES_KIND_BOOL)
+        return PyBool_FromLong(*p != 0);
+    else if constexpr (K == FASTPOSTGRES_KIND_INT16)
+    {
+        int16_t v;
+        memcpy(&v, p, 2);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_INT32)
+    {
+        int32_t v;
+        memcpy(&v, p, 4);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_INT64)
+    {
+        int64_t v;
+        memcpy(&v, p, 8);
+        return fp_birth_long(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
+    {
+        float v;
+        memcpy(&v, p, 4);
+        return fp_birth_float((double)v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
+    {
+        double v;
+        memcpy(&v, p, 8);
+        return fp_birth_float(v);
+    }
+    else if constexpr (K == FASTPOSTGRES_KIND_DATE)
+        return date_from_days(load_le32(p));
+    else if constexpr (K == FASTPOSTGRES_KIND_TIME)
+        return time_from_us(load_le64(p));
+    else if constexpr (K == FASTPOSTGRES_KIND_TIMESTAMP)
+        return timestamp_from_us(load_le64(p), 0);
+    else if constexpr (K == FASTPOSTGRES_KIND_TIMESTAMPTZ)
+        return timestamp_from_us(load_le64(p), 1);
+    else if constexpr (K == FASTPOSTGRES_KIND_UUID)
+        return uuid_from_bytes(p);
+    else if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
+        return PyBytes_FromStringAndSize((const char *)fastpostgres_vardata_any(p),
+                                         (Py_ssize_t)fastpostgres_vardata_len(p));
+    else
+    {
+        const char *d    = (const char *)fastpostgres_vardata_any(p);
+        Py_ssize_t  n    = (Py_ssize_t)fastpostgres_vardata_len(p);
+        PyObject   *born = fp_birth_text(d, n);
+
+        if (born != nullptr) return born;
+        return PyUnicode_FromStringAndSize(d, n);
     }
 }
 
-PyObject *
-decode_tuple(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *layout, const uint8_t *row,
-             uint32_t len)
+/* One column of a block, in row order. K settles which alignment the value
+ * needs and whether it is varlena at compile time, so the body carries no kind
+ * test; the layout supplies the rest, resolved once per batch. */
+template <uint8_t K>
+inline bool
+block_column(RowBlock &b, const AttLayout &layout, uint32_t cidx)
 {
-    PyObject *out = PyTuple_New((Py_ssize_t)ncols);
-    uint32_t  natts, off;
-    bool      hasnull;
-
-    if (out == nullptr) return nullptr;
-
-    off = fastpostgres_tuple_hoff(row);
-    if (off < FASTPOSTGRES_HT_BITS || off > len)
+    for (uint32_t k = 0; k < b.n; k++)
     {
-        Py_DECREF(out);
-        PyErr_SetString(PyExc_ValueError, "row tuple: bad header offset");
-        return nullptr;
-    }
-    natts   = fastpostgres_tuple_natts(row);
-    hasnull = fastpostgres_tuple_hasnull(row) != 0;
+        const uint8_t *row = b.row[k];
+        PyObject      *v;
 
-    for (uint32_t c = 0; c < ncols; c++)
-    {
-        PyObject *v;
-
-        if (c >= natts)
-        {
-            /* the writer expands short tuples before sending them, so anything
-             * else is a frame we do not understand */
-            Py_DECREF(out);
-            PyErr_SetString(PyExc_ValueError, "row tuple: fewer attributes than columns");
-            return nullptr;
-        }
-
-        if (hasnull && fastpostgres_tuple_isnull(row, c))
+        if (b.hasnull[k] && (row[layout.nullbyte] & layout.nullbit) == 0)
         {
             v = Py_None;
             Py_INCREF(v); /* a null stores nothing: the offset does not move */
         }
         else
         {
+            uint32_t       o;
             const uint8_t *p;
 
-            if (layout[c].attlen < 0)
-                off = fastpostgres_att_pointer_align(off, layout[c].alignby, row + off);
+            if (fastpostgres_kind_is_varlena(K))
+                o = fastpostgres_att_pointer_align(b.off[k], layout.alignby, row + b.off[k]);
             else
-                off = fastpostgres_att_align(off, layout[c].alignby);
+                o = fastpostgres_att_align(b.off[k], layout.alignby);
 
-            p = row + off;
-            v = tuple_value(cols[c].kind, p);
-            if (v == nullptr)
-            {
-                Py_DECREF(out);
-                return nullptr;
-            }
-            off = fastpostgres_att_addlength(off, layout[c].attlen, p);
+            p = row + o;
+            v = tuple_value<K>(p);
+            if (v == nullptr) return false;
+            b.off[k] = fastpostgres_att_addlength(o, layout.attlen, p);
         }
-        PyTuple_SET_ITEM(out, (Py_ssize_t)c, v);
+        PyTuple_SET_ITEM(b.tup[k], (Py_ssize_t)cidx, v);
     }
-    return out;
+    return true;
+}
+
+/* One block: the switch runs once per column, and each column's body then walks
+ * every row of the block without it. */
+inline bool
+decode_block(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *layout, RowBlock &b)
+{
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        bool ok;
+
+        switch (cols[c].kind)
+        {
+            case FASTPOSTGRES_KIND_BOOL:
+                ok = block_column<FASTPOSTGRES_KIND_BOOL>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_INT16:
+                ok = block_column<FASTPOSTGRES_KIND_INT16>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_INT32:
+                ok = block_column<FASTPOSTGRES_KIND_INT32>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_INT64:
+                ok = block_column<FASTPOSTGRES_KIND_INT64>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_FLOAT4:
+                ok = block_column<FASTPOSTGRES_KIND_FLOAT4>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_FLOAT8:
+                ok = block_column<FASTPOSTGRES_KIND_FLOAT8>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_DATE:
+                ok = block_column<FASTPOSTGRES_KIND_DATE>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_TIME:
+                ok = block_column<FASTPOSTGRES_KIND_TIME>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_TIMESTAMP:
+                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMP>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_TIMESTAMPTZ:
+                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_UUID:
+                ok = block_column<FASTPOSTGRES_KIND_UUID>(b, layout[c], c);
+                break;
+            case FASTPOSTGRES_KIND_BYTEA:
+                ok = block_column<FASTPOSTGRES_KIND_BYTEA>(b, layout[c], c);
+                break;
+            default:
+                ok = block_column<FASTPOSTGRES_KIND_TEXT>(b, layout[c], c);
+                break;
+        }
+        if (!ok) return false;
+    }
+    return true;
 }
 
 } /* namespace */
@@ -1088,6 +1150,7 @@ bool
 fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd, PyObject *rows)
 {
     std::vector<AttLayout> layout(ncols);
+    RowBlock               block;
     const uint8_t         *row;
     uint32_t               len;
     uint64_t               expect = rd->left;
@@ -1102,19 +1165,54 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
             PyErr_SetString(PyExc_ValueError, "row frame: unknown wire kind");
             return false;
         }
-        layout[c].attlen  = width > 0 ? width : -1;
-        layout[c].alignby = (uint32_t)fastpostgres_kind_alignby(cols[c].kind);
+        layout[c].attlen   = width > 0 ? width : -1;
+        layout[c].alignby  = (uint32_t)fastpostgres_kind_alignby(cols[c].kind);
+        layout[c].nullbyte = FASTPOSTGRES_HT_BITS + (c >> 3);
+        layout[c].nullbit  = (uint8_t)(1u << (c & 7));
     }
 
     unsigned long long t0 = __rdtsc();
 
-    while (fastpostgres_rows_next(rd, &row, &len))
+    for (;;)
     {
-        PyObject *tup = decode_tuple(cols, ncols, layout.data(), row, len);
+        /* The frame checks are made where the tuple is made, once per row; the
+         * values are decoded after the block is complete, so each tuple goes
+         * into the caller's list before it is filled. A half-filled tuple is
+         * only reachable through that list, and both the GC and the deallocator
+         * walk its items null-safely. */
+        block.n = 0;
+        while (block.n < FP_ROWS_BLOCK && fastpostgres_rows_next(rd, &row, &len))
+        {
+            PyObject *tup = PyTuple_New((Py_ssize_t)ncols);
+            uint32_t  hoff;
 
-        if (tup == nullptr) return false;
-        PyList_SET_ITEM(rows, (Py_ssize_t)r, tup);
-        r++;
+            if (tup == nullptr) return false;
+            hoff = fastpostgres_tuple_hoff(row);
+            if (hoff < FASTPOSTGRES_HT_BITS || hoff > len)
+            {
+                Py_DECREF(tup);
+                PyErr_SetString(PyExc_ValueError, "row tuple: bad header offset");
+                return false;
+            }
+            /* the writer expands short tuples before sending them, so anything
+             * else is a frame we do not understand */
+            if (fastpostgres_tuple_natts(row) < ncols)
+            {
+                Py_DECREF(tup);
+                PyErr_SetString(PyExc_ValueError, "row tuple: fewer attributes than columns");
+                return false;
+            }
+            block.row[block.n]     = row;
+            block.off[block.n]     = hoff;
+            block.hasnull[block.n] = fastpostgres_tuple_hasnull(row) != 0;
+            block.tup[block.n]     = tup;
+            PyList_SET_ITEM(rows, (Py_ssize_t)(r + block.n), tup);
+            block.n++;
+        }
+        if (block.n == 0) break;
+
+        if (!decode_block(cols, ncols, layout.data(), block)) return false;
+        r += block.n;
     }
     g_dec_cycles += __rdtsc() - t0;
     g_dec_rows += r;
