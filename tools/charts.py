@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Run the SQLAlchemy driver benchmark and render the charts — one shot.
+"""Run the fast-postgres vs ADBC + Arrow benchmark and render the charts — one shot.
 
-Builds the container, runs the benchmark, then writes two images:
+Builds the container, runs the benchmark, then writes two images, one per
+head-to-head the harness measures:
 
-    sqlalchemy_chart-orm.png / sqlalchemy_chart-core.png   psycopg2 / fastpostgres
+    fastpostgres_chart-driver.png     each stack's own DBAPI
+    fastpostgres_chart-zerocopy.png   the zero-copy paths, summed in place
 
-Each bar carries its rate and, except for the baseline it is measured against,
-its improvement over that baseline.
+Each bar carries its rate; the accent bar (fast-postgres) also carries its
+improvement over the rival it is measured against.
 
 `--compare LOG` also prints the before/after deltas for the same loads and
-writes those phases again, each load as a before/after bar pair:
+writes those sections again, each load as a before/after bar pair:
 
-    sqlalchemy_chart-orm-compare.png / sqlalchemy_chart-core-compare.png
+    fastpostgres_chart-driver-compare.png / fastpostgres_chart-zerocopy-compare.png
 
 Usage:
     just charts [nrows ...]        (default: the benchmark's own)
@@ -61,8 +63,8 @@ def run(cmd):
 # ---- parsing --------------------------------------------------------------
 
 
-def parse_sections(text, sections, row_re, values_from):
-    """{section: {load: (values...)}} for the requested section prefixes."""
+def parse_sections(text, sections, row_re):
+    """{section: {load: (rate_millions, ...)}} for the requested section prefixes."""
     data = {name: {} for name in sections.values()}
     section = None
     for line in text.splitlines():
@@ -74,18 +76,38 @@ def parse_sections(text, sections, row_re, values_from):
             if section:
                 m = row_re.match(line)
                 if m:
-                    data[section][f"{m.group(1)}{m.group(2)}"] = tuple(
-                        float(m.group(i)) for i in values_from
-                    )
+                    rates = tuple(float(v[:-1]) for v in m.group(3).split())
+                    data[section][f"{m.group(1)}{m.group(2)}"] = rates
     return data
 
 
-# The trailing comparison column is a speedup ("1.36x") or a percentage
-# ("+36.0%"); accept both so older logs still plot.
-_RATIO = r"(?:[\d.]+x|[+-][\d.]+%)"
+# The two head-to-head sections the benchmark prints, and the players in its
+# column order: fast-postgres takes the accent, the Arrow rival is grey. Each
+# section compares the same output (tuples, then columnar), so each gets its own
+# pair of labels.
+CHART_SECTIONS = {"TUPLE READ": "tuples", "ZERO-COPY READ": "zerocopy"}
+PLAYERS = ("fastpostgres", "adbc+arrow")
+CHART_LABELS = {
+    "tuples": ("fast-postgres (typed tuples)", "ADBC + Arrow → tuples"),
+    "zerocopy": ("fast-postgres (stream + numpy)", "ADBC Arrow + pyarrow.compute"),
+}
+COLORS = (ACCENT, GREY[1])
+CHARTS = {
+    "tuples": (
+        "fastpostgres_chart-tuples.png",
+        "the same output — Python tuples — from each stack",
+    ),
+    "zerocopy": (
+        "fastpostgres_chart-zerocopy.png",
+        "the same output — columnar, one column summed in place",
+    ),
+}
 
-DRIVER_SECTIONS = {"SQLALCHEMY ORM READ": "orm", "SQLALCHEMY CORE READ": "core"}
-DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+([\d.]+)M\s+([\d.]+)M\s+{_RATIO}\s+\S+\s*$")
+# A row is: load, one rate per player ("1.36M"), the comparison column, then
+# ok/MISMATCH.
+_RATE = r"[\d.]+M"
+_RATIO = r"(?:[\d.]+x|[+-][\d.]+%)"
+DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+({_RATE}(?:\s+{_RATE})*)\s+({_RATIO}(?:\s+{_RATIO})*)\s+\S+\s*$")
 
 
 # ---- drawing --------------------------------------------------------------
@@ -170,7 +192,7 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
     fig, ax = plt.subplots(figsize=(7.8, 5.9))
     handles = bars(ax, data, series, colors, labels, scale, delta_vs)
     ax.set_title(title)
-    fig.suptitle(headline, fontsize=13, y=0.975)
+    fig.suptitle(headline, fontsize=13 if len(headline) <= 70 else 10, y=0.975)
     if handles:
         fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.92),
                    ncol=len(series), frameon=False)
@@ -222,44 +244,53 @@ def headline_compare(prefix, data, target):
 
 
 def plot_compare(db, da, env, scale, note=""):
-    """One before/after image per phase: grey for before, the accent for after,
+    """One before/after image per section: grey for before, the accent for after,
     which is all the two-tone key needs — `before`/`after` are the two series."""
     series, colors, labels = ("before", "after"), (GREY[0], ACCENT), ("before", "after")
-    footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
+    footer = spec(env, DRIVER_KEYS) or "fast-postgres vs ADBC + Arrow"
     if note:
         footer += " · " + note
-    titles = {"orm": "ORM read: before vs after", "core": "Core read: before vs after"}
 
-    for section in ("orm", "core"):
-        data = paired(db[section], da[section], ("psycopg2", "fastpostgres"))
-        path = OUT / f"sqlalchemy_chart-{section}-compare.png"
+    for section, (filename, subtitle) in CHARTS.items():
+        bp, ap = db[section], da[section]
+        shared = min([len(v) for v in (*bp.values(), *ap.values())], default=0)
+        data = paired(bp, ap, PLAYERS[:shared])
+        path = OUT / filename.replace(".png", "-compare.png")
         if not data:
             skip(path, section)
             continue
-        label = "ORM" if section == "orm" else "Core"
-        fig = figure(section, data, series, colors, labels, titles[section],
-                     headline_compare(f"SQLAlchemy {label} reads (fast-postgres)", data,
-                                      "fastpostgres"),
-                     footer, scale)
+        fig = figure(section, data, series, colors, labels,
+                     f"{subtitle} — before vs after",
+                     headline_compare("Read", data, PLAYERS[0]), footer, scale)
         save(fig, path, len(data))
 
 
 def compare(before_text, after_text, env=None, scale="auto", note=""):
     """Before/after deltas for the same loads — what a hot-path change is for."""
-    db = parse_sections(before_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
-    da = parse_sections(after_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
+    db = parse_sections(before_text, CHART_SECTIONS, DRIVER_ROW)
+    da = parse_sections(after_text, CHART_SECTIONS, DRIVER_ROW)
+
+    widths = {
+        section: (max((len(v) for v in db[section].values()), default=0),
+                  max((len(v) for v in da[section].values()), default=0))
+        for section in CHART_SECTIONS.values()
+    }
+    if any(before != after for before, after in widths.values()):
+        print("note: the logs carry different player columns (the harness changed"
+              " between them):\n      the deltas mix the code change with the harness change.")
 
     print("\nBEFORE -> AFTER (M rows/s)")
-    for section in ("orm", "core"):
+    for section in CHART_SECTIONS.values():
         for load in sorted(db[section], key=num_rows):
             if load not in da[section]:
                 continue
+            shared = min(len(db[section][load]), len(da[section][load]))
             cells = []
-            for i, name in enumerate(("psycopg2", "fastpostgres")):
+            for i, name in enumerate(PLAYERS[:shared]):
                 was, now = db[section][load][i], da[section][load][i]
                 delta = f"{(now / was - 1) * 100:+.1f}%" if was else "n/a"
                 cells.append(f"{name} {was:.2f} -> {now:.2f} ({delta})")
-            print(f"  {section:<5} {load:>4}: " + "   ".join(cells))
+            print(f"  {section:<8} {load:>4}: " + "   ".join(cells))
 
     print()
     plot_compare(db, da, env if env is not None else parse_env_text(after_text), scale, note)
@@ -274,8 +305,8 @@ def spec(env, keys):
 
 
 DRIVER_KEYS = [
-    ("ghz", "{} GHz"), ("cores", "{} cores"), ("postgres", "PostgreSQL {}"),
-    ("python", "Python {}"), ("sqlalchemy", "SQLAlchemy {}"),
+    ("cpu", "{}"), ("shape", "shape {}"), ("postgres", "PostgreSQL {}"),
+    ("python", "Python {}"), ("pyarrow", "pyarrow {}"), ("adbc", "ADBC {}"),
 ]
 
 # The client's one object-arena summary line: it is the reason a curve flattens
@@ -313,26 +344,23 @@ def pool_note(pool):
 
 
 def plot_drivers(text, env, scale, note=""):
-    data = parse_sections(text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
-    footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
+    data = parse_sections(text, CHART_SECTIONS, DRIVER_ROW)
+    footer = spec(env, DRIVER_KEYS) or "fast-postgres vs ADBC + Arrow"
     if note:
         footer += " · " + note
-    titles = {"orm": "ORM read: select(Model) -> Python objects",
-              "core": "Core read: select(cols) -> Row tuples"}
-    for section in ("orm", "core"):
-        path = OUT / f"sqlalchemy_chart-{section}.png"
-        if not data[section]:
+    for section, (filename, subtitle) in CHARTS.items():
+        path = OUT / filename
+        rows = data[section]
+        if not rows:
             skip(path, section)
             continue
-        gain = max((v[1] / v[0] - 1 for v in data[section].values() if v[0] > 0), default=0.0)
-        label = "ORM" if section == "orm" else "Core"
-        if gain >= 0.15:
-            headline = f"SQLAlchemy {label} reads — fast-postgres up to {gain * 100:.0f}% faster than psycopg2"
-        else:
-            headline = f"SQLAlchemy {label} reads — driver makes little difference"
-        fig = figure(section, data[section], ("psycopg2", "fastpostgres"), (GREY[0], ACCENT),
-                     ("psycopg2", "fast-postgres"), titles[section], headline, footer, scale)
-        save(fig, path, len(data[section]))
+        # the accent bar carries the comparison (the rival is the baseline), and
+        # the headline takes the best load
+        gain = max((v[0] / v[1] - 1 for v in rows.values() if v[1] > 0), default=0.0)
+        headline = f"fast-postgres up to {gain * 100:.0f}% faster than ADBC + Arrow"
+        fig = figure(section, rows, PLAYERS, COLORS, CHART_LABELS[section], subtitle,
+                     headline, footer, scale, delta_vs=1)
+        save(fig, path, len(rows))
 
 
 # ---- main -----------------------------------------------------------------
