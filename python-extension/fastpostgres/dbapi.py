@@ -20,10 +20,12 @@ tuples — the CORE read without CORE's per-row Result/Row machinery:
 """
 import datetime
 import decimal
+import math
 import os
 import queue
 import re
 import threading
+import warnings
 from typing import Any, Optional, Sequence
 
 from . import _client
@@ -311,8 +313,20 @@ class _Result:
 # out, runs open/next*/close, and hands it back. The pool bounds how many
 # workers a process can spawn, whatever the connection pool size; when it is
 # exhausted (or the extension is absent) reads fall back to libpq.
+#
+# How many is "enough" is not a constant, and the numbers are measured: a stream
+# needs about 1.2 hardware threads (the client's decode is GIL-bound and takes most
+# of one, its ring worker the rest), so a machine saturates at roughly one stream
+# per core — six or seven here, not sixteen — and every ring is a background
+# worker, of which the server has max_worker_processes to give (eight, seven
+# usable). So the pool is resolved once per process, on the first read that needs
+# a ring, from the machine and from the server. FASTPOSTGRES_SHM_POOL still
+# overrides it; 0 still turns the shared-memory path off.
 
-_SHM_POOL_SIZE = int(os.environ.get("FASTPOSTGRES_SHM_POOL", "4"))
+_POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
+_THREADS_PER_STREAM = 1.2
+_POOL_MAX = 8
+_RING_BACKEND = "fastpostgres ring worker"
 
 _pool_idle = queue.Queue()
 _pool_lock = threading.Lock()
@@ -320,6 +334,94 @@ _pool_created = 0
 _pool_broken = False
 _pool_pid = None
 _pool_prefix = ""
+_pool_size = None
+
+
+def _cgroup_cpu_threads():
+    """The CPU allowance of this cgroup, in hardware threads, or None."""
+    try:  # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()[:2]
+        if quota == "max":
+            return None
+        return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:  # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            quota = int(f.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+            period = int(f.read())
+        if quota <= 0:
+            return None
+        return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        return None
+
+
+def _threads_per_core():
+    """SMT width (/proc/cpuinfo: threads per socket over cores per socket)."""
+    try:
+        siblings = cores = None
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key.strip() == "siblings" and siblings is None:
+                    siblings = int(value)
+                elif key.strip() == "cpu cores" and cores is None:
+                    cores = int(value)
+                if siblings and cores:
+                    break
+        if siblings and cores:
+            return max(1, siblings // cores)
+    except (OSError, ValueError):
+        pass
+    return 1
+
+
+def _machine_streams() -> int:
+    """How many concurrent reads one process can usefully keep going here."""
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    quota = _cgroup_cpu_threads()
+    if quota:
+        cpus = min(cpus, quota)
+    physical = max(1, cpus // _threads_per_core())
+    return max(1, min(_POOL_MAX, int(physical / _THREADS_PER_STREAM)))
+
+
+def _server_ring_slots(conn):
+    """Rings the server can still register: max_worker_processes, less the one it
+    holds back, less the ring workers already running — ours or another
+    process's, which is what makes several app processes share one budget."""
+    try:
+        budget = int(conn.exec("SHOW max_worker_processes").rows[0][0])
+        taken = int(conn.exec(
+            f"SELECT count(*) FROM pg_stat_activity WHERE backend_type = '{_RING_BACKEND}'"
+        ).rows[0][0])
+    except Exception:
+        return None
+    return max(1, budget - 1 - taken)
+
+
+def _resolve_pool_size(conn) -> int:
+    """Size the pool once per process: the machine's streams, clamped by what the
+    server has left to register."""
+    global _pool_size
+
+    if _pool_size is not None:
+        return _pool_size
+    if _POOL_ENV is not None:
+        _pool_size = int(_POOL_ENV)
+        return _pool_size
+    size = _machine_streams()
+    slots = _server_ring_slots(conn)
+    if slots is not None:
+        size = min(size, slots)
+    _pool_size = max(1, size)
+    return _pool_size
 
 
 def _prefix() -> str:
@@ -331,7 +433,7 @@ def _prefix() -> str:
     workers on one data segment. A pid change means we are the child: take a fresh
     stem and forget the parent's pool, because its rings are not ours to hand out.
     """
-    global _pool_pid, _pool_prefix, _pool_created, _pool_broken
+    global _pool_pid, _pool_prefix, _pool_created, _pool_broken, _pool_size
 
     pid = os.getpid()
     if _pool_pid != pid:
@@ -339,6 +441,7 @@ def _prefix() -> str:
         _pool_prefix = f"fp_dbapi_{pid}"
         _pool_created = 0
         _pool_broken = False
+        _pool_size = None  # and its size is the child's to work out
         while True:
             try:
                 _pool_idle.get_nowait()
@@ -348,8 +451,14 @@ def _prefix() -> str:
 
 
 def pool_size():
-    """Maximum number of worker-backed rings this process will create."""
-    return _SHM_POOL_SIZE
+    """Maximum number of worker-backed rings this process will create: the env
+    override, the size resolved on the first read that needed a ring, or the
+    machine's own estimate before that."""
+    if _pool_size is not None:
+        return _pool_size
+    if _POOL_ENV is not None:
+        return int(_POOL_ENV)
+    return _machine_streams()
 
 
 def pool_created():
@@ -369,7 +478,8 @@ def _ring_acquire(bootstrap):
         pass
 
     with _pool_lock:
-        if _pool_created >= _SHM_POOL_SIZE:
+        size = _resolve_pool_size(bootstrap)  # once per process, from machine + server
+        if _pool_created >= size:
             return None
         index = _pool_created
         _pool_created += 1
@@ -378,12 +488,34 @@ def _ring_acquire(bootstrap):
     try:
         ring = _client.Ring(name)
         ring.start(bootstrap)
-    except Exception:
+    except Exception as exc:
         with _pool_lock:
             _pool_created -= 1
             _pool_broken = True
+        if "could not register background worker" in str(exc):
+            _warn_no_workers()
         return None
     return (ring, name + "_seg")
+
+
+_warned_no_workers = False
+
+
+def _warn_no_workers():
+    """The server's worker budget is what is blocking the shared-memory path: say
+    so once, rather than reading over libpq in silence for the life of the
+    process."""
+    global _warned_no_workers
+
+    if _warned_no_workers:
+        return
+    _warned_no_workers = True
+    warnings.warn(
+        "fastpostgres: no background worker slots left on the server "
+        "(max_worker_processes); this process now reads over libpq",
+        RuntimeWarning,
+        stacklevel=4,
+    )
 
 
 def _ring_release(info):

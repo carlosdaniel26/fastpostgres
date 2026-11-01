@@ -347,6 +347,20 @@ class DbapiTest(unittest.TestCase):
 
         cur.execute("DROP TABLE fp_lean_t")
 
+    def test_pool_is_sized_from_the_machine_and_the_server(self):
+        """The ring pool is not a constant: it is the machine's stream count
+        clamped by the background worker slots the server has left."""
+        from fastpostgres import dbapi
+
+        self.assertGreaterEqual(dbapi._machine_streams(), 1)
+
+        size = dbapi._resolve_pool_size(self.conn._conn)
+        self.assertGreaterEqual(size, 1)
+        self.assertEqual(dbapi.pool_size(), size)  # resolved once per process
+
+        budget = int(self.conn._conn.exec("SHOW max_worker_processes").rows[0][0])
+        self.assertLessEqual(size, budget)
+
     def test_forked_worker_gets_its_own_ring_name(self):
         """Module state carries across fork; the ring stem must not. gunicorn and
         multiprocessing import first and fork after, and two processes on one ring
