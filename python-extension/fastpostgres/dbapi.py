@@ -318,7 +318,33 @@ _pool_idle = queue.Queue()
 _pool_lock = threading.Lock()
 _pool_created = 0
 _pool_broken = False
-_pool_prefix = f"fp_dbapi_{os.getpid()}"
+_pool_pid = None
+_pool_prefix = ""
+
+
+def _prefix() -> str:
+    """The ring/segment name stem for *this* process.
+
+    Module state is inherited across fork — gunicorn, uwsgi and multiprocessing all
+    import first and fork after — so a stem computed at import time gives every
+    worker the parent's name, and two processes on one ring means two background
+    workers on one data segment. A pid change means we are the child: take a fresh
+    stem and forget the parent's pool, because its rings are not ours to hand out.
+    """
+    global _pool_pid, _pool_prefix, _pool_created, _pool_broken
+
+    pid = os.getpid()
+    if _pool_pid != pid:
+        _pool_pid = pid
+        _pool_prefix = f"fp_dbapi_{pid}"
+        _pool_created = 0
+        _pool_broken = False
+        while True:
+            try:
+                _pool_idle.get_nowait()
+            except queue.Empty:
+                break
+    return _pool_prefix
 
 
 def pool_size():
@@ -334,6 +360,7 @@ def pool_created():
 def _ring_acquire(bootstrap):
     """Check out a (ring, segment) pair; None when there is none to give."""
     global _pool_created, _pool_broken
+    prefix = _prefix()  # per process: a forked child must not reuse the parent's
     if _pool_broken:
         return None
     try:
@@ -347,7 +374,7 @@ def _ring_acquire(bootstrap):
         index = _pool_created
         _pool_created += 1
 
-    name = f"{_pool_prefix}_{index}"
+    name = f"{prefix}_{index}"
     try:
         ring = _client.Ring(name)
         ring.start(bootstrap)

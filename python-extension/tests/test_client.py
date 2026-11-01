@@ -333,6 +333,29 @@ class DbapiTest(unittest.TestCase):
 
         cur.execute("DROP TABLE fp_lean_t")
 
+    def test_forked_worker_gets_its_own_ring_name(self):
+        """Module state carries across fork; the ring stem must not. gunicorn and
+        multiprocessing import first and fork after, and two processes on one ring
+        is two background workers on one data segment."""
+        import os
+
+        from fastpostgres import dbapi
+
+        parent = dbapi._prefix()
+        self.assertIn(str(os.getpid()), parent)
+
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.write(w, dbapi._prefix().encode())
+            os._exit(0)
+        os.close(w)
+        child = os.read(r, 64).decode()
+        os.waitpid(pid, 0)
+
+        self.assertNotEqual(parent, child)
+        self.assertIn(str(pid), child)
+
     def test_typed_views_are_zero_copy(self):
         """Consuming a chunk without materialising it: numpy wraps the segment in
         place, text is sliced straight out of the offset table, and a value is
