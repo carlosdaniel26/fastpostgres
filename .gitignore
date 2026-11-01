@@ -15,4 +15,8 @@ __pycache__/
 *.egg-info/
 bench.log
 bench-*.log
-sqlalchemy_chart*.png
+fastpostgres_chart*.png
+codec_chart-*.png
+/improve-*.png
+/*.pdf
+benchmark/codec_transport/build/

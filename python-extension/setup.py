@@ -39,7 +39,11 @@ setup(
             library_dirs=library_dirs,
             libraries=["pq"],
             language="c++",
-            extra_compile_args=["-std=c++17", "-O2"],
+            # -g: line tables for the offline meters (callgrind annotation and
+            # the llvm-mca loop extractor both need them). Debug info only; the
+            # generated code is the -O2 code, so what `just bench` measures is
+            # what `just decode-mca` models.
+            extra_compile_args=["-std=c++17", "-O2", "-g"],
         )
     ],
 )

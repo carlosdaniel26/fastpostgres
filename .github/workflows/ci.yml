@@ -1,0 +1,34 @@
+# Build the image, run the client tests, and check that the benchmark harness
+# runs end to end. The numbers a shared CI runner produces are meaningless, so
+# this job never publishes them: the log is an artifact, and the measurements
+# quoted in the README come from a quiet machine (see docs/METHODOLOGY.md).
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build the dev image
+        run: docker build --target dev -t fastpostgres-dev -f image/Dockerfile .
+
+      - name: client test suite
+        run: >
+          docker run --rm --shm-size=3g fastpostgres-dev
+          python3 -m unittest discover -s tests -v
+
+      - name: benchmark harness smoke test (100K rows; checks it runs, not the numbers)
+        run: |
+          docker run --rm --shm-size=3g fastpostgres-dev benchmarks.sh 100000 \
+            | tee bench-ci.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-ci-log
+          path: bench-ci.log
