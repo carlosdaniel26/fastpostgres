@@ -241,6 +241,20 @@ class DbapiTest(unittest.TestCase):
         self.assertEqual(by, b"\x00\x01\x02\x03\xff")
         self.assertIsNone(null_d)
 
+    def test_shm_read_pipelines_across_batch_boundaries(self):
+        """Reads alternate two data segments and ask for the next batch before
+        decoding the current one; an odd batch count exercises both segments and
+        the final empty one."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT g::int AS id, ('x' || g)::text AS s FROM generate_series(1, 250000) g")
+        rows = cur.fetchall()
+        self.assertEqual(len(rows), 250000)
+        self.assertEqual(rows[0], (1, "x1"))
+        self.assertEqual(rows[99999], (100000, "x100000"))
+        self.assertEqual(rows[100000], (100001, "x100001"))
+        self.assertEqual(rows[-1], (250000, "x250000"))
+        self.assertGreaterEqual(self.conn.shm_reads, 1)
+
     def test_shm_row_path_detoasts(self):
         """The row frame carries PostgreSQL's own tuples, so the worker has to
         resolve what it cannot send in place: a compressed value inline in the

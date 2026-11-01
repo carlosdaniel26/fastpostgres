@@ -419,17 +419,39 @@ class Connection:
         try:
             fields = field_types = None
             rows = []
-            ring.open(seg, sql)
+            # Two segments alternate: the request for the next batch is posted
+            # before the current one is decoded, so the worker's turn is hidden
+            # behind the decode instead of adding to it. One request is in flight
+            # at a time, and a segment is only reused once it has been decoded.
+            segs = (seg + "_a", seg + "_b")
+            pending = False
+            ring.open(seg, sql)  # the stream; its batches go to segs[i]
             try:
+                i = 0
+                ring.post_rows(segs[0], _SHM_BATCH)
+                pending = True
+                n = ring.wait()
+                pending = False
                 while True:
-                    n = ring.next_rows(_SHM_BATCH)
-                    chunk = _client.read_rows(seg)
+                    more = n != 0
+                    if more:
+                        ring.post_rows(segs[(i + 1) & 1], _SHM_BATCH)
+                        pending = True
+                    chunk = _client.read_rows(segs[i & 1])
                     if fields is None:
                         fields, field_types = chunk.fields, chunk.field_types
                     rows.extend(chunk.rows)
-                    if n == 0:
+                    if not more:
                         break
+                    n = ring.wait()
+                    pending = False
+                    i += 1
             finally:
+                if pending:  # an exception after a post: leave the ring balanced
+                    try:
+                        ring.wait()
+                    except Exception:
+                        pass
                 ring.close()
         except Exception:
             return None  # re-run on libpq so the caller sees the real error

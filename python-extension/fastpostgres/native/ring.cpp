@@ -86,10 +86,11 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     return 0;
 }
 
-/* Send one request and block for its response; returns nrows, or -1 with a
- * Python exception set. */
-static long long
-ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
+/* Hand one request to the worker. The response is collected by ring_collect();
+ * one request is in flight at a time, so the ring's single op/arg/nrows slot is
+ * enough, and the caller may do other work before waiting. */
+static int
+ring_send(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
 {
     FastpostgresRing *r = self->ring;
 
@@ -107,11 +108,20 @@ ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint
 
     __atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
     sem_post(&r->req_ready);
+    return 0;
+}
 
-    struct timespec ts;
+/* Block for the response to the request last sent; nrows, or -1 with a Python
+ * exception set. */
+static long long
+ring_collect(RingObject *self)
+{
+    FastpostgresRing *r = self->ring;
+    struct timespec   ts;
+    int               rc;
+
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 10;
-    int                    rc;
     Py_BEGIN_ALLOW_THREADS rc = sem_timedwait(&r->resp_ready, &ts);
     Py_END_ALLOW_THREADS if (rc != 0)
     {
@@ -125,6 +135,15 @@ ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint
         return -1;
     }
     return (long long)r->nrows;
+}
+
+/* Send one request and block for its response; returns nrows, or -1 with a
+ * Python exception set. */
+static long long
+ring_request(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_t batch)
+{
+    if (ring_send(self, op, a1, a2, batch) < 0) return -1;
+    return ring_collect(self);
 }
 
 static PyObject *
@@ -183,7 +202,7 @@ Ring_next(RingObject *self, PyObject *args)
     long long batch = 100000;
     if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
     if (batch <= 0) batch = 100000;
-    long long n = ring_request(self, FASTPOSTGRES_OP_NEXT, self->data, nullptr, (uint32_t)batch);
+    long long n = ring_request(self, FASTPOSTGRES_OP_NEXT, self->data, self->data, (uint32_t)batch);
     if (n < 0) return nullptr;
     return PyLong_FromLongLong(n);
 }
@@ -196,7 +215,36 @@ Ring_next_rows(RingObject *self, PyObject *args)
     long long batch = 100000;
     if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
     if (batch <= 0) batch = 100000;
-    long long n = ring_request(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, nullptr, (uint32_t)batch);
+    long long n = ring_request(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, self->data, (uint32_t)batch);
+    if (n < 0) return nullptr;
+    return PyLong_FromLongLong(n);
+}
+
+/* Send a NEXT for `seg` without waiting: the worker fills that segment while the
+ * caller decodes the previous batch, and wait() collects the answer. One request
+ * is in flight at a time, so the caller must wait before posting the next. */
+static PyObject *
+Ring_post_rows(RingObject *self, PyObject *args)
+{
+    const char *seg;
+    long long   batch = 100000;
+
+    if (!PyArg_ParseTuple(args, "s|L", &seg, &batch)) return nullptr;
+    if (batch <= 0) batch = 100000;
+    if (self->data[0] == 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "ring: open a stream first");
+        return nullptr;
+    }
+    if (ring_send(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, seg, (uint32_t)batch) < 0) return nullptr;
+    Py_RETURN_NONE;
+}
+
+/* Collect the response to the request last sent. */
+static PyObject *
+Ring_wait(RingObject *self, PyObject *)
+{
+    long long n = ring_collect(self);
     if (n < 0) return nullptr;
     return PyLong_FromLongLong(n);
 }
@@ -234,6 +282,9 @@ static PyMethodDef Ring_methods[] = {
     {"next", (PyCFunction)Ring_next, METH_VARARGS, "next(batch=100000) -> int rows (the columnar frame)"},
     {"next_rows", (PyCFunction)Ring_next_rows, METH_VARARGS,
      "next_rows(batch=100000) -> int rows (the row frame; falls back to columnar)"},
+    {"post_rows", (PyCFunction)Ring_post_rows, METH_VARARGS,
+     "post_rows(seg, batch=100000): ask for a batch into seg, do not wait"},
+    {"wait", (PyCFunction)Ring_wait, METH_NOARGS, "wait() -> int rows for the request last sent"},
     {"close", (PyCFunction)Ring_close, METH_NOARGS, "close(): end the stream"},
     {"write", (PyCFunction)Ring_write, METH_VARARGS, "write(seg, table) -> int rows"},
     {"stop", (PyCFunction)Ring_stop, METH_NOARGS, "stop(): ask the worker to exit"},

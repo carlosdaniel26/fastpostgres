@@ -126,17 +126,30 @@ static void ring_set_error(FastpostgresRing *r)
 /* Returns false when the worker should stop. */
 static bool ring_handle(FastpostgresRing *r, const char *ring_name)
 {
-    char  *a1 = (char *)fastpostgres_ring_arg1(r->arg);
-    char  *a2 = (char *)fastpostgres_ring_arg2(r->arg);
-    uint64 n  = 0;
+    char       *a1 = (char *)fastpostgres_ring_arg1(r->arg);
+    char       *a2 = (char *)fastpostgres_ring_arg2(r->arg);
+    const char *data;
+    uint64      n = 0;
 
-    /* never let a data write clobber the ring itself */
-    if ((r->op == FASTPOSTGRES_OP_OPEN || r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_NEXT_ROWS ||
-         r->op == FASTPOSTGRES_OP_CLOSE || r->op == FASTPOSTGRES_OP_WRITE) &&
-        strcmp(a1, ring_name) == 0)
+    /* never let a batch clobber the ring itself: it is published into the segment
+     * the request names — arg 2 for a NEXT, arg 1 for a WRITE */
+    if (r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_NEXT_ROWS)
+        data = a2;
+    else if (r->op == FASTPOSTGRES_OP_WRITE)
+        data = a1;
+    else
+        data = NULL;
+
+    if (data != NULL && strcmp(data, ring_name) == 0)
     {
         r->status = 1;
         strlcpy(r->error, "data segment must differ from the ring", sizeof(r->error));
+        return true;
+    }
+    if (data != NULL && data[0] == 0)
+    {
+        r->status = 1;
+        strlcpy(r->error, "next needs a segment", sizeof(r->error));
         return true;
     }
 
@@ -170,7 +183,7 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_TRY();
             {
-                n         = fastpostgres_stream_next(a1, (int64)r->batch);
+                n         = fastpostgres_stream_next(a1, a2, (int64)r->batch);
                 r->status = 0;
                 r->nrows  = (int64)n;
             }
@@ -191,7 +204,7 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_TRY();
             {
-                n         = fastpostgres_stream_next_rows(a1, (int64)r->batch);
+                n         = fastpostgres_stream_next_rows(a1, a2, (int64)r->batch);
                 r->status = 0;
                 r->nrows  = (int64)n;
             }

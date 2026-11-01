@@ -2,6 +2,10 @@
  * stream.c — pull-driven batches over an SPI cursor. The cursor is a portal:
  * it lives in TopPortalContext and is dropped at COMMIT, so the ring worker
  * keeps a transaction open around the stream.
+ *
+ * The cursor is keyed by the stream name, the batch is published into the
+ * segment the request names: two segments can then alternate, and the client can
+ * decode one while the worker fills the other.
  */
 #include "postgres.h"
 
@@ -17,16 +21,16 @@
 
 #define FASTPOSTGRES_STREAM_PREFIX "fastpostgres_stream_"
 
-static char *cursor_name(const char *seg)
+static char *cursor_name(const char *stream)
 {
-    char *name = palloc(strlen(FASTPOSTGRES_STREAM_PREFIX) + strlen(seg) + 1);
-    sprintf(name, FASTPOSTGRES_STREAM_PREFIX "%s", seg);
+    char *name = palloc(strlen(FASTPOSTGRES_STREAM_PREFIX) + strlen(stream) + 1);
+    sprintf(name, FASTPOSTGRES_STREAM_PREFIX "%s", stream);
     return name;
 }
 
-void fastpostgres_stream_open(const char *seg, const char *query)
+void fastpostgres_stream_open(const char *stream, const char *query)
 {
-    char  *name = cursor_name(seg);
+    char  *name = cursor_name(stream);
     Portal portal;
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_open: SPI_connect failed");
@@ -40,10 +44,10 @@ void fastpostgres_stream_open(const char *seg, const char *query)
     SPI_finish();
 }
 
-uint64 fastpostgres_stream_next(const char *seg, int64 batch)
+uint64 fastpostgres_stream_next(const char *stream, const char *seg, int64 batch)
 {
     char      *path = fastpostgres_shm_path(seg);
-    char      *name = cursor_name(seg);
+    char      *name = cursor_name(stream);
     Portal     portal;
     TupleDesc  td;
     HeapTuple *tuples;
@@ -57,7 +61,7 @@ uint64 fastpostgres_stream_next(const char *seg, int64 batch)
     if (portal == NULL)
     {
         SPI_finish();
-        elog(ERROR, "fastpostgres_stream_next: no open stream for segment \"%s\"", seg);
+        elog(ERROR, "fastpostgres_stream_next: no open stream \"%s\"", stream);
     }
 
     SPI_cursor_fetch(portal, true, (long)batch);
@@ -69,9 +73,9 @@ uint64 fastpostgres_stream_next(const char *seg, int64 batch)
     return nrows;
 }
 
-void fastpostgres_stream_close(const char *seg)
+void fastpostgres_stream_close(const char *stream)
 {
-    char  *name = cursor_name(seg);
+    char  *name = cursor_name(stream);
     Portal portal;
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_close: SPI_connect failed");
@@ -84,10 +88,10 @@ void fastpostgres_stream_close(const char *seg)
 
 /* The same batch as the result tuples themselves: the executor's bytes are
  * copied into the segment once, and the client walks them. */
-uint64 fastpostgres_stream_next_rows(const char *seg, int64 batch)
+uint64 fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch)
 {
     char     *path = fastpostgres_shm_path(seg);
-    char     *name = cursor_name(seg);
+    char     *name = cursor_name(stream);
     Portal    portal;
     TupleDesc td;
     uint64    nrows;
@@ -100,7 +104,7 @@ uint64 fastpostgres_stream_next_rows(const char *seg, int64 batch)
     if (portal == NULL)
     {
         SPI_finish();
-        elog(ERROR, "fastpostgres_stream_next_rows: no open stream for segment \"%s\"", seg);
+        elog(ERROR, "fastpostgres_stream_next_rows: no open stream \"%s\"", stream);
     }
     td = portal->tupDesc;
 
@@ -108,7 +112,7 @@ uint64 fastpostgres_stream_next_rows(const char *seg, int64 batch)
     {
         /* an attribute the client cannot walk in place: the columnar frame */
         SPI_finish();
-        return fastpostgres_stream_next(seg, batch);
+        return fastpostgres_stream_next(stream, seg, batch);
     }
 
     nrows = fastpostgres_rows_fetch(portal, td, path, batch);
