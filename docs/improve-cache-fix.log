@@ -1,0 +1,17 @@
+### CACHE-STAT
+cpu: AMD Ryzen 7 7700 8-Core Processor
+ghz: 3.8
+l3: 32MiB(1instance)
+rows: --nt-ab
+reps: 1000000 (median per counter)
+git: 2f0d97f-dirty
+### END CACHE-STAT
+
+### CACHE-NT-AB
+cpu: AMD Ryzen 7 7700 8-Core Processor
+rows: 1000000
+reps: 1 vs 1+400 (differential, so the generator cancels)
+events: cycles,instructions,L1-dcache-loads,L1-dcache-load-misses,l2_request_g1.rd_blk_l,l2_request_g1.rd_blk_x,l2_request_g1.change_to_x
+### END CACHE-NT-AB
+{"variant": "plain", "rows": 1000000, "reps": 400, "cycles_per_row": 17.04, "l1_loads_per_row": 6.71, "l1_miss_pct": 29.05, "l2_reads_per_row": 1.23, "rfo_requests_per_row": 0.72}
+{"variant": "nt", "rows": 1000000, "reps": 400, "cycles_per_row": 14.03, "l1_loads_per_row": 7.47, "l1_miss_pct": 15.85, "l2_reads_per_row": 1.17, "rfo_requests_per_row": 0.01}

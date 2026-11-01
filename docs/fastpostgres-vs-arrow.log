@@ -1,0 +1,126 @@
+just _run benchmarks.sh 
+just _image
+docker build -q --target dev -t fastpostgres-dev -f image/Dockerfile . >/dev/null
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+docker run --rm --shm-size=3g -e FASTPOSTGRES_OBJ_ARENA= -e SHAPE= -e BENCH_GIT_REV=2f0d97f-dirty fastpostgres-dev benchmarks.sh
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: 2f0d97f-dirty
+shm: 3.0G
+### END ENV
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793385 fallbacks=0
+read_rows: 309.1 cycles/row over 400000 rows (decode 307.0, frame+desc+list 2.0)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793385 fallbacks=0
+read_rows: 321.0 cycles/row over 400000 rows (decode 318.9, frame+desc+list 2.0)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793385 fallbacks=0
+read_rows: 315.8 cycles/row over 400000 rows (decode 313.9, frame+desc+list 1.9)
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793387 fallbacks=0
+read_rows: 307.4 cycles/row over 400001 rows (decode 306.1, frame+desc+list 1.3)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+# shape: bench — short ASCII text, no NULLs
+
+TUPLE READ (rows/s): fastpostgres adbc+tuples  vs arrow    
+  (same output: ADBC's Arrow table converted column-wise with to_pylist)
+  100K            6.42M        1.28M   +401.5%  ok
+  spread: fastpostgres ±2.6%  adbc+tuples ±2.2%
+
+ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
+  (same output: the columnar form each stack lands, one column summed in place)
+  100K            8.20M        2.23M   +268.7%  ok
+  spread: stream()+sum ±2.3%  arrow+sum ±0.7%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  100K     fastpostgres, DBAPI                 6.41M          
+  100K     fastpostgres, stream()+sum          7.79M      +21%
+  100K     fastpostgres, core interface        6.33M       -1%
+  100K     fastpostgres, SQLAlchemy CORE       1.80M      -72%
+  100K     fastpostgres, 4 processes          12.45M      +94%
+  100K     adbc+arrow, arrow+sum               2.27M      -65%
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942985 fallbacks=0
+read_rows: 345.1 cycles/row over 4000000 rows (decode 343.9, frame+desc+list 1.2)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942985 fallbacks=0
+read_rows: 341.4 cycles/row over 4000000 rows (decode 340.3, frame+desc+list 1.1)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942985 fallbacks=0
+read_rows: 346.2 cycles/row over 4000000 rows (decode 345.2, frame+desc+list 0.9)
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942987 fallbacks=0
+read_rows: 361.7 cycles/row over 4000001 rows (decode 360.4, frame+desc+list 1.3)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+# shape: bench — short ASCII text, no NULLs
+
+TUPLE READ (rows/s): fastpostgres adbc+tuples  vs arrow    
+  (same output: ADBC's Arrow table converted column-wise with to_pylist)
+  1M              7.19M        1.27M   +466.7%  ok
+  spread: fastpostgres ±0.6%  adbc+tuples ±1.6%
+
+ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
+  (same output: the columnar form each stack lands, one column summed in place)
+  1M              8.25M        2.28M   +261.4%  ok
+  spread: stream()+sum ±0.5%  arrow+sum ±0.9%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  1M       fastpostgres, DBAPI                 7.27M          
+  1M       fastpostgres, stream()+sum          8.23M      +13%
+  1M       fastpostgres, core interface        7.29M       +0%
+  1M       fastpostgres, SQLAlchemy CORE       1.41M      -81%
+  1M       fastpostgres, 4 processes          13.35M      +84%
+  1M       adbc+arrow, arrow+sum               2.28M      -69%
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=3958 MiB objects=89719497 fallbacks=0
+read_rows: 366.1 cycles/row over 20000000 rows (decode 365.0, frame+desc+list 1.0)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=3958 MiB objects=89719497 fallbacks=0
+read_rows: 369.3 cycles/row over 20000000 rows (decode 368.3, frame+desc+list 1.0)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=3958 MiB objects=89719497 fallbacks=0
+read_rows: 351.5 cycles/row over 20000000 rows (decode 350.7, frame+desc+list 0.8)
+objpool: immortal cap=8192 MiB used=3958 MiB objects=89719499 fallbacks=0
+read_rows: 350.8 cycles/row over 20000001 rows (decode 350.0, frame+desc+list 0.8)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+# shape: bench — short ASCII text, no NULLs
+
+TUPLE READ (rows/s): fastpostgres adbc+tuples  vs arrow    
+  (same output: ADBC's Arrow table converted column-wise with to_pylist)
+  10M             7.25M        1.27M   +472.3%  ok
+  spread: fastpostgres n=1  adbc+tuples n=1
+
+ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
+  (same output: the columnar form each stack lands, one column summed in place)
+  10M             8.32M        2.18M   +281.2%  ok
+  spread: stream()+sum n=1  arrow+sum n=1
+
+PATHS, the same rows (rows/s):                      vs driver read
+  10M      fastpostgres, DBAPI                 7.33M          
+  10M      fastpostgres, stream()+sum          8.42M      +15%
+  10M      fastpostgres, core interface        7.24M       -1%
+  10M      fastpostgres, SQLAlchemy CORE       1.24M      -83%
+  10M      fastpostgres, 4 processes           8.86M      +21%
+  10M      adbc+arrow, arrow+sum               2.24M      -69%
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0

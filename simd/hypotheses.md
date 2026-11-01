@@ -947,3 +947,380 @@ it is three timers and a counter set:
 - `perf stat -e page-faults,L1-dcache-misses,branch-misses` per phase — the H8
   claim is a fault/traffic claim, not an instruction claim, so it will show
   there and not in the instruction counts.
+
+For the decode, the pipeline share is now measured rather than estimated: the
+meters below (`just decode-cycles`, `just decode-ir`, `just decode-mca`). `perf`
+cannot run in the container (Docker's seccomp blocks `perf_event_open`), but it
+runs on the host against these freestanding units: see **Cache behaviour** below
+and `just cache-stat`.
+
+## The meters: callgrind, llvm-mca, and the decode's own counter
+
+Three instruments, now owned by the repo. The jobs live in `image/`, the driver
+in `benchmark/decode_driver.py`, the justfile is the frontend:
+
+| command | what it answers |
+|---|---|
+| `just decode-cycles [rows] [batches] [--shape bench\|mixed]` | the rdtsc line on a fixed shape, no SQLAlchemy in the way: cycles/row for the decode and for the whole `read_rows` |
+| `just decode-ir [rows] [batches] [--shape bench\|mixed]` | callgrind with collection toggled on for `fp_decode_tuples`: Ir/row, D1/LL misses, branch mispredicts, and the IPC against the plain run's cycles — same scope, same run shape, so the division is honest |
+| `just decode-mca [--list \| --line N] [llvm-mca flags]` | llvm-mca 19.1.7 `-mcpu=znver4` on the row loop taken out of the built `.so`: ports, throughput, bottleneck |
+
+What they can and cannot say:
+
+- callgrind **simulates**; it never touches the PMU — which is also why it runs
+  where `perf` cannot (the container). Instruction and mispredict counts are
+  exact; cycle counts it does not report are not.
+- the IPC `decode-ir` prints is against **TSC ticks**. On a boosting part the
+  core clock sits above the TSC clock, so the real IPC is lower than printed —
+  the `ghz:` line rides in the log with everything else, and both numbers in the
+  ratio come from the same driver run.
+- `decode-mca` models an address **span**, not a call graph: it prints how many
+  `call`s the region holds (llvm-mca models them at a flat 100 cycles, and says
+  so) and how many branches leave it (label-only stubs). Branches are not
+  predicted there — that is what callgrind and the rdtsc line are for.
+- the driver is the benchmark's own six-column shape through the ring directly
+  (`_client.read_rows`, one process, one shape). `--shape mixed` moves ~10% of
+  the values to NULL, puts text on both sides of the 126-byte varlena split and
+  a non-ASCII value every eighth row, which is where the null test and the
+  header branches actually run.
+- the extractor models the object that ships. `-g` was added to the client's
+  build for the line tables only, and it is codegen-neutral: built with and
+  without it, the `.text` of the extension hashes the same (27292 bytes, one
+  sha256, this toolchain).
+
+### The decode is not at IPC <= 1.1 (Zen 4, this host)
+
+31,000 rows (10k x 3 plus the warmup batch), arena on, `just decode-ir`:
+
+| | bench shape | mixed shape |
+|---|---|---|
+| decode Ir/row (callgrind) | **724.9** | 799.4 |
+| decode TSC cycles/row (rdtsc) | 244.3 | 321.3 |
+| whole `read_rows` TSC cycles/row | 253.9 | 329.4 |
+| implied IPC at the TSC clock | **2.97** | 2.49 |
+| D1 misses/row (rd + wr) | 6.1 (1.3 + 4.8) | 7.0 (1.9 + 5.1) |
+| LLd misses/row | 4.6 | 5.0 |
+| branches/row (cond + ind) | 132.3 (120.9 + 11.4) | 147.3 (136.2 + 11.1) |
+| mispredicts/row (cond + ind) | **9.83** (4.83 + 5.00) | 12.51 (7.69 + 4.82) |
+| mispredict rate (cond, ind) | 4.0%, 43.9% | 5.6%, 43.4% |
+
+The 334-static-instruction bound did not survive contact: a row executes **725**
+instructions, not at most 334, because the static count took the row loop's own
+address span and both things a row actually runs live outside it — the six kind
+cases (behind the jump table: `just decode-mca --list` shows 17 branches leaving
+the span) and the callees (`PyTuple_New` + `_PyObject_GC_NewVar` are 18% of the
+decode's instructions on their own, and on the mixed shape
+`PyUnicode_FromStringAndSize` appears at 4.2% — the non-ASCII bail-out). So the
+machine is not idling the way an IPC <= 1.1 would mean: at 2.97, a 6-wide core
+is using about half its issue slots.
+
+Where the rest of the cycles go, in the order the meters put them:
+
+- **mispredicts**: 9.83/row, and the *indirect* ones (5.00/row, a 43.9% rate on
+  indirect branches) are the kind dispatch — the jump table the loop runs once
+  per column per row. At 13-20 cycles each, 9.83 mispredicts is 128-197 cycles
+  against a 244-cycle budget.
+- **write misses**: 4.8 of the 6.1 D1 misses/row are writes — every arena cell is
+  a first touch — and 4.6 LLd misses/row is that traffic reaching the LLC/DRAM
+  with no reuse.
+- **issue**: 725 instructions at the core's 6-wide limit would be 121 cycles; the
+  measured 244 leaves ~120 cycles of stalls, which the two rows above absorb
+  almost entirely.
+
+What that does to the levers from "Is the decode instruction-bound? No.":
+
+- instruction removal is worth the *issue* share it removes — 30% of 725
+  instructions is ~36 cycles of a 244-cycle row, ~15% of the decode. Not zero,
+  and not 30%: the old conclusion with a size attached.
+- the branchless varlena/null handling is the right shape of idea, and the mixed
+  shape prices it: making the null test and the header tests data-dependent adds
+  2.9 conditional mispredicts/row and 77 TSC cycles/row.
+- hoisting the **kind dispatch** out of the row loop — the columnar path's
+  `row_column<K>` idea, one specialised loop per column kind — removes the 5.0
+  indirect mispredicts/row. That is bigger than anything the SIMD layer ever
+  moved, and it removes a *branch*, not an instruction.
+
+The mca model agrees on the shape of it: the row loop's 313-instruction span
+models at 182.8 cycles/iteration (IPC 1.73, `Block RThroughput` 85.8), the
+bottleneck being register dependencies (21% of cycles) and port pressure spread
+across every ALU/AGU/LSU port (at most 7.6% on any one) — no single port is the
+wall, and the modelled per-iteration cost sits under the measured 244-311. The
+gap is what simulation cannot see: mispredicts, first-touch writes, callees.
+
+One batch-size note: `just decode-cycles` reads decode 244.3 cycles/row at
+10k-row batches and 311.5 at 100k (301k rows total, arena on) — the same loop
+over a bigger working set, with the arena and the payload falling out of L2/L3.
+The 300 cycles/row recorded earlier was a 100k-row read and still is one. The
+arena A/B is now one command too: `OBJ_ARENA=0 just decode-cycles` reads 676.5
+cycles/row against 313.2 (whole `read_rows`), so the arena is worth 2.2x of the
+read's cycle budget, which is the H11 result with the other end attached.
+
+### The mixed shape earned its keep on the first run
+
+`just decode-ir --shape mixed` never reached callgrind: the decode raised
+`UnicodeDecodeError: 'utf-8' codec can't decode byte 0x79 in position 0`. The
+same values are fine over libpq, fine in the columnar frame, and fine in the row
+frame *while the segment is fresh* — every batch after the first decoded long
+varlenas wrong.
+
+`pg-extension/src/rows.c` builds a tuple for a projection (`heap_fill_tuple`,
+because a virtual slot has no heap tuple to copy), and the filler leaves the
+alignment padding it inserts **unwritten**. In PostgreSQL that is safe for a
+reason above the filler: `heap_form_tuple` hands it a `palloc0` tuple, so the
+pads are zero. The row frame writes into a segment still holding the previous
+batch's bytes, so its pads held whatever was there — a `'y'` (0x79) in the
+failing row. The reader's `fastpostgres_att_pointer_align` (the mirror of
+`att_align_pointer`) reads a *zero* pad as "align this value" and tests
+`*ptr != 0`: a nonzero stale pad skips the alignment, and a >126-byte varlena
+whose 4-byte header then sits one byte off is decoded through its own header
+(`'y' '4' \x02 \x00 \x00`, then the text). The bench never saw it (`'Product ' ||
+g` is short) and neither did `test_shm_row_path_detoasts` (its offsets happen to
+be 4-aligned).
+
+Fixed in `row_build` (zero the whole row, not just the header) with the
+regression test `test_row_frame_built_tuple_padding_is_zero`, which reads two
+batches through a reused segment and compares against libpq. Every number above
+is post-fix.
+
+## Cache behaviour (host `perf`, measured)
+
+### The short version
+
+- **The columnar decode costs 16.7 cycles/row** — 4.4 ns at 3.8 GHz — for six
+  columns and their six aggregates: 6.8 loads per row, 1.95 of them missing L1,
+  1.23 passed on to L3. It is a *stream*: memory-shaped, not instruction-shaped.
+- **The row frame costs 84.6 cycles/row, five times more**, for the same values.
+  A per-value walk needs 97.5 loads/row where a vector scan needs 6.8, and its
+  misses reach L3 one-for-one (3.71 of 3.74) because an 80 MB frame is streamed
+  once and never reused. That is the measured price of a self-describing layout.
+- **It is not a cache-residency story.** Across a 1133× range of payload — 44 KiB,
+  4.6 MiB, 47 MiB — the decode moves 11.4 → 17.2 cycles/row with an essentially
+  flat L1 miss rate. The prefetcher keeps a sequential walk fed, so leaving L3
+  costs 51%, not "everything". At 1M rows ~1.2 lines per row come from L3 or
+  further, and the row still costs 17 cycles: the flatness is the result, not
+  residency.
+- **The transport table is not a cache comparison — that is its finding.** User
+  space sees shared memory touch the bytes twice (write the segment, read it
+  back: 49 L1 misses/KiB) and the socket once (16), because the socket's second
+  pass is a copy in the kernel that user-space counters cannot reach at
+  `perf_event_paranoid=2`. The transport's cost shows where the kernel is:
+  **7.1 µs against 37.1 µs** at p50.
+- **The measurement checks itself.** Two counters had to be thrown out (the Zen 4
+  DRAM-fill events undercount by ~8×; `dTLB-loads` is not all loads), and the
+  decodes are differentials because the dataset generator is 96% of a cell's
+  cycles. The differential reproduces the cell's own clock: 16.7 measured against
+  18.2 cycles/row implied by 4.8 ms per 1M rows. Callgrind's simulated 4.6 LLd
+  misses/row for `fp_decode_tuples` agrees with perf's 3.7/row for the C++ row
+  frame.
+
+The H8 item in *What would close the numbers* asked for cache counters and this
+document kept answering that perf could not run. It cannot run *in the container* —
+there is no `perf` in the dev image and Docker's seccomp blocks `perf_event_open` —
+but the units under test are freestanding C++ that runs on the host, and
+`perf_event_paranoid=2` allows a user to count its own processes. That is what
+`just cache-stat [rows] [reps]` does; `docs/cache-stat.log` is one committed run,
+and the numbers below are that run (four runs agree within ±5% on cycles/row).
+
+### Two counters had to be thrown out, and one trick was necessary
+
+`perf list` offering an event is not evidence that it counts. On this Zen 4:
+
+- **The DRAM-fill events are wrong by ~8×.** Against a 512 MB stream that must
+  produce 16.8M fills (8.4M write-allocate + 8.4M read of lines that cannot fit a
+  32 MiB L3), `ls_any_fills_from_sys.dram_io_all` reports **2.18M**, and
+  `ls_dmnd_fills_from_sys.dram_io_near` 1.93M of them. No DRAM traffic claim in
+  this repository rests on those events.
+- **`dTLB-loads` is not "all loads."** 537M loads in the row-frame cell, 14,696
+  counted: it is a walk-related counter, so only `dTLB-load-misses` (page walks)
+  is used, and no ratio is taken against it.
+- **What does validate, exactly**: `L1-dcache-loads` 16.8M,
+  `L1-dcache-load-misses` 16.5M and `l2_request_g1.rd_blk_l` 8.1M on that same
+  512 MB stream. Those three plus `cycles` and `instructions` are the whole event
+  set — six events fit the PMU, so these are counts, not multiplexed estimates
+  (the earlier ten-event set ran each counter only ~50% of the time and perf
+  scaled it).
+
+The trick is a **differential**. `fpg_bench` builds its 1M-row dataset (~1.4 s)
+before the timed region (4.8 ms), so counting the process measures the generator:
+442 cycles/row, 96% of it unrelated to the codec. Each cell therefore runs twice,
+with 1 repetition and with 401, and the difference is the codec's own work. The
+check that it is right: the differential reports **16.7 cycles/row** for
+`fpcolumn`, and the cell's own clock reports 4.8 ms per 1M rows — 18.2 cycles at
+3.8 GHz. Two independent methods, 9% apart.
+
+### The decodes, per row
+
+What the counters below cover is the **pair** — `--reps` repeats encode and decode
+together — so they are per row of `encode + decode + aggregates`. The tool times
+the two phases separately, which is how they get split:
+
+| cell | cycles/r | IPC | L1 miss% | L1 loads/r | L1 misses/r | L2→L3/r |
+|---|---|---|---|---|---|---|
+| `fpcolumn` (encode + decode + 6 aggregates) | **16.7** | 1.29 | 28.8 | 6.8 | 1.95 | 1.23 |
+| `fprows` (encode + decode, tuple bytes) | **84.6** | 4.41 | 3.83 | 97.5 | 3.74 | 3.71 |
+
+`fpcolumn` splits 11.79 cycles/row encode and 6.61 decode by the cell's own
+timers (3.103 ms and 1.740 ms per 1M rows), against 18.40 for the pair — which
+the differential reports as 16.7, so the counters agree with the clock to 9%.
+
+1. **The columnar path is a vector scan.** Across the pair it needs 6.8 loads per
+   row for six columns and ~49.5 payload bytes per row; 1.95 of those loads miss
+   L1 and 1.23 are passed on to L3. That is ~125 B fetched per 49.5 B of row,
+   which is what a bulk copy into a fresh buffer plus a sequential read back
+   costs — not what a bad layout costs.
+2. **The row frame pays 5× for being self-describing** (84.6 against 16.7
+   cycles/row, same bytes). It needs 97.5 loads per row instead of 6.8, because a
+   per-value walk cannot be vectorized: 14× the loads, and IPC 4.41 against
+   1.29 — instruction-shaped where the columnar path is memory-shaped. Its misses
+   reach L3 almost one-for-one (3.71 of 3.74): an 80 MB frame is streamed once
+   and never reused, so L2 has nothing to catch.
+3. **The simulator and the silicon agree.** Callgrind's `--cache-sim` put
+   `fp_decode_tuples` (the client's Python-tuple decode) at 4.6 LLd misses/row;
+   perf measures 3.7 L1 misses/row for the C++ row frame, which decodes the same
+   bytes without building Python objects. Two tools, two years of provenance,
+   same shape.
+
+### The working-set sweep, and a claim it kills
+
+`fpcolumn` at three payload sizes, the same code, only the row count changing:
+
+| rows | payload | cycles/r | L1 miss% | L1 misses/r | L2→L3/r |
+|---|---|---|---|---|---|
+| 1,000 | 42.7 KiB (L1/L2-sized) | 11.4 | 23.5 | 1.65 | 1.04 |
+| 100,000 | 4.6 MiB (L3-sized) | 10.2 | 29.6 | 1.92 | 1.17 |
+| 1,000,000 | 47.2 MiB (1.5× L3) | 17.2 | 29.0 | 1.95 | 1.23 |
+
+The payload grows 1133× across those rows and the cost per row moves 51%, with the
+L1 miss rate essentially flat. **The decode is not waiting on the cache
+hierarchy.** It is a sequential stream the prefetcher keeps fed, which is why
+leaving L3 entirely costs so little. The corollary cuts against the flattering
+version of this repository's own story: "it is fast because it all fits in cache"
+is **not** what these numbers say, and for a 47 MB payload it cannot be — at 1M
+rows about 1.2 lines per row come from L3 or beyond, and it still costs 17 cycles.
+
+### The transports, per KiB — and the blind spot that makes this table honest
+
+| cell | cycles/KiB | IPC | L1 miss% | L1 misses/KiB | L2→L3/KiB | walks/KiB | p50 |
+|---|---|---|---|---|---|---|---|
+| shared memory | 549.1 | 3.44 | 14.2 | 48.9 | 32.5 | 0.66 | **7.1 µs** |
+| UNIX socket | 410.8 | 4.44 | 6.2 | 16.5 | 17.5 | 0.33 | **37.1 µs** |
+
+This table looks like the socket wins, and it is the opposite of that. The events
+are user-space only (they carry a `:u` qualifier). Shared memory does **two**
+passes over the bytes in user space — the producer writes the segment, the
+consumer reads it back — so its L1 misses are real application work that the
+socket does not do *in user space*: the socket delegates that second pass to the
+kernel, where these counters cannot see it at `perf_event_paranoid=2`. The table
+is therefore not a comparison of the transports; it is a picture of the copy the
+socket hides, seen from the one vantage point that cannot see it. The transport's
+cost shows up where the kernel is: 7.1 µs against 37.1 µs at p50, and `walks/KiB`
+0.66 against 0.33 — the shared segment's fresh pages being faulted in by both
+processes, the one-time price of a transport that has pages at all.
+
+### Where the headroom is, and where it is not
+
+The counters say the codec's memory behaviour is finished; the timers and the
+client's own pricer say where a row's wall clock actually goes. Per row at 1M:
+
+| phase | cycles/row | bytes touched | effective rate | at a limit? |
+|---|---|---|---|---|
+| columnar encode | 11.8 | 99 MB (read 49.5 + write 49.5) | 32 GB/s | DRAM — yes |
+| columnar decode + 6 aggregates | 6.6 | 25 MB (six streams) | 14.7 GB/s | single-core stream bandwidth — yes |
+| the client's row decode (`fp_decode_tuples`) | 307 | 80 MB frame | ~1 GB/s | no — **this is the room** |
+| — of which the C++ walk alone | 84.6 | — | — | — |
+
+Three levers, in order of measured size at system level (7.19M rows/s = 139 ns
+per delivered row):
+
+1. **Parallelism: +86% measured** (4 processes, 13.35M rows/s at 1M). It is the
+   only lever larger than the codec itself, and the design already leans on it.
+2. **The Python layer: 81 ns of the 139 ns.** The client's decode is 307
+   cycles/row; walking the same bytes in C++ is 22 ns (84.6 cycles). The ~59 ns
+   between them is CPython — tuple and object construction, text copies,
+   refcounts — and each object is already at CPython's floor, so the lever is not
+   building them, not building them faster. Measured: the columnar path (no
+   per-row objects) reads 8.25M rows/s against 7.19M, **+15%**.
+3. **Encode: non-temporal stores.** The encode moves 99 MB of traffic for 49.5 MB
+   of payload, because each destination line is read before it is overwritten
+   (RFO). NT stores would remove that read: ~2.1 ms instead of 3.1 ms if the
+   phase is bandwidth-bound end to end. In the matrix that trades against the
+   decode, which reads the payload back immediately and would find it out of
+   cache; in the real system the reader is another process on another core and
+   the payload is 47 MB, so it is coming from DRAM either way. Worth measuring,
+   not worth assuming.
+
+What these counters **rule out** — most of their value:
+
+- **Cache residency.** 16.7 cycles/row whether the payload is 44 KiB or 47 MiB
+  (+51% across 1133×). There is no "make it fit in L3" lever.
+- **Instruction-level work.** IPC 1.29 with 6.8 loads/row: bandwidth-shaped. The
+  llvm-mca result earlier in this document said the same from the other side.
+- **TLB and page size.** Page walks are 0.00/row in the steady state — nothing new
+  is faulted when the same buffer is reused — so THP cannot help the codec.
+- **The transport, single-threaded.** 11.18 GB/s for two passes over 47 MB is
+  about 2 × single-core stream bandwidth; the floor is one write plus one read.
+
+### The improvements, measured
+
+The three candidates above were implemented and A/B'd, one per change, each
+smoke-tested alone and then measured sequentially on a quiet machine. Two are
+numbers worth keeping; the third is a negative result about the harness.
+
+**Non-temporal stores in the encoder** (`fpg_bench --nt-store`, off by default).
+Only the store instruction differs, and the payload is byte-identical: `cmp` on
+the emitted files over twelve row counts, plus a gdb breakpoint proving the
+streamed path only runs with the flag.
+
+| 1M rows, reps 5, three alternating pairs | encode | decode |
+|---|---|---|
+| plain stores | 2.95 / 2.83 / 3.21 ms → **2.95** | 1.83 ms |
+| non-temporal | 1.98 / 1.93 / 1.97 ms → **1.97** | 1.72 ms |
+
+**−33% on encode, and the decode does not pay for it.** Removing the destination's
+read-for-ownership is free to the reader here because a 47 MB payload is coming
+from DRAM either way against this box's 32 MB L3 — the in-process matrix predicts
+a trade that the focused runs do not show (the decode moved 1.83 → 1.72, inside the
+runs' spread).
+
+The mechanism shows up in the counters (`just cache-stat --nt-ab`, the same
+differential, plus the two L2 RFO events):
+
+| per row | before the fix | after the fix |
+|---|---|---|
+| store read-for-ownership requests | **0.720** | **0.010** (−99%) |
+| L2 read requests | 1.23 | 1.17 |
+| L1 miss rate | 29.1% | 15.8% (−45%) |
+| cycles | 17.0 | 14.0 (−18%) |
+
+0.72 RFO requests per row is 46 B of pointless read traffic per row — the whole
+destination stream being fetched before it is overwritten — and it goes to
+essentially zero. The L1 miss rate halves because a store that allocates no longer
+counts as a miss. Chart: `assets/improve-cache-fix.png`.
+
+**Chunks in flight on the shared-memory transport** (`transport_bench
+--in-flight N`, medians of three runs per setting):
+
+| chunks in flight | GB/s | vs 1 | p50 |
+|---|---|---|---|
+| 1 | 11.1 | — | 5 µs |
+| 2 | **20.0** | **+81%** | 10 µs |
+| 4 | 16.6 | +50% | 121 µs |
+| 8 | 16.9 | +52% | 303 µs |
+| 16 | 13.4 | +21% | 720 µs |
+
+A window buys throughput immediately and then gives it back: **+81% at two chunks
+in flight**, and beyond two the measured p50 grows about linearly with N, because
+what it measures from then on is queueing behind the chunk ahead. The socket's
+"second mode" is this effect with the queue fixed at one. The honest reading is
+that the ring's one-chunk-at-a-time protocol leaves roughly half the transport's
+throughput on the table, and the price of taking it is tail latency. The default
+stays 1: the query path is not transport-bound today.
+
+**The client's row walk, specialized per column kind in blocks of eight** (same
+output, 28/28 tests pass): 321.7 → **311.2 cycles/row** on the bench shape (−3%),
+and 255.3 → **206.9** on the mixed shape the test suite happens to decode (−19%).
+That is the decode alone. At query level it is not resolvable: the system-level A/B
+moved this repository's paths **−7% and +11%** on shapes the change did and did not
+touch, while the ADBC control held **±2%** — so that harness' resolution is about
+±10% and a 3% client-side change is inside it. The charts and every log are in
+`docs/improve-*.log`, rendered by `just ab-charts`.

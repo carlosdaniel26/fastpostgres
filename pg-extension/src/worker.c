@@ -6,9 +6,11 @@
  * semaphores), calls fastpostgres_ring_start(seg) once over libpq, then talks to this
  * worker only through the ring.
  *
- * SECURITY: the ring is an SQL-execution endpoint. Keep /dev/shm/<seg> mode
- * 0600 owned by the postgres user; any process running as that user can execute
- * SQL through it. Not for production.
+ * SECURITY: the ring is an SQL-execution endpoint — any local process that can
+ * open /dev/shm/<seg> can execute SQL through it. The client creates the segment
+ * 0600; fastpostgres_shm_map_rw widens it to 0666 (shm.c) so a client running as
+ * a different user can map it. Keep the segment name out of shared trees and
+ * treat the segment itself as the boundary. Not for production.
  */
 #include "postgres.h"
 
