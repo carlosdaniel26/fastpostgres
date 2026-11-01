@@ -855,6 +855,24 @@ VMA's `ShmemPmdMapped` is per-VMA, so the reader would map 4 KiB PTEs even into
 huge pages). Whatever makes a small batch decode at 57 ns/row instead of 121, it
 is not the reader's TLB. Reverted rather than kept on a theory.
 
+### Is the decode instruction-bound? No.
+
+`fp_objpool_report` now prints the row decode in TSC cycles (two `rdtsc` around
+`fp_decode_tuples`, once per batch): **300 cycles/row** on the benchmark's shape,
+against a 159.7 ns/row read - so the decode is about 79 ns of it and the other
+~80 ns is the frame parse, the mapping lookup and the `Result`.
+
+The hot function's row loop is 334 static instructions; a row runs only its own
+six kind cases, so the dynamic count is lower. Taking the static figure as a hard
+upper bound puts **IPC at <= 1.1** on a core that issues four to six per cycle:
+at least three quarters of the decode's cycles are stalls, not issue slots. The
+other two experiments said the same thing from the other side - removing the
+per-value call (the hoist) moved nothing on CORE, removing the allocator (the
+immortal cell) took the decode from 89.9 to 20.5 ns/row. An ideal hand-written
+kernel that removed 30% of the instructions would be worth ~5% of the decode:
+1-2% of a read, half a percent of CORE. That is also the ceiling for "pass values
+in registers", before the fact that registers cannot cross a process boundary.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
