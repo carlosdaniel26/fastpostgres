@@ -2,7 +2,8 @@
 #
 #   just test                 the Python client's test suite
 #   just bench [nrows ...]    fast-postgres vs ADBC + Arrow read benchmarks
-#   just demo [nrows]         the psycopg2 vs fastpostgres driver swap
+#   just pgcache-bench [args] fast-postgres vs a result cache (PgCache), same rows
+#   just demo [nrows]         the psycopg 3 vs fastpostgres driver swap
 #   just charts [nrows ...]   run the benchmarks and render the charts
 #   just decode-cycles [args] the row decode's cycles/row, on a fixed shape
 #   just decode-ir [args]     the decode's dynamic instructions + miss profile
@@ -67,7 +68,7 @@ test:
 bench *sizes:
     just _run benchmarks.sh {{sizes}}
 
-# the same SQLAlchemy app on psycopg2 and on fastpostgres
+# the same SQLAlchemy app on psycopg 3 and on fastpostgres
 demo n="5000":
     just _run demo.sh {{n}}
 
@@ -105,6 +106,16 @@ codec-transport *args:
 # charts for the matrix log: format cost and transport cost, side by side
 codec-charts *args:
     tools/codec_charts.py {{args}}
+
+# fastpostgres against a result cache (PgCache) in front of the same server: the
+# two regimes (large result, small expensive result) and the cache's two taxes
+# (cold fill, pass-through). Redirect it to docs/fastpostgres-vs-pgcache.log.
+pgcache-bench *args:
+    tools/pgcache_bench.sh {{args}}
+
+# the chart for that comparison: the full scan against the aggregate, one image
+pgcache-charts *args:
+    tools/pgcache_charts.py {{args}}
 
 # drop the built images
 clean:

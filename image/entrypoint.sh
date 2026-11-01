@@ -13,10 +13,13 @@ rm -rf "$PGDATA"
 mkdir -p "$PGDATA"
 chown -R postgres:postgres "$PGDATA"
 
-# listen on 127.0.0.1 (tcp) and /tmp (unix socket), default postgres settings
+# listen on 127.0.0.1 (tcp) and /tmp (unix socket), default postgres settings.
+# PG_OPTS adds server settings a single run needs (the PgCache comparison asks
+# for wal_level=logical and the replication slots it implies); empty otherwise,
+# so every other recipe starts the server it always did.
 gosu postgres initdb -D "$PGDATA" >/dev/null
 gosu postgres pg_ctl -D "$PGDATA" -l /tmp/pg.log \
-  -o "-c listen_addresses='127.0.0.1' -c unix_socket_directories='/tmp'" -w start >/dev/null
+  -o "-c listen_addresses='127.0.0.1' -c unix_socket_directories='/tmp' ${PG_OPTS:-}" -w start >/dev/null
 gosu postgres psql -h /tmp -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION fastpostgres;" >/dev/null
 
