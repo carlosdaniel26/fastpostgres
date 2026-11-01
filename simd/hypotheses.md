@@ -642,6 +642,35 @@ per-call work (a statement built per call, a cache lookup, the Result object),
 not per row. One connection, reused, and nothing thread-safe: a read path needs
 neither, and a libpq connect per `engine.connect()` would cost milliseconds.
 
+### The arena was measuring itself
+
+The benchmark's default run reads 100K, 1M and 10M in one process, and the object
+arena is append-only — so by the time that session's CORE phase runs, the ORM
+phases have filled it. The last such run logged **107.7M fallbacks**, and CORE
+read the same 1.73M rows/s at 100K that a pre-row-frame chart shows, because every
+value after the arena tipped over was built by the normal constructors. The chart
+was measuring the pool, not the driver.
+
+Two changes: `benchmarks.sh` runs one process per size, so each load gets a fresh
+arena; and the arena's default is no longer 512 MiB but half the cgroup limit
+(physical memory when the cgroup is unlimited), capped at 8 GiB — what the H11
+note asked for, still overridable with `FASTPOSTGRES_OBJ_ARENA`.
+
+Re-measured, default environment, one process per size, **0 fallbacks everywhere**:
+
+| load | arena used | CORE, psycopg2 -> fastpostgres | ORM, psycopg2 -> fastpostgres |
+|---|---|---|---|
+| 100K | 118 MiB | 1.03M -> **1.89M** (+84%) | 0.16M -> 0.18M (+10%) |
+| 1M | 1.2 GiB | 0.84M -> **1.46M** (+74%) | 0.15M -> 0.15M (+2%) |
+| 10M | 3.9 GiB | 0.86M -> **1.68M** (+96%) | 0.14M -> 0.15M (+5%) |
+
+The 10M row is the one to read twice: psycopg2 sheds a fifth of its rate between
+1M and 10M while ours gains, so the gap *widens* with size instead of narrowing.
+The arena footprint — 3.9 GiB for 89.7M objects — is what the cap has to cover,
+which is why sizing it from the machine came before quoting the chart. The chart
+now carries that footprint in its footer (and says when a run exhausted it), so
+the flattening curve has its cause next to it.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
