@@ -718,6 +718,33 @@ alternating data segments, with the next request issued before the current batch
 is decoded, would hide the worker's turn behind the decode — ~1.2x on a read, ~5%
 on CORE — with no threads and no GIL to fight.
 
+### What is actually parallelizable, per row
+
+The phase split again, with each stage's legal parallel mechanism and what it could
+take out of a CORE row (100k rows; copy work is the bytes moved over the measured
+16.8 GB/s single-core and 24 GB/s four-thread memcpy):
+
+| stage | ns/row | share of CORE | legal parallelism | best case |
+|---|---|---|---|---|
+| PostgreSQL executor + our tuple write | 38.6 | 7% | processes only, one worker per slice | 38.6 -> 9.7 at 4: **-5.3%** |
+| client decode (C++, GIL held) | 133 | 25% | value copies only (~11 ns of it) | **-1%** |
+| SQLAlchemy CORE (Result / Row) | 375 | 69% | none: its own glue | 0 |
+| *of which, copy work anywhere in the read* | ~25 | 4.6% | threads (1.43x measured) | **-1.4%** |
+
+Which reverses the intuition and is worth stating plainly: **inside one read there
+is no mass parallelism to win.** The copy work is 15% of a driver-level read (25 of
+167 ns), and threading it perfectly saves 1.4% of CORE. The whole worker turn is
+7% of CORE, so sharding a single query across four workers is 1.05x on CORE
+(1.21x on the driver-level read) — and pipelining two segments captures that same
+5% without sharded portals, so it dominates the sharded reader for one query. The
+ORM row adds ~4.9 us/row of SQLAlchemy hydration above that, all of it Python and
+none of it ours to parallelize.
+
+The 3.0x is real, but it is *work* parallelism: four independent reads in four
+processes, each with its own GIL, its own worker and its own segment. That is the
+lever for "tons of loops and batches", and it needs no new mechanism — only
+`FASTPOSTGRES_SHM_POOL` x processes <= 7, or a larger `max_worker_processes`.
+
 ### The copies are not the bottleneck
 
 "Parallelise the mass copies" is worth testing with bandwidth rather than cores: a
@@ -743,10 +770,11 @@ So the tempting version of the idea does not pay: threading the client's value
 stores would win at most the copy share of a decode (~11 ns of 130 for the arena
 writes, before per-thread arenas), and on the server there are no threads to have
 at all, because a PostgreSQL backend must not use them. Extreme throughput there
-is sharding the *work* across ring workers (measured 2.4x at four, capped at seven
-by `max_worker_processes`), not spreading one copy over cores. The only copy-heavy
-path in the tree is ingest, and it has no client-side producer since the
-generators were deleted.
+is *work* parallelism across concurrent queries — separate ring workers, measured
+at 2.4x on four processes and capped at seven by `max_worker_processes` — not
+spreading one copy over cores, and not sharding one query either, which the table
+above prices at 1.05x. The only copy-heavy path in the tree is ingest, and it has
+no client-side producer since the generators were deleted.
 
 ## Page mechanisms (measured on this host)
 
