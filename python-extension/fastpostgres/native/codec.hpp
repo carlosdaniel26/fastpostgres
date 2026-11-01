@@ -45,3 +45,7 @@ bool fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t 
  * every value is decoded where it lies. Returns false with an exception set. */
 bool fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd,
                       PyObject *rows);
+
+/* Account a whole read_rows() call (TSC cycles and rows) next to the decode's own
+ * count, so the report can say what the frame and the list cost on top of it. */
+void fp_stats_add(unsigned long long cycles, unsigned long long rows);

@@ -348,6 +348,8 @@ static Py_ssize_t g_pool_immortal;
  * cannot run in the container, so this stands in for it). */
 static unsigned long long g_dec_cycles;
 static unsigned long long g_dec_rows;
+static unsigned long long g_read_cycles;
+static unsigned long long g_read_rows;
 static size_t     g_pool_births;
 static size_t     g_pool_fallbacks;
 static uintptr_t  g_pool_long_tag[4][2]; /* [ndigits][negative] */
@@ -699,9 +701,11 @@ fp_objpool_report(void)
     fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
             g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
             g_pool_on ? "" : " (values use the normal constructors)");
-    if (g_dec_rows != 0)
-        fprintf(stderr, "decode: %.1f cycles/row over %llu rows\n", (double)g_dec_cycles / (double)g_dec_rows,
-                g_dec_rows);
+    if (g_read_rows != 0)
+        fprintf(stderr, "read_rows: %.1f cycles/row over %llu rows (decode %.1f, frame+desc+list %.1f)\n",
+                (double)g_read_cycles / (double)g_read_rows, g_read_rows,
+                (double)g_dec_cycles / (double)g_dec_rows,
+                (double)(g_read_cycles - g_dec_cycles) / (double)g_read_rows);
 }
 
 /* ---- decoding a whole batch ----------------------------------------------
@@ -776,6 +780,13 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
             return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         }
     }
+}
+
+void
+fp_stats_add(unsigned long long cycles, unsigned long long rows)
+{
+    g_read_cycles += cycles;
+    g_read_rows += rows;
 }
 
 PyObject *

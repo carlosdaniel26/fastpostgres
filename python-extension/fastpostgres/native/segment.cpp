@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include <x86intrin.h>
+
 #include "codec.hpp"
 #include "fastpostgres_shm.h"
 #include "shm_map.h"
@@ -171,8 +173,9 @@ segment_read_rows(PyObject *, PyObject *args)
     const char *name;
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
 
-    uint64_t       payload_len = 0;
-    const uint8_t *payload     = segment_payload(name, &payload_len);
+    uint64_t           payload_len = 0;
+    unsigned long long t0          = __rdtsc();
+    const uint8_t     *payload     = segment_payload(name, &payload_len);
     if (payload == nullptr) return nullptr;
 
     FastpostgresRowsReader rrd;
@@ -199,6 +202,7 @@ segment_read_rows(PyObject *, PyObject *args)
             Py_DECREF(rows);
             return nullptr;
         }
+        fp_stats_add(__rdtsc() - t0, (unsigned long long)PyList_GET_SIZE(rows));
         return result_from(cols, (uint64_t)PyList_GET_SIZE(rows), rows);
     }
 
