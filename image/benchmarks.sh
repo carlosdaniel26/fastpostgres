@@ -5,6 +5,16 @@
 # Run the SQLAlchemy driver benchmark; tools/charts.py parses the log it prints.
 #
 #   benchmarks.sh [nrows ...]    row counts default to the benchmark's own
+#
+# One process per size: the client's object arena is append-only and process-
+# scoped, so a single session that reads several sizes measures how the arena
+# filled, not the driver. A fresh process per size gives each its own.
 set -euo pipefail
 
-python3 /src/benchmark/sqlalchemy_bench.py "$@"
+if [ "$#" -eq 0 ]; then
+    set -- 100000 1000000 10000000
+fi
+
+for n in "$@"; do
+    python3 /src/benchmark/sqlalchemy_bench.py "$n"
+done

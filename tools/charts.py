@@ -221,11 +221,13 @@ def headline_compare(prefix, data, target):
     return f"{prefix} — unchanged before vs after"
 
 
-def plot_compare(db, da, env, scale):
+def plot_compare(db, da, env, scale, note=""):
     """One before/after image per phase: grey for before, the accent for after,
     which is all the two-tone key needs — `before`/`after` are the two series."""
     series, colors, labels = ("before", "after"), (GREY[0], ACCENT), ("before", "after")
     footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
+    if note:
+        footer += " · " + note
     titles = {"orm": "ORM read: before vs after", "core": "Core read: before vs after"}
 
     for section in ("orm", "core"):
@@ -242,7 +244,7 @@ def plot_compare(db, da, env, scale):
         save(fig, path, len(data))
 
 
-def compare(before_text, after_text, env=None, scale="auto"):
+def compare(before_text, after_text, env=None, scale="auto", note=""):
     """Before/after deltas for the same loads — what a hot-path change is for."""
     db = parse_sections(before_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
     da = parse_sections(after_text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
@@ -260,7 +262,7 @@ def compare(before_text, after_text, env=None, scale="auto"):
             print(f"  {section:<5} {load:>4}: " + "   ".join(cells))
 
     print()
-    plot_compare(db, da, env if env is not None else parse_env_text(after_text), scale)
+    plot_compare(db, da, env if env is not None else parse_env_text(after_text), scale, note)
 
 
 def spec(env, keys):
@@ -276,10 +278,45 @@ DRIVER_KEYS = [
     ("python", "Python {}"), ("sqlalchemy", "SQLAlchemy {}"),
 ]
 
+# The client's one object-arena summary line: it is the reason a curve flattens
+# past a few hundred thousand rows, so it belongs next to the numbers.
+_OBJPOOL = re.compile(r"^objpool: (\S+) cap=(\d+) MiB used=(\d+) MiB objects=(\d+) fallbacks=(\d+)")
 
-def plot_drivers(text, env, scale):
+
+def parse_objpool(text):
+    """The client's arena summary, one line per benchmark process: the largest
+    cap and the largest footprint, and whether any of them ran out."""
+    pools = []
+    for line in text.splitlines():
+        m = _OBJPOOL.match(line)
+        if m:
+            mode, cap, used, objects, fallbacks = m.groups()
+            pools.append({"mode": mode, "cap": int(cap), "used": int(used), "fallbacks": int(fallbacks)})
+    if not pools:
+        return None
+    return {
+        "mode": "exhausted" if any(p["mode"] == "exhausted" for p in pools) else pools[0]["mode"],
+        "cap": max(p["cap"] for p in pools),
+        "used": max(p["used"] for p in pools),
+        "fallbacks": sum(p["fallbacks"] for p in pools),
+    }
+
+
+def pool_note(pool):
+    if not pool:
+        return ""
+    if pool["mode"] == "exhausted":
+        return f"object arena exhausted at {pool['cap']} MiB"
+    if pool["cap"] >= 1024:
+        return f"object arena {pool['used'] / 1024:.1f}/{pool['cap'] / 1024:.0f} GiB"
+    return f"object arena {pool['used']}/{pool['cap']} MiB"
+
+
+def plot_drivers(text, env, scale, note=""):
     data = parse_sections(text, DRIVER_SECTIONS, DRIVER_ROW, (3, 4))
     footer = spec(env, DRIVER_KEYS) or "SQLAlchemy driver benchmark"
+    if note:
+        footer += " · " + note
     titles = {"orm": "ORM read: select(Model) -> Python objects",
               "core": "Core read: select(cols) -> Row tuples"}
     for section in ("orm", "core"):
@@ -316,9 +353,10 @@ def main():
 
     print()
     env = parse_env_text(text)
-    plot_drivers(text, env, args.scale)
+    note = pool_note(parse_objpool(text))
+    plot_drivers(text, env, args.scale, note)
     if args.compare:
-        compare(Path(args.compare).read_text(), text, env, args.scale)
+        compare(Path(args.compare).read_text(), text, env, args.scale, note)
 
 
 def parse_env_text(text):
