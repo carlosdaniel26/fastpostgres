@@ -840,6 +840,21 @@ server's budget is what blocks a ring, the process now warns once and reads over
 libpq — instead of the silence the 8-process measurement showed (slower than six,
 no diagnostic). What it resolves to here: machine 6, server 7 free, pool 6.
 
+### Shmem THP: it works, before the first touch, and it is not the reader's problem
+
+The page section below measured `ShmemPmdMapped` at 0 and concluded shmem THP was
+out of reach. That is true *after* the pages exist; it is not true before. A
+32 MiB tmpfs file, advised and then written, comes back **100% PMD-backed**
+(`ShmemPmdMapped: 32768 kB`), and `memfd_create` behaves identically - on this
+host `/dev/shm` is mounted `huge=advise`, and the worker already advises its RW
+mapping before writing, so the segment's pages are probably huge already.
+
+Advising the *reader's* mapping as well was measured and changed nothing: client
+decode 121.8-156.5 ns/row against 118.4-126.8 before (the reasoning was that a
+VMA's `ShmemPmdMapped` is per-VMA, so the reader would map 4 KiB PTEs even into
+huge pages). Whatever makes a small batch decode at 57 ns/row instead of 121, it
+is not the reader's TLB. Reverted rather than kept on a theory.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
