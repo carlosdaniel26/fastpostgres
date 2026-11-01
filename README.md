@@ -14,10 +14,10 @@ their writer live in one header, `pg-extension/fastpostgres_shm.h`.
 
 ![SQLAlchemy Core reads](assets/core-read.png)
 
-8-core container, PostgreSQL 18.6, 100K / 1M / 10M rows. The Core path lands
-74–96% ahead of psycopg2 and the gap widens with the load; the ORM lands 2–10%,
-because there SQLAlchemy's own hydration is ~4 µs of a ~5.5 µs row and no driver
-can move it.
+8-core container, PostgreSQL 18.6, 100K / 1M / 10M rows, one process per load.
+The Core path lands 73–96% ahead of psycopg2 and the gap widens with the load;
+the ORM lands 1–10%, because there SQLAlchemy's own hydration is ~4 µs of a
+~5.5 µs row and no driver can move it.
 
 ## Usage
 
