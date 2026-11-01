@@ -13,6 +13,7 @@
 
 #include <sys/mman.h>
 #include <unistd.h>
+#include <x86intrin.h>
 
 #include <datetime.h>
 
@@ -341,6 +342,12 @@ static size_t     g_pool_used;
 static bool       g_pool_on;
 static bool       g_pool_exhausted;
 static Py_ssize_t g_pool_immortal;
+
+/* The row decode's cost in TSC cycles: two rdtsc per batch, free at this scale,
+ * and the one number that says whether the loop is worth hand-writing (perf
+ * cannot run in the container, so this stands in for it). */
+static unsigned long long g_dec_cycles;
+static unsigned long long g_dec_rows;
 static size_t     g_pool_births;
 static size_t     g_pool_fallbacks;
 static uintptr_t  g_pool_long_tag[4][2]; /* [ndigits][negative] */
@@ -692,6 +699,9 @@ fp_objpool_report(void)
     fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
             g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
             g_pool_on ? "" : " (values use the normal constructors)");
+    if (g_dec_rows != 0)
+        fprintf(stderr, "decode: %.1f cycles/row over %llu rows\n", (double)g_dec_cycles / (double)g_dec_rows,
+                g_dec_rows);
 }
 
 /* ---- decoding a whole batch ----------------------------------------------
@@ -1085,6 +1095,8 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
         layout[c].alignby = (uint32_t)fastpostgres_kind_alignby(cols[c].kind);
     }
 
+    unsigned long long t0 = __rdtsc();
+
     while (fastpostgres_rows_next(rd, &row, &len))
     {
         PyObject *tup = decode_tuple(cols, ncols, layout.data(), row, len);
@@ -1093,6 +1105,9 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
         PyList_SET_ITEM(rows, (Py_ssize_t)r, tup);
         r++;
     }
+    g_dec_cycles += __rdtsc() - t0;
+    g_dec_rows += r;
+
     if (r != expect)
     {
         /* a short frame would leave NULL slots in the caller's list */
