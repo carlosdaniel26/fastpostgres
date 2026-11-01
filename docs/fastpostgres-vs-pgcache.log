@@ -1,0 +1,56 @@
+tools/pgcache_bench.sh 
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+cores: 16
+postgres: 18.6
+python: 3.13.5
+psycopg: 3.2.6
+sqlalchemy: 2.0.40
+fastpostgres image: fastpostgres-dev sha256:096f483e372d
+pgcache image: pgcache/pgcache sha256:4923257467c8
+origin: -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+shape: bench
+sizes: 100000 1000000
+git: df39836-dirty
+### END ENV
+
+# 100000 rows, 3 timed rep(s) per player, one process each
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793385 fallbacks=0
+read_rows: 319.4 cycles/row over 400000 rows (decode 317.5, frame+desc+list 1.9)
+objpool: immortal cap=8192 MiB used=0 MiB objects=21 fallbacks=0
+read_rows: 42769.0 cycles/row over 4 rows (decode 1577.0, frame+desc+list 41192.0)
+objpool: immortal cap=8192 MiB used=79 MiB objects=1793385 fallbacks=0
+read_rows: 314.8 cycles/row over 400000 rows (decode 312.9, frame+desc+list 2.0)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+  large    fastpostgres 5.81M     pgcache 1.42M      pgcache/fastpostgres +310.3%   warm 7 reads/3922 ms to a stable hit (2 miss), 3 reps (0 miss)
+  small    fastpostgres 6.256 ms  pgcache 1.186 ms   pgcache/fastpostgres -81.0%    warm 5 reads/2044 ms to a stable hit (0 miss), 3 reps (0 miss)
+  through  fastpostgres 5.74M     pgcache 1.87M      pgcache/fastpostgres +206.7%   forwarded (views are never cached): 1 warm miss, 3 rep miss
+  fill-large pgcache 69.115 ms  fastpostgres 17.203 ms   (one read, cache reset)
+  fill-small pgcache 188.633 ms fastpostgres 6.256 ms   (one read, cache reset)
+
+# 1000000 rows, 3 timed rep(s) per player, one process each
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942985 fallbacks=0
+read_rows: 347.0 cycles/row over 4000000 rows (decode 345.3, frame+desc+list 1.7)
+objpool: immortal cap=8192 MiB used=0 MiB objects=21 fallbacks=0
+read_rows: 69578.0 cycles/row over 4 rows (decode 3800.0, frame+desc+list 65778.0)
+objpool: immortal cap=8192 MiB used=791 MiB objects=17942985 fallbacks=0
+read_rows: 349.9 cycles/row over 4000000 rows (decode 348.5, frame+desc+list 1.4)
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+  large    fastpostgres 6.35M     pgcache 1.47M      pgcache/fastpostgres +332.2%   warm 17 reads/21900 ms to a stable hit (14 miss), 3 reps (0 miss)
+  small    fastpostgres 62.533 ms pgcache 1.228 ms   pgcache/fastpostgres -98.0%    warm 5 reads/2088 ms to a stable hit (0 miss), 3 reps (0 miss)
+  through  fastpostgres 5.86M     pgcache 1.80M      pgcache/fastpostgres +224.9%   forwarded (views are never cached): 1 warm miss, 3 rep miss
+  fill-large pgcache 620.820 ms fastpostgres 157.565 ms   (one read, cache reset)
+  fill-small pgcache 162.371 ms fastpostgres 62.533 ms   (one read, cache reset)
+
+# the same output across players: ok

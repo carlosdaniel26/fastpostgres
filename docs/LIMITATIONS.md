@@ -120,5 +120,16 @@ block carries `git:` (`git describe --always --dirty`). A `-dirty` suffix means
 the measurement included uncommitted changes: commit, then `just bench`, for a
 clean stamp.
 
+**"Why not just cache the result?"** A result cache removes *execution* on
+repeated queries; this removes *delivery* on every query, and the two rank by
+workload shape. Measured against PgCache, a CDC-maintained result cache, in
+[`fastpostgres-vs-pgcache.log`](fastpostgres-vs-pgcache.log): a cached aggregate
+is 51× faster than the ring at 1M rows — the executor is the cost, and no
+transport fixes that. A cached 1M-row result is the other way round: 1.47M rows/s
+against 6.35M on the ring, and a hit costs what its cold fill costs, because a hit
+still ships every row through the socket and builds every Python object, while
+this path never builds them twice. Method and caveats in
+[`PG-CACHE.md`](PG-CACHE.md).
+
 **"Which numbers should I quote?"** The committed logs, not the README:
 `docs/fastpostgres-vs-arrow*.log`.

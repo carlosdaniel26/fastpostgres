@@ -65,6 +65,29 @@ edge cases, pros/cons and anticipated objections are in
 answer to "why is this faster than Arrow, and why doesn't Arrow do the same
 thing?" is in [`docs/WHY-IT-WINS.md`](docs/WHY-IT-WINS.md).
 
+## Measured against a result cache
+
+A result cache removes *execution* on repeated queries; this removes *delivery*
+on every query, so they win different shapes. The rival is PgCache, a
+CDC-maintained result cache in front of the same server; the method, the fill and
+pass-through taxes and the caveats are in [`docs/PG-CACHE.md`](docs/PG-CACHE.md)
+and the committed record in
+[`docs/fastpostgres-vs-pgcache.log`](docs/fastpostgres-vs-pgcache.log)
+(`just pgcache-bench`).
+
+![fast-postgres vs PgCache: the full scan and the aggregate](assets/pgcache-read.png)
+
+| 1M rows, the same rows out | fastpostgres | PgCache (hit) |
+|---|---|---|
+| the full scan, rows/s | **6.35M** | 1.47M |
+| count/sums, ms/read | 62.533 | **1.228** |
+
+A cached aggregate is 51× faster than reading the same rows directly — the
+executor is the cost, and no transport closes that. A cached large result is the
+other way round: 4.3× slower than the ring, and a hit costs what its cold fill
+costs, because a hit still ships every row through the socket and rebuilds every
+Python object.
+
 ## Usage
 
 Any SQLAlchemy app, unchanged apart from the URL:
@@ -89,7 +112,7 @@ run with Docker and `just` (Linux host with `/dev/shm`):
 ```bash
 just test          # client test suite
 just bench         # fast-postgres vs ADBC + Arrow, 100K / 1M / 10M
-just demo 5000     # the same app on psycopg2 and fastpostgres
+just demo 5000     # the same app on psycopg 3 and fastpostgres
 just charts        # benchmarks + charts
 just codec-transport  # format cost vs transport cost, isolated (2x2 matrix)
 just codec-charts     # charts for that matrix
