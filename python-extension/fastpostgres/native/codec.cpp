@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <datetime.h>
 
@@ -325,7 +326,8 @@ fp_decode_value(PGresult *res, int row, int col)
  * Py_DECREF return early and the deallocator is unreachable. For the same
  * reason the arena is append-only — a cell can never be recycled under a live
  * reference, so the memory is never returned. That is the whole price, and it
- * is a policy: FASTPOSTGRES_OBJ_ARENA=<bytes> sizes it, 0 turns it off.
+ * is a policy: FASTPOSTGRES_OBJ_ARENA=<bytes> sizes it, 0 turns it off, and
+ * unset takes half of the cgroup limit (8 GiB at most).
  *
  * Every layout fact here can rot with a CPython release, so none of it is
  * assumed: the string header is *copied* from a compact-ASCII string the
@@ -529,11 +531,47 @@ pool_verify(void)
     return true;
 }
 
+/* The pool's pages are never returned — an immortal object cannot be recycled —
+ * so its cap has to be a fraction of what the process may actually use: the
+ * cgroup limit when there is one, physical memory otherwise. Half of it, and no
+ * more than 8 GiB, so a big host does not turn one read into a memory test. */
+static size_t
+pool_default_bytes(void)
+{
+    unsigned long long limit = 0;
+    char               buf[64];
+    FILE              *f;
+
+    if ((f = fopen("/sys/fs/cgroup/memory.max", "r")) != nullptr) /* cgroup v2 */
+    {
+        if (fgets(buf, sizeof(buf), f) != nullptr && buf[0] != 'm') limit = strtoull(buf, nullptr, 10);
+        fclose(f);
+    }
+    if (limit == 0 && (f = fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r")) != nullptr) /* v1 */
+    {
+        if (fgets(buf, sizeof(buf), f) != nullptr) limit = strtoull(buf, nullptr, 10);
+        fclose(f);
+    }
+    if (limit == 0 || limit > (1ULL << 60)) /* "max", or the v1 "no limit" sentinel */
+    {
+        long pages = sysconf(_SC_PHYS_PAGES);
+        long page  = sysconf(_SC_PAGESIZE);
+
+        if (pages > 0 && page > 0) limit = (unsigned long long)pages * (unsigned long long)page;
+    }
+    if (limit == 0) return FP_OBJPOOL_DEFAULT_BYTES;
+
+    limit /= 2;
+    if (limit > (8ULL << 30)) limit = 8ULL << 30;
+    if (limit < (16ULL << 20)) limit = 16ULL << 20;
+    return (size_t)limit;
+}
+
 void
 fp_objpool_init(void)
 {
     const char *env = getenv("FASTPOSTGRES_OBJ_ARENA");
-    size_t      cap = FP_OBJPOOL_DEFAULT_BYTES;
+    size_t      cap = pool_default_bytes();
     void       *base;
 
     if (env != nullptr && env[0] != 0)
