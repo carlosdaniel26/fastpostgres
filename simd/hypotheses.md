@@ -718,6 +718,36 @@ alternating data segments, with the next request issued before the current batch
 is decoded, would hide the worker's turn behind the decode — ~1.2x on a read, ~5%
 on CORE — with no threads and no GIL to fight.
 
+### The copies are not the bottleneck
+
+"Parallelise the mass copies" is worth testing with bandwidth rather than cores: a
+memcpy is already vectorised, and a threaded one reaches DRAM before it reaches
+the core count. Measured with numpy (which releases the GIL so threads can run),
+256 MiB per copy, best of five:
+
+| threads | aggregate |
+|---|---|
+| 1 | 16.8 GB/s |
+| 2 | 21.0 GB/s |
+| 4 | 24.0 GB/s |
+| 8 | 23.6 GB/s |
+
+1.43x at four threads and flat at eight — the wall is the memory system. Against
+that, a read of the benchmark's shape moves ~410 B/row (segment in, segment out,
+arena), which at the measured 12.05M rows/s aggregate is 4.9 GB/s: a fifth of the
+ceiling, and one core's 16.8 GB/s is six times what a single stream needs. A row
+costs per-value work — the walk, the switch, the births, the tuple and the list —
+not bytes. Even the wide shape (1.2 KB, 481 ns/row) runs at 2.9 GB/s.
+
+So the tempting version of the idea does not pay: threading the client's value
+stores would win at most the copy share of a decode (~11 ns of 130 for the arena
+writes, before per-thread arenas), and on the server there are no threads to have
+at all, because a PostgreSQL backend must not use them. Extreme throughput there
+is sharding the *work* across ring workers (measured 2.4x at four, capped at seven
+by `max_worker_processes`), not spreading one copy over cores. The only copy-heavy
+path in the tree is ingest, and it has no client-side producer since the
+generators were deleted.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
