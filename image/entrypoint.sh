@@ -33,12 +33,20 @@ fi
 cores=$(awk -F': ' '/^core id/ {print $2}' /proc/cpuinfo | sort -u | wc -l)
 if [ "$cores" -eq 0 ]; then cores=$(nproc); fi
 
+cpu=$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+mem=$(awk '/MemTotal:/ {printf "%.0f GiB", $2 / 1048576}' /proc/meminfo)
+
 echo "### ENV"
+echo "cpu: ${cpu:-unknown}"
+echo "mem: ${mem:-unknown}"
 echo "ghz: $ghz"
 echo "cores: $cores"
 echo "postgres: $(psql --version | awk '{print $3}')"
 echo "python: $(python3 --version | awk '{print $2}')"
 python3 -c 'import sqlalchemy; print("sqlalchemy:", sqlalchemy.__version__)' 2>/dev/null || true
+python3 -c 'import importlib.metadata as m; print("pyarrow:", m.version("pyarrow")); print("adbc:", m.version("adbc_driver_postgresql"))' 2>/dev/null || true
+echo "shape: ${SHAPE:-bench}"
+echo "git: ${BENCH_GIT_REV:-unknown}"
 echo "shm: $(df -h /dev/shm | awk 'NR==2 {print $2}')"
 echo "### END ENV"
 
