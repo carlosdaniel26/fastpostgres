@@ -718,6 +718,29 @@ alternating data segments, with the next request issued before the current batch
 is decoded, would hide the worker's turn behind the decode — ~1.2x on a read, ~5%
 on CORE — with no threads and no GIL to fight.
 
+### Pipelining, measured
+
+That is built now: the cursor is keyed by a stream name, the segment to publish
+into is arg 2 of the NEXT (unused until then), and `Ring.post_rows`/`wait` let
+`dbapi._shm_read` ask for the next batch before decoding the current one into the
+other segment. A/B on the same harness, 400k-row reads, interleaved runs, best of
+three:
+
+| batch | synchronous | pipelined | |
+|---|---|---|---|
+| 100k | 158-163 ns/row | **132-135** | 1.19x |
+| 25k | 120-121 | **86-90** | 1.38x |
+| 6k | 122-123 | **84-85** | 1.44x |
+
+End to end, the benchmark at 1M rows (ten batches): CORE **1.46-1.48M -> 1.53-1.54M
+rows/s, +5%**, twice, 0 fallbacks. At 100k rows a read is one batch, so there is
+nothing to overlap and nothing moves — which is why the first measurement of this
+looked like zero.
+
+One piece of housekeeping that the error path needed: if a read fails with a
+request posted but not collected, the response is drained before the ring closes,
+or the semaphore is left unbalanced for whoever checks the ring out next.
+
 ### What is actually parallelizable, per row
 
 The phase split again, with each stage's legal parallel mechanism and what it could
