@@ -30,12 +30,18 @@ add_kind_constants(PyObject *module)
         const char *name;
         int         value;
     } kinds[] = {
-        {"KIND_BOOL", FASTPOSTGRES_KIND_BOOL},         {"KIND_INT16", FASTPOSTGRES_KIND_INT16},
-        {"KIND_INT32", FASTPOSTGRES_KIND_INT32},       {"KIND_INT64", FASTPOSTGRES_KIND_INT64},
-        {"KIND_FLOAT4", FASTPOSTGRES_KIND_FLOAT4},     {"KIND_FLOAT8", FASTPOSTGRES_KIND_FLOAT8},
-        {"KIND_TEXT", FASTPOSTGRES_KIND_TEXT},         {"KIND_DATE", FASTPOSTGRES_KIND_DATE},
-        {"KIND_TIME", FASTPOSTGRES_KIND_TIME},         {"KIND_TIMESTAMP", FASTPOSTGRES_KIND_TIMESTAMP},
-        {"KIND_TIMESTAMPTZ", FASTPOSTGRES_KIND_TIMESTAMPTZ}, {"KIND_UUID", FASTPOSTGRES_KIND_UUID},
+        {"KIND_BOOL", FASTPOSTGRES_KIND_BOOL},
+        {"KIND_INT16", FASTPOSTGRES_KIND_INT16},
+        {"KIND_INT32", FASTPOSTGRES_KIND_INT32},
+        {"KIND_INT64", FASTPOSTGRES_KIND_INT64},
+        {"KIND_FLOAT4", FASTPOSTGRES_KIND_FLOAT4},
+        {"KIND_FLOAT8", FASTPOSTGRES_KIND_FLOAT8},
+        {"KIND_TEXT", FASTPOSTGRES_KIND_TEXT},
+        {"KIND_DATE", FASTPOSTGRES_KIND_DATE},
+        {"KIND_TIME", FASTPOSTGRES_KIND_TIME},
+        {"KIND_TIMESTAMP", FASTPOSTGRES_KIND_TIMESTAMP},
+        {"KIND_TIMESTAMPTZ", FASTPOSTGRES_KIND_TIMESTAMPTZ},
+        {"KIND_UUID", FASTPOSTGRES_KIND_UUID},
         {"KIND_BYTEA", FASTPOSTGRES_KIND_BYTEA},
     };
 
@@ -61,8 +67,8 @@ PyInit__client(void)
 {
     if (!fp_codec_init()) return nullptr;
     if (!fp_types_init()) return nullptr;
-    fp_objpool_init();              /* off unless the layouts verify (FASTPOSTGRES_OBJ_ARENA) */
-    Py_AtExit(fp_objpool_report);   /* one line per process: how values were read */
+    fp_objpool_init();            /* off unless the layouts verify (FASTPOSTGRES_OBJ_ARENA) */
+    Py_AtExit(fp_objpool_report); /* one line per process: how values were read */
 
     PyObject *m = PyModule_Create(&moduledef);
     if (!m) return nullptr;

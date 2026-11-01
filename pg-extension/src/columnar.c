@@ -20,21 +20,24 @@
 #include "columnar.h"
 #include "shm.h"
 
-bool fastpostgres_is_text_type(Oid typ)
+bool
+fastpostgres_is_text_type(Oid typ)
 {
     return typ == TEXTOID || typ == VARCHAROID || typ == BPCHAROID;
 }
 
 /* Types whose bytes can be read straight off the varlena: text as itself, and
  * bytea as the raw bytes the wire kind wants (not its hex output). */
-static bool varlena_bytes(Oid typ)
+static bool
+varlena_bytes(Oid typ)
 {
     return fastpostgres_is_text_type(typ) || typ == BYTEAOID;
 }
 
 /* Text and bytea bytes come straight off the varlena; every other type goes
  * through its output function. */
-static void text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char **data, int *len)
+static void
+text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char **data, int *len)
 {
     if (isnull)
     {
@@ -59,14 +62,15 @@ static void text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char 
 
 /* One pass into [out, end); the frame comes from the shared writer, so the
  * layout matches the client's generators exactly. Returns the payload size. */
-uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out, char *end)
+uint64
+fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out, char *end)
 {
-    int    ncols      = td->natts;
-    int    null_bytes = (int)((nrows + 7) / 8);
-    int    c;
-    uint64 r;
-    Datum *vals;
-    bool  *nulls_arr;
+    int                       ncols      = td->natts;
+    int                       null_bytes = (int)((nrows + 7) / 8);
+    int                       c;
+    uint64                    r;
+    Datum                    *vals;
+    bool                     *nulls_arr;
     FastpostgresColumnarWrite w;
 
     /* Deform every tuple once. Reading attribute-by-attribute with heap_getattr
@@ -211,8 +215,9 @@ uint64 fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows
     return (uint64)(w.p - out);
 }
 
-uint64 fastpostgres_publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows,
-                                         size_t capacity)
+uint64
+fastpostgres_publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows,
+                                  size_t capacity)
 {
     size_t cap   = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
     void  *map   = fastpostgres_shm_map_rw(path, cap);

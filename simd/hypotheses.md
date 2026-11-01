@@ -32,6 +32,9 @@ Relevant to width choices: masks are cheap here, gathers are not.
 | `columnar.c` fixed-width pass | **10 instr** | switch **is** unswitched (loop cloned per kind); 1 null byte load + test + branch; 1 strided 8-byte `Datum` load; 1 store of `width`; 3 pointer bumps |
 | `columnar.c` varlena pass | **~25 instr + `call *8(%rax)`** | 14 instr head (null test, `Datum` load, varlena header, length, **per-value `p + len > end` check**), 2 (len ≤ 32), 2 (table load + indirect call), 7 tail; **4 stack-slot accesses per value**, because the call forces the loop's state to memory |
 | `write.c` ingest (`col_datum` inlined) | **~26 instr** | kind switch **not** unswitched (compare chain inside the loop), 6 instr of null bit test, `memcpy` per value, store + bumps |
+
+*The ingest path was removed with its client-side producer; the row stays as the
+record of what it measured.*
 | all three, with `-mavx512f,avx512bw,avx512vl` | — | **0 vector instructions emitted** |
 
 Two consequences worth stating plainly:
@@ -796,8 +799,8 @@ at all, because a PostgreSQL backend must not use them. Extreme throughput there
 is *work* parallelism across concurrent queries — separate ring workers, measured
 at 2.4x on four processes and capped at seven by `max_worker_processes` — not
 spreading one copy over cores, and not sharding one query either, which the table
-above prices at 1.05x. The only copy-heavy path in the tree is ingest, and it has
-no client-side producer since the generators were deleted.
+above prices at 1.05x. The only copy-heavy path in the tree was ingest, and it has
+been removed with its client-side producer.
 
 ### The three fast paths, in the benchmark
 

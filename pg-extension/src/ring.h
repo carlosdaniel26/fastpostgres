@@ -4,8 +4,8 @@
  * and initialises the semaphores before bootstrapping the worker, so there is
  * no init race; the worker only maps it.
  *
- * Columnar mode: one OPEN/NEXT/CLOSE/WRITE request at a time, data lands in a
- * separate columnar segment.
+ * Reads only: one OPEN/NEXT/CLOSE request at a time, the batch landing in a
+ * separate segment. Writes, DDL and transactions stay on libpq.
  */
 #ifndef FASTPOSTGRES_RING_H
 #define FASTPOSTGRES_RING_H
@@ -26,7 +26,6 @@ enum FastpostgresRingOp
     FASTPOSTGRES_OP_OPEN      = 1,
     FASTPOSTGRES_OP_NEXT      = 2, /* the columnar frame */
     FASTPOSTGRES_OP_CLOSE     = 3,
-    FASTPOSTGRES_OP_WRITE     = 4,
     FASTPOSTGRES_OP_STOP      = 5,
     FASTPOSTGRES_OP_NEXT_ROWS = 6 /* the row frame (falls back to columnar) */
 };
@@ -51,7 +50,8 @@ typedef struct FastpostgresRing {
 /* The request payload every op carries: "<a1>\0<a2>\0" in `arg`. The client
  * packs with these and the worker unpacks with them, so the convention has a
  * single definition instead of a matching pair of strlen dances. */
-static inline int fastpostgres_ring_arg_set(char *arg, const char *a1, const char *a2)
+static inline int
+fastpostgres_ring_arg_set(char *arg, const char *a1, const char *a2)
 {
     size_t n = a1 ? strlen(a1) + 1 : 1;
     size_t m = a2 ? strlen(a2) + 1 : 1;
@@ -68,12 +68,14 @@ static inline int fastpostgres_ring_arg_set(char *arg, const char *a1, const cha
     return 0;
 }
 
-static inline const char *fastpostgres_ring_arg1(const char *arg)
+static inline const char *
+fastpostgres_ring_arg1(const char *arg)
 {
     return arg;
 }
 
-static inline const char *fastpostgres_ring_arg2(const char *arg)
+static inline const char *
+fastpostgres_ring_arg2(const char *arg)
 {
     return arg + strlen(arg) + 1;
 }

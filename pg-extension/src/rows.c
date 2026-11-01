@@ -194,7 +194,7 @@ row_receive(TupleTableSlot *slot, DestReceiver *self)
     {
         slot_getallattrs(slot); /* a no-op for a virtual slot */
         len = row_prepare(rx, slot->tts_values, slot->tts_isnull);
-        tup = NULL; /* row_build writes this one */
+        tup = NULL;             /* row_build writes this one */
     }
 
     row = fastpostgres_rows_reserve(&rx->w, len, rx->end);

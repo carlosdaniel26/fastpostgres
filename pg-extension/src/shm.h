@@ -12,6 +12,4 @@ void *fastpostgres_shm_map_rw(const char *path, size_t size);
 
 /* Map an existing segment read-only, whole and header-validated; the mapped
  * size goes to *size_out. */
-void *fastpostgres_shm_map_ro(const char *path, const char *fn, size_t *size_out);
-
 #endif

@@ -37,7 +37,6 @@
 #include "columnar.h"
 #include "ring.h"
 #include "stream.h"
-#include "write.h"
 
 #define FASTPOSTGRES_RING_WAIT_MS 100 /* only so the worker notices SIGTERM */
 
@@ -46,14 +45,16 @@ static bool                  have_txn      = false;
 static bool                  have_stream   = false;
 static bool                  have_snapshot = false;
 
-static void ring_sigterm(SIGNAL_ARGS)
+static void
+ring_sigterm(SIGNAL_ARGS)
 {
     int save_errno = errno;
     got_sigterm    = true;
     errno          = save_errno;
 }
 
-static FastpostgresRing *ring_map_rw(const char *seg, size_t *size_out)
+static FastpostgresRing *
+ring_map_rw(const char *seg, size_t *size_out)
 {
     char        path[256];
     int         fd;
@@ -81,7 +82,8 @@ static FastpostgresRing *ring_map_rw(const char *seg, size_t *size_out)
     return (FastpostgresRing *)map;
 }
 
-static void abort_txn(void)
+static void
+abort_txn(void)
 {
     if (have_txn || IsTransactionState()) AbortCurrentTransaction();
     /* AbortCurrentTransaction resets the snapshot stack */
@@ -90,7 +92,8 @@ static void abort_txn(void)
     have_snapshot = false;
 }
 
-static void commit_txn(void)
+static void
+commit_txn(void)
 {
     if (have_snapshot)
     {
@@ -103,7 +106,8 @@ static void commit_txn(void)
 }
 
 /* A bgworker has no active snapshot; SPI_cursor_open (read-only) needs one. */
-static void begin_txn(void)
+static void
+begin_txn(void)
 {
     abort_txn();
     StartTransactionCommand();
@@ -113,7 +117,8 @@ static void begin_txn(void)
 }
 
 /* Copy the pending error into the ring (must be called inside PG_CATCH). */
-static void ring_set_error(FastpostgresRing *r)
+static void
+ring_set_error(FastpostgresRing *r)
 {
     ErrorData *edata = CopyErrorData();
 
@@ -124,7 +129,8 @@ static void ring_set_error(FastpostgresRing *r)
 }
 
 /* Returns false when the worker should stop. */
-static bool ring_handle(FastpostgresRing *r, const char *ring_name)
+static bool
+ring_handle(FastpostgresRing *r, const char *ring_name)
 {
     char       *a1 = (char *)fastpostgres_ring_arg1(r->arg);
     char       *a2 = (char *)fastpostgres_ring_arg2(r->arg);
@@ -132,11 +138,9 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
     uint64      n = 0;
 
     /* never let a batch clobber the ring itself: it is published into the segment
-     * the request names — arg 2 for a NEXT, arg 1 for a WRITE */
+     * the NEXT names */
     if (r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_NEXT_ROWS)
         data = a2;
-    else if (r->op == FASTPOSTGRES_OP_WRITE)
-        data = a1;
     else
         data = NULL;
 
@@ -231,23 +235,6 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
             PG_END_TRY();
             break;
 
-        case FASTPOSTGRES_OP_WRITE:
-            begin_txn();
-            PG_TRY();
-            {
-                n         = fastpostgres_write_segment(a1, a2);
-                r->status = 0;
-                r->nrows  = (int64)n;
-                commit_txn();
-            }
-            PG_CATCH();
-            {
-                ring_set_error(r);
-                abort_txn();
-            }
-            PG_END_TRY();
-            break;
-
         default:
             r->status = 1;
             strlcpy(r->error, "unknown op", sizeof(r->error));
@@ -259,7 +246,8 @@ static bool ring_handle(FastpostgresRing *r, const char *ring_name)
 /* The worker entry point (looked up by name, so it must be exported). */
 PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg);
 
-PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg)
+PGDLLEXPORT void
+fastpostgres_ring_main(Datum main_arg)
 {
     BackgroundWorker *bw  = MyBgworkerEntry;
     const char       *seg = bw->bgw_extra; /* "ring\0dbname\0" */
@@ -330,7 +318,8 @@ PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg)
 /* ---- SQL: start / stop --------------------------------------------------- */
 
 PG_FUNCTION_INFO_V1(fastpostgres_ring_start);
-Datum fastpostgres_ring_start(PG_FUNCTION_ARGS)
+Datum
+fastpostgres_ring_start(PG_FUNCTION_ARGS)
 {
     char                   *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
     const char             *db  = get_database_name(MyDatabaseId);
@@ -363,7 +352,8 @@ Datum fastpostgres_ring_start(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fastpostgres_ring_stop);
-Datum fastpostgres_ring_stop(PG_FUNCTION_ARGS)
+Datum
+fastpostgres_ring_stop(PG_FUNCTION_ARGS)
 {
     char             *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
     size_t            rsize;

@@ -17,8 +17,8 @@ bool fp_codec_init(void);
  * FASTPOSTGRES_OBJ_ARENA (0 disables it) and proves the layouts before handing
  * anything out; when it cannot, every constructor here falls back to the normal
  * one, so the flag only ever costs or saves the pool. Call from module init. */
-void      fp_objpool_init(void);
-void      fp_objpool_report(void);
+void        fp_objpool_init(void);
+void        fp_objpool_report(void);
 const char *fp_objpool_mode(void);
 
 /* These always return a usable object: the pool when it can, the standard
@@ -43,4 +43,5 @@ bool fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t 
 /* Fill `rows` (a list of nrows slots, one per tuple in the row frame) by walking
  * each tuple in place: the server hands over PostgreSQL's own row layout, so
  * every value is decoded where it lies. Returns false with an exception set. */
-bool fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd, PyObject *rows);
+bool fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd,
+                      PyObject *rows);

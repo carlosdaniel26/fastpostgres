@@ -21,14 +21,16 @@
 
 #define FASTPOSTGRES_STREAM_PREFIX "fastpostgres_stream_"
 
-static char *cursor_name(const char *stream)
+static char *
+cursor_name(const char *stream)
 {
     char *name = palloc(strlen(FASTPOSTGRES_STREAM_PREFIX) + strlen(stream) + 1);
     sprintf(name, FASTPOSTGRES_STREAM_PREFIX "%s", stream);
     return name;
 }
 
-void fastpostgres_stream_open(const char *stream, const char *query)
+void
+fastpostgres_stream_open(const char *stream, const char *query)
 {
     char  *name = cursor_name(stream);
     Portal portal;
@@ -44,7 +46,8 @@ void fastpostgres_stream_open(const char *stream, const char *query)
     SPI_finish();
 }
 
-uint64 fastpostgres_stream_next(const char *stream, const char *seg, int64 batch)
+uint64
+fastpostgres_stream_next(const char *stream, const char *seg, int64 batch)
 {
     char      *path = fastpostgres_shm_path(seg);
     char      *name = cursor_name(stream);
@@ -73,7 +76,8 @@ uint64 fastpostgres_stream_next(const char *stream, const char *seg, int64 batch
     return nrows;
 }
 
-void fastpostgres_stream_close(const char *stream)
+void
+fastpostgres_stream_close(const char *stream)
 {
     char  *name = cursor_name(stream);
     Portal portal;
@@ -88,7 +92,8 @@ void fastpostgres_stream_close(const char *stream)
 
 /* The same batch as the result tuples themselves: the executor's bytes are
  * copied into the segment once, and the client walks them. */
-uint64 fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch)
+uint64
+fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch)
 {
     char     *path = fastpostgres_shm_path(seg);
     char     *name = cursor_name(stream);

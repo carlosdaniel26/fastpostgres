@@ -1,7 +1,7 @@
 EXTENSION = fastpostgres
 MODULE_big = fastpostgres
 
-OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/write.o src/stream.o src/worker.o
+OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o
 DATA = fastpostgres--1.0.sql
 
 PG_CONFIG = pg_config

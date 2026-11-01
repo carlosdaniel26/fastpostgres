@@ -130,14 +130,11 @@ timestamp_from_us(int64_t us, int with_tz)
     civil_from_days(days + FP_EPOCH_DAYS, &y, &m, &d);
 
     if (!with_tz)
-        return PyDateTime_FromDateAndTime(y, m, d, (int)(rem / 3600000000LL),
-                                          (int)(rem / 60000000LL % 60), (int)(rem / FP_US_PER_SEC % 60),
-                                          (int)(rem % FP_US_PER_SEC));
-    return PyDateTimeAPI->DateTime_FromDateAndTime(y, m, d, (int)(rem / 3600000000LL),
-                                                   (int)(rem / 60000000LL % 60),
-                                                   (int)(rem / FP_US_PER_SEC % 60),
-                                                   (int)(rem % FP_US_PER_SEC), s_utc,
-                                                   PyDateTimeAPI->DateTimeType);
+        return PyDateTime_FromDateAndTime(y, m, d, (int)(rem / 3600000000LL), (int)(rem / 60000000LL % 60),
+                                          (int)(rem / FP_US_PER_SEC % 60), (int)(rem % FP_US_PER_SEC));
+    return PyDateTimeAPI->DateTime_FromDateAndTime(
+        y, m, d, (int)(rem / 3600000000LL), (int)(rem / 60000000LL % 60), (int)(rem / FP_US_PER_SEC % 60),
+        (int)(rem % FP_US_PER_SEC), s_utc, PyDateTimeAPI->DateTimeType);
 }
 
 static PyObject *
@@ -308,7 +305,7 @@ fp_decode_value(PGresult *res, int row, int col)
             return parse_datetime(s, 1, 1);
         case FASTPOSTGRES_OID_UUID: /* the columnar path returns uuid.UUID; so must this one */
             return PyObject_CallFunction(s_uuid, "s", s);
-        default: /* text family, json, xml, ... */
+        default:                    /* text family, json, xml, ... */
             return PyUnicode_FromString(s);
     }
 }
@@ -478,10 +475,11 @@ pool_templates(void)
 static bool
 pool_verify(void)
 {
-    static const long long longs[] = {12345, -12345, ((long long)1 << 30) + 7, -(((long long)1 << 30) + 7),
-                                      ((long long)1 << 60) + 7, 1LL << 62};
-    PyObject              *o;
-    size_t                 i;
+    static const long long longs[] = {
+        12345,    -12345, ((long long)1 << 30) + 7, -(((long long)1 << 30) + 7), ((long long)1 << 60) + 7,
+        1LL << 62};
+    PyObject *o;
+    size_t    i;
 
     o = fp_birth_float(1.2345);
     if (o == nullptr || !PyFloat_CheckExact(o)) return false;
@@ -502,7 +500,7 @@ pool_verify(void)
         if (PyLong_AsLongLong(o) != longs[i]) return false;
         if (PyObject_RichCompareBool(o, ref, Py_EQ) != 1) return false;
         if (PyObject_Hash(o) != PyObject_Hash(ref)) return false; /* exercises the digits */
-        cmp = PyObject_Repr(o); /* the decimal conversion reads them too */
+        cmp = PyObject_Repr(o);                                   /* the decimal conversion reads them too */
         if (cmp == nullptr) return false;
         Py_DECREF(cmp);
         Py_DECREF(ref);
@@ -597,7 +595,7 @@ fp_objpool_init(void)
     {
         g_pool_on        = false;
         g_pool_exhausted = false;
-        return; /* the mapped arena is left alone: nothing was handed out */
+        return;               /* the mapped arena is left alone: nothing was handed out */
     }
     g_pool_exhausted = false; /* the verification secs are not a real exhaustion */
 }
@@ -619,10 +617,10 @@ fp_birth_float(double v)
 PyObject *
 fp_birth_long(long long v)
 {
-    uint64_t   mag;
-    int        nd = 1, neg;
-    PyObject  *o;
-    digit     *d;
+    uint64_t  mag;
+    int       nd = 1, neg;
+    PyObject *o;
+    digit    *d;
 
     if (v >= -5 && v <= 256) return PyLong_FromLong((long)v); /* the cache; immortal already */
     neg = v < 0;
@@ -636,7 +634,8 @@ fp_birth_long(long long v)
         g_pool_fallbacks++;
         return PyLong_FromLongLong(v);
     }
-    memcpy((char *)o + offsetof(PyLongObject, long_value.lv_tag), &g_pool_long_tag[nd][neg], sizeof(uintptr_t));
+    memcpy((char *)o + offsetof(PyLongObject, long_value.lv_tag), &g_pool_long_tag[nd][neg],
+           sizeof(uintptr_t));
     d = (digit *)((char *)o + offsetof(PyLongObject, long_value.ob_digit));
     for (int i = 0; i < nd; i++)
         d[i] = (digit)((mag >> (PyLong_SHIFT * i)) & (uint64_t)PyLong_MASK);
@@ -663,9 +662,9 @@ fp_birth_text(const char *p, Py_ssize_t n)
     cell = (char *)pool_take((size_t)n + (size_t)g_pool_str_data + 1);
     if (cell == nullptr) goto fallback;
     memcpy(cell, g_pool_str_hdr, sizeof(PyASCIIObject));
-    o            = (PyObject *)cell;
-    o->ob_type   = &PyUnicode_Type;
-    o->ob_refcnt = g_pool_immortal;
+    o                                                       = (PyObject *)cell;
+    o->ob_type                                              = &PyUnicode_Type;
+    o->ob_refcnt                                            = g_pool_immortal;
     *(Py_ssize_t *)(cell + offsetof(PyASCIIObject, length)) = n;
     *(Py_hash_t *)(cell + offsetof(PyASCIIObject, hash))    = -1; /* computed on demand, as usual */
     memcpy(cell + g_pool_str_data, p, (size_t)n);
@@ -690,8 +689,8 @@ void
 fp_objpool_report(void)
 {
     if (g_pool_base == nullptr) return;
-    fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n",
-            fp_objpool_mode(), g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
+    fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
+            g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
             g_pool_on ? "" : " (values use the normal constructors)");
 }
 

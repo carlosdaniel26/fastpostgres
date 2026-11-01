@@ -257,16 +257,6 @@ Ring_close(RingObject *self, PyObject *)
 }
 
 static PyObject *
-Ring_write(RingObject *self, PyObject *args)
-{
-    const char *seg, *table;
-    if (!PyArg_ParseTuple(args, "ss", &seg, &table)) return nullptr;
-    long long n = ring_request(self, FASTPOSTGRES_OP_WRITE, seg, table, 0);
-    if (n < 0) return nullptr;
-    return PyLong_FromLongLong(n);
-}
-
-static PyObject *
 Ring_stop(RingObject *self, PyObject *)
 {
     FastpostgresRing *r = self->ring;
@@ -286,7 +276,6 @@ static PyMethodDef Ring_methods[] = {
      "post_rows(seg, batch=100000): ask for a batch into seg, do not wait"},
     {"wait", (PyCFunction)Ring_wait, METH_NOARGS, "wait() -> int rows for the request last sent"},
     {"close", (PyCFunction)Ring_close, METH_NOARGS, "close(): end the stream"},
-    {"write", (PyCFunction)Ring_write, METH_VARARGS, "write(seg, table) -> int rows"},
     {"stop", (PyCFunction)Ring_stop, METH_NOARGS, "stop(): ask the worker to exit"},
     {nullptr},
 };

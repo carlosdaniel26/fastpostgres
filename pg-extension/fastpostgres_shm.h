@@ -49,8 +49,8 @@ static_assert(sizeof(FastpostgresShmHeader) == 64, "FastpostgresShmHeader must b
  * Each column's data is padded to 8-byte alignment relative to the payload
  * base, so the client can view it in place as a typed array.
  */
-#define FASTPOSTGRES_ALIGN8(x)        (((uint64_t)(x) + 7) & ~(uint64_t)7)
-#define FASTPOSTGRES_COLUMNAR_MAGIC   "FPCOLUMN"
+#define FASTPOSTGRES_ALIGN8(x)      (((uint64_t)(x) + 7) & ~(uint64_t)7)
+#define FASTPOSTGRES_COLUMNAR_MAGIC "FPCOLUMN"
 /* 2: the binary kinds (date/time/timestamp/timestamptz/uuid/bytea). A reader
  * that does not know them must refuse the payload rather than guess — the frame
  * is checked against this number, so v1 and v2 cannot be mixed silently. */
@@ -66,13 +66,13 @@ static_assert(sizeof(FastpostgresShmHeader) == 64, "FastpostgresShmHeader must b
 
 enum FastpostgresKind
 {
-    FASTPOSTGRES_KIND_BOOL   = 1,
-    FASTPOSTGRES_KIND_INT32  = 2,
-    FASTPOSTGRES_KIND_INT64  = 3,
-    FASTPOSTGRES_KIND_FLOAT8 = 4,
-    FASTPOSTGRES_KIND_TEXT   = 5,
-    FASTPOSTGRES_KIND_INT16  = 6,  /* verbatim 2-byte integer (int2) */
-    FASTPOSTGRES_KIND_FLOAT4 = 7,  /* verbatim 4-byte float (float4) */
+    FASTPOSTGRES_KIND_BOOL        = 1,
+    FASTPOSTGRES_KIND_INT32       = 2,
+    FASTPOSTGRES_KIND_INT64       = 3,
+    FASTPOSTGRES_KIND_FLOAT8      = 4,
+    FASTPOSTGRES_KIND_TEXT        = 5,
+    FASTPOSTGRES_KIND_INT16       = 6,  /* verbatim 2-byte integer (int2) */
+    FASTPOSTGRES_KIND_FLOAT4      = 7,  /* verbatim 4-byte float (float4) */
     FASTPOSTGRES_KIND_DATE        = 8,  /* int32 DateADT: days since 2000-01-01 */
     FASTPOSTGRES_KIND_TIME        = 9,  /* int64 TimeADT: microseconds since midnight */
     FASTPOSTGRES_KIND_TIMESTAMP   = 10, /* int64 Timestamp: microseconds since 2000-01-01 */
@@ -82,7 +82,8 @@ enum FastpostgresKind
 };
 
 /* Kinds that carry an int32 offset table followed by raw bytes. */
-static inline int fastpostgres_kind_is_varlena(uint8_t kind)
+static inline int
+fastpostgres_kind_is_varlena(uint8_t kind)
 {
     return kind == FASTPOSTGRES_KIND_TEXT || kind == FASTPOSTGRES_KIND_BYTEA;
 }
@@ -116,7 +117,8 @@ static inline int fastpostgres_kind_is_varlena(uint8_t kind)
  * exercise: the extension already holds these values in binary (a DateADT, a
  * Timestamp, a pg_uuid_t, the raw bytea), so shipping them as binary leaves the
  * client wrapping them in a Python object instead of parsing digits and hex. */
-static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)
+static inline uint8_t
+fastpostgres_oid_to_kind(uint32_t oid)
 {
     switch (oid)
     {
@@ -131,7 +133,7 @@ static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)
         case FASTPOSTGRES_OID_FLOAT4:
             return FASTPOSTGRES_KIND_FLOAT4; /* copied verbatim, not widened */
         case FASTPOSTGRES_OID_FLOAT8:
-        case FASTPOSTGRES_OID_NUMERIC: /* numeric has no wire kind: converted, lossily */
+        case FASTPOSTGRES_OID_NUMERIC:       /* numeric has no wire kind: converted, lossily */
             return FASTPOSTGRES_KIND_FLOAT8;
         case FASTPOSTGRES_OID_DATE:
             return FASTPOSTGRES_KIND_DATE;
@@ -151,7 +153,8 @@ static inline uint8_t fastpostgres_oid_to_kind(uint32_t oid)
 }
 
 /* Width of a wire kind in bytes (0 for the varlena-shaped kinds). */
-static inline int fastpostgres_kind_width(uint8_t kind)
+static inline int
+fastpostgres_kind_width(uint8_t kind)
 {
     switch (kind)
     {
@@ -184,7 +187,8 @@ static inline int fastpostgres_kind_width(uint8_t kind)
 
 /* Alignment a kind demands in a tuple. Must equal the type's typalign for every
  * attribute the row segment carries, and the writer checks that it does. */
-static inline int fastpostgres_kind_alignby(uint8_t kind)
+static inline int
+fastpostgres_kind_alignby(uint8_t kind)
 {
     switch (kind)
     {
@@ -212,22 +216,26 @@ static inline int fastpostgres_kind_alignby(uint8_t kind)
 }
 
 /* little-endian scalar readers/writers */
-static inline void fastpostgres_put_u32(char *p, uint32_t v)
+static inline void
+fastpostgres_put_u32(char *p, uint32_t v)
 {
     memcpy(p, &v, 4);
 }
-static inline void fastpostgres_put_u64(char *p, uint64_t v)
+static inline void
+fastpostgres_put_u64(char *p, uint64_t v)
 {
     memcpy(p, &v, 8);
 }
-static inline uint32_t fastpostgres_rd_u32(const uint8_t **p)
+static inline uint32_t
+fastpostgres_rd_u32(const uint8_t **p)
 {
     uint32_t v;
     memcpy(&v, *p, 4);
     *p += 4;
     return v;
 }
-static inline uint64_t fastpostgres_rd_u64(const uint8_t **p)
+static inline uint64_t
+fastpostgres_rd_u64(const uint8_t **p)
 {
     uint64_t v;
     memcpy(&v, *p, 8);
@@ -238,7 +246,8 @@ static inline uint64_t fastpostgres_rd_u64(const uint8_t **p)
 /* Native-order scalar read: the tuple bytes are PostgreSQL's own layout, which
  * is why the varlena headers below are read in host order rather than as the
  * little-endian scalars the frames use. */
-static inline uint32_t fastpostgres_peek_u32(const uint8_t *p)
+static inline uint32_t
+fastpostgres_peek_u32(const uint8_t *p)
 {
     uint32_t v;
 
@@ -271,7 +280,8 @@ typedef struct FastpostgresReader {
 
 /* Point a reader at an FPCOLUMN payload; returns 0 if the magic or the version
  * is not ours. */
-static inline int fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
+static inline int
+fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
 {
     const uint8_t *p = (const uint8_t *)payload;
     uint32_t       version;
@@ -289,7 +299,8 @@ static inline int fastpostgres_reader_init(FastpostgresReader *r, const void *pa
 }
 
 /* Decode the next column; returns 0 at the end of the payload. */
-static inline int fastpostgres_reader_next(FastpostgresReader *r, FastpostgresColumn *c)
+static inline int
+fastpostgres_reader_next(FastpostgresReader *r, FastpostgresColumn *c)
 {
     const uint8_t *p = r->p;
     if (p == NULL || p >= r->end) return 0;
@@ -311,7 +322,8 @@ static inline int fastpostgres_reader_next(FastpostgresReader *r, FastpostgresCo
     return 1;
 }
 
-static inline int fastpostgres_col_isnull(const FastpostgresColumn *c, uint64_t row)
+static inline int
+fastpostgres_col_isnull(const FastpostgresColumn *c, uint64_t row)
 {
     return (c->nulls[row >> 3] & (1u << (row & 7))) != 0;
 }
@@ -319,7 +331,8 @@ static inline int fastpostgres_col_isnull(const FastpostgresColumn *c, uint64_t 
 /* 1 when any bit is set in the first nbytes: a column with no nulls skips every
  * per-row null test. The scan lives in the header both sides include, so the
  * writer and the reader ask the same question of the same bytes. */
-static inline int fastpostgres_nullmap_any(const uint8_t *bits, size_t nbytes)
+static inline int
+fastpostgres_nullmap_any(const uint8_t *bits, size_t nbytes)
 {
     size_t i;
 
@@ -364,7 +377,8 @@ static inline int fastpostgres_nullmap_any(const uint8_t *bits, size_t nbytes)
 #define FASTPOSTGRES_HEAP_HASNULL    0x0001u
 #define FASTPOSTGRES_HEAP_NATTS_MASK 0x07FFu
 
-static inline uint32_t fastpostgres_tuple_natts(const uint8_t *t)
+static inline uint32_t
+fastpostgres_tuple_natts(const uint8_t *t)
 {
     uint16_t v;
 
@@ -372,7 +386,8 @@ static inline uint32_t fastpostgres_tuple_natts(const uint8_t *t)
     return (uint32_t)(v & FASTPOSTGRES_HEAP_NATTS_MASK);
 }
 
-static inline int fastpostgres_tuple_hasnull(const uint8_t *t)
+static inline int
+fastpostgres_tuple_hasnull(const uint8_t *t)
 {
     uint16_t v;
 
@@ -380,7 +395,8 @@ static inline int fastpostgres_tuple_hasnull(const uint8_t *t)
     return (v & FASTPOSTGRES_HEAP_HASNULL) != 0;
 }
 
-static inline uint32_t fastpostgres_tuple_hoff(const uint8_t *t)
+static inline uint32_t
+fastpostgres_tuple_hoff(const uint8_t *t)
 {
     return (uint32_t)t[FASTPOSTGRES_HT_HOFF];
 }
@@ -390,7 +406,8 @@ static inline uint32_t fastpostgres_tuple_hoff(const uint8_t *t)
  * t_bits, so the padding sits *after* the bitmap, not before it. The bits mark
  * the attributes that are *not* null (fill_val sets one for every value it
  * writes), which is why PostgreSQL's own att_isnull() negates the test. */
-static inline int fastpostgres_tuple_isnull(const uint8_t *t, uint32_t att)
+static inline int
+fastpostgres_tuple_isnull(const uint8_t *t, uint32_t att)
 {
     return (t[FASTPOSTGRES_HT_BITS + (att >> 3)] & (1u << (att & 7))) == 0;
 }
@@ -419,7 +436,8 @@ static inline int fastpostgres_tuple_isnull(const uint8_t *t, uint32_t att)
 #define FASTPOSTGRES_VARSIZE_1B(p)     ((uint32_t)(*(const uint8_t *)(p)) >> 1)
 #endif
 
-static inline uint32_t fastpostgres_varsize_any(const uint8_t *p)
+static inline uint32_t
+fastpostgres_varsize_any(const uint8_t *p)
 {
     if (FASTPOSTGRES_VARATT_IS_1B(p)) return FASTPOSTGRES_VARSIZE_1B(p);
     return FASTPOSTGRES_VARSIZE_4B(p);
@@ -427,18 +445,21 @@ static inline uint32_t fastpostgres_varsize_any(const uint8_t *p)
 
 /* Where the value's bytes start: one byte into a short header, four into a full
  * one (VARDATA_ANY). */
-static inline uint32_t fastpostgres_vardata_off(const uint8_t *p)
+static inline uint32_t
+fastpostgres_vardata_off(const uint8_t *p)
 {
     return FASTPOSTGRES_VARATT_IS_1B(p) ? 1u : 4u;
 }
 
-static inline const uint8_t *fastpostgres_vardata_any(const uint8_t *p)
+static inline const uint8_t *
+fastpostgres_vardata_any(const uint8_t *p)
 {
     return p + fastpostgres_vardata_off(p);
 }
 
 /* The value's bytes, excluding its header (VARSIZE_ANY_EXHDR). */
-static inline uint32_t fastpostgres_vardata_len(const uint8_t *p)
+static inline uint32_t
+fastpostgres_vardata_len(const uint8_t *p)
 {
     return fastpostgres_varsize_any(p) - fastpostgres_vardata_off(p);
 }
@@ -447,18 +468,21 @@ static inline uint32_t fastpostgres_vardata_len(const uint8_t *p)
  * whose first byte is non-zero is a 1-byte header (or a 4-byte header whose
  * length byte is set, which the writer already aligned), so it is not aligned
  * again — a pad byte is always zero. */
-static inline uint32_t fastpostgres_att_align(uint32_t off, uint32_t alignby)
+static inline uint32_t
+fastpostgres_att_align(uint32_t off, uint32_t alignby)
 {
     return (off + alignby - 1) & ~(alignby - 1);
 }
 
-static inline uint32_t fastpostgres_att_pointer_align(uint32_t off, uint32_t alignby, const uint8_t *ptr)
+static inline uint32_t
+fastpostgres_att_pointer_align(uint32_t off, uint32_t alignby, const uint8_t *ptr)
 {
     if (*ptr != 0) return off;
     return fastpostgres_att_align(off, alignby);
 }
 
-static inline uint32_t fastpostgres_att_addlength(uint32_t off, int32_t attlen, const uint8_t *ptr)
+static inline uint32_t
+fastpostgres_att_addlength(uint32_t off, int32_t attlen, const uint8_t *ptr)
 {
     if (attlen > 0) return off + (uint32_t)attlen;
     return off + fastpostgres_varsize_any(ptr);
@@ -471,13 +495,15 @@ typedef struct FastpostgresRowsDesc {
     const uint8_t *end;
 } FastpostgresRowsDesc;
 
-static inline void fastpostgres_rows_desc_begin(FastpostgresRowsDesc *d, const uint8_t *base, uint64_t rows_off)
+static inline void
+fastpostgres_rows_desc_begin(FastpostgresRowsDesc *d, const uint8_t *base, uint64_t rows_off)
 {
     d->p   = base + FASTPOSTGRES_ROWS_FRAME;
     d->end = base + rows_off;
 }
 
-static inline int fastpostgres_rows_desc_next(FastpostgresRowsDesc *d, FastpostgresColumn *c)
+static inline int
+fastpostgres_rows_desc_next(FastpostgresRowsDesc *d, FastpostgresColumn *c)
 {
     const uint8_t *p = d->p;
 
@@ -490,7 +516,7 @@ static inline int fastpostgres_rows_desc_next(FastpostgresRowsDesc *d, Fastpostg
     c->pgtype = fastpostgres_rd_u32(&p);
     c->nulls = c->data = c->bytes = NULL;
     c->data_len = c->nrows = 0;
-    d->p = p;
+    d->p                   = p;
     return 1;
 }
 
@@ -502,7 +528,8 @@ typedef struct FastpostgresRowsReader {
     uint32_t       ncols;
 } FastpostgresRowsReader;
 
-static inline int fastpostgres_rows_init(FastpostgresRowsReader *r, const void *payload, size_t len)
+static inline int
+fastpostgres_rows_init(FastpostgresRowsReader *r, const void *payload, size_t len)
 {
     const uint8_t *p = (const uint8_t *)payload;
     uint64_t       rows_off;
@@ -523,7 +550,8 @@ static inline int fastpostgres_rows_init(FastpostgresRowsReader *r, const void *
 
 /* The next tuple in the segment; 0 at the end. The bytes are not copied: the
  * caller walks them where they lie, MAXALIGNed as PostgreSQL laid them out. */
-static inline int fastpostgres_rows_next(FastpostgresRowsReader *r, const uint8_t **row, uint32_t *len)
+static inline int
+fastpostgres_rows_next(FastpostgresRowsReader *r, const uint8_t **row, uint32_t *len)
 {
     const uint8_t *p = r->p;
 
@@ -545,7 +573,8 @@ typedef struct FastpostgresRowsWrite {
     uint64_t nrows;
 } FastpostgresRowsWrite;
 
-static inline void fastpostgres_rows_write_begin(FastpostgresRowsWrite *w, char *out, uint32_t ncols)
+static inline void
+fastpostgres_rows_write_begin(FastpostgresRowsWrite *w, char *out, uint32_t ncols)
 {
     char *p = out;
 
@@ -567,8 +596,9 @@ static inline void fastpostgres_rows_write_begin(FastpostgresRowsWrite *w, char 
     w->nrows = 0;
 }
 
-static inline void fastpostgres_rows_write_column(FastpostgresRowsWrite *w, const char *name, uint32_t name_len,
-                                                  uint8_t kind, uint32_t pgtype)
+static inline void
+fastpostgres_rows_write_column(FastpostgresRowsWrite *w, const char *name, uint32_t name_len, uint8_t kind,
+                               uint32_t pgtype)
 {
     char *p = w->p;
 
@@ -583,7 +613,8 @@ static inline void fastpostgres_rows_write_column(FastpostgresRowsWrite *w, cons
 }
 
 /* Align the row area and record its offset; returns where the rows start. */
-static inline char *fastpostgres_rows_write_rows_begin(FastpostgresRowsWrite *w)
+static inline char *
+fastpostgres_rows_write_rows_begin(FastpostgresRowsWrite *w)
 {
     uint64_t off = (uint64_t)(w->p - w->base);
 
@@ -593,7 +624,8 @@ static inline char *fastpostgres_rows_write_rows_begin(FastpostgresRowsWrite *w)
     return w->p;
 }
 
-static inline void fastpostgres_rows_write_end(FastpostgresRowsWrite *w)
+static inline void
+fastpostgres_rows_write_end(FastpostgresRowsWrite *w)
 {
     fastpostgres_put_u64(w->base + 20, w->nrows);
 }
@@ -601,7 +633,8 @@ static inline void fastpostgres_rows_write_end(FastpostgresRowsWrite *w)
 /* Reserve one row for `len` bytes of tuple data; NULL when it does not fit, so
  * the caller can end the batch instead of the query. The tuple starts at the
  * next 8-byte boundary after the length word. */
-static inline char *fastpostgres_rows_reserve(FastpostgresRowsWrite *w, uint32_t len, const char *end)
+static inline char *
+fastpostgres_rows_reserve(FastpostgresRowsWrite *w, uint32_t len, const char *end)
 {
     char *row = w->p + 8;
 
@@ -633,14 +666,14 @@ typedef struct FastpostgresColumnarWrite {
 
 /* Offset of the next column's header, given the current offset, this column's
  * frame and its data length — mirrors the padding write_column inserts. */
-static inline uint64_t fastpostgres_columnar_next_offset(uint64_t off, uint32_t name_len, uint32_t null_bytes,
-                                                         uint64_t data_len)
+static inline uint64_t
+fastpostgres_columnar_next_offset(uint64_t off, uint32_t name_len, uint32_t null_bytes, uint64_t data_len)
 {
     return FASTPOSTGRES_ALIGN8(off + 4 + (uint64_t)name_len + 1 + 4 + null_bytes + 8) + data_len;
 }
 
-static inline void fastpostgres_columnar_write_begin(FastpostgresColumnarWrite *w, char *out, uint32_t ncols,
-                                                     uint64_t nrows)
+static inline void
+fastpostgres_columnar_write_begin(FastpostgresColumnarWrite *w, char *out, uint32_t ncols, uint64_t nrows)
 {
     char *p = out;
 
@@ -665,9 +698,9 @@ static inline void fastpostgres_columnar_write_begin(FastpostgresColumnarWrite *
 
 /* Write one column's frame; returns its 8-byte aligned data pointer and points
  * `w->nulls` at the bitmap for the caller to fill. Finish with write_end(). */
-static inline char *fastpostgres_columnar_write_column(FastpostgresColumnarWrite *w, const char *name,
-                                                       uint32_t name_len, uint8_t kind, uint32_t pgtype,
-                                                       uint32_t null_bytes)
+static inline char *
+fastpostgres_columnar_write_column(FastpostgresColumnarWrite *w, const char *name, uint32_t name_len,
+                                   uint8_t kind, uint32_t pgtype, uint32_t null_bytes)
 {
     char *p = w->p;
 
@@ -682,7 +715,7 @@ static inline char *fastpostgres_columnar_write_column(FastpostgresColumnarWrite
     memset(p, 0, null_bytes);
     p += null_bytes;
     w->lenp = p;
-    p += 8; /* data_len, backpatched by write_end */
+    p += 8;       /* data_len, backpatched by write_end */
     while (((size_t)(p - w->base)) & 7)
         *p++ = 0; /* 8-byte aligned column data */
     w->p = p;
@@ -690,14 +723,16 @@ static inline char *fastpostgres_columnar_write_column(FastpostgresColumnarWrite
 }
 
 /* Backpatch the current column's data_len and advance past its data. */
-static inline void fastpostgres_columnar_write_end(FastpostgresColumnarWrite *w, uint64_t data_len)
+static inline void
+fastpostgres_columnar_write_end(FastpostgresColumnarWrite *w, uint64_t data_len)
 {
     fastpostgres_put_u64(w->lenp, data_len);
     w->p += data_len;
 }
 
 /* Fill in the segment header and publish it with a release barrier. */
-static inline void fastpostgres_shm_publish(void *map, uint64_t capacity, uint64_t payload_size)
+static inline void
+fastpostgres_shm_publish(void *map, uint64_t capacity, uint64_t payload_size)
 {
     FastpostgresShmHeader *h = (FastpostgresShmHeader *)map;
     memcpy(h->magic, FASTPOSTGRES_SHM_MAGIC, 8);
@@ -711,7 +746,8 @@ static inline void fastpostgres_shm_publish(void *map, uint64_t capacity, uint64
 }
 
 /* Validate a mapped segment header; returns payload size via *payload_size. */
-static inline int fastpostgres_shm_validate(const void *map, size_t size, uint64_t *payload_size)
+static inline int
+fastpostgres_shm_validate(const void *map, size_t size, uint64_t *payload_size)
 {
     const FastpostgresShmHeader *h = (const FastpostgresShmHeader *)map;
     if (size < FASTPOSTGRES_SHM_HEADER_SIZE || memcmp(h->magic, FASTPOSTGRES_SHM_MAGIC, 8) != 0) return 0;

@@ -156,9 +156,9 @@ Column_get_array_interface(ColumnObject *self, void *)
 
     dict  = PyDict_New();
     shape = Py_BuildValue("(n)", (Py_ssize_t)self->nrows);
-    data  = Py_BuildValue("(NK)", PyLong_FromVoidPtr((void *)fp_col_bytes(self->data)), (unsigned long long)1);
-    ts    = PyUnicode_FromString(typestr);
-    ver   = PyLong_FromLong(3);
+    data = Py_BuildValue("(NK)", PyLong_FromVoidPtr((void *)fp_col_bytes(self->data)), (unsigned long long)1);
+    ts   = PyUnicode_FromString(typestr);
+    ver  = PyLong_FromLong(3);
     if (!dict || !shape || !data || !ts || !ver)
     {
         Py_XDECREF(dict);
@@ -169,9 +169,10 @@ Column_get_array_interface(ColumnObject *self, void *)
         return nullptr;
     }
 
-    failed = PyDict_SetItemString(dict, "shape", shape) != 0 || PyDict_SetItemString(dict, "typestr", ts) != 0 ||
-             PyDict_SetItemString(dict, "data", data) != 0 || PyDict_SetItemString(dict, "version", ver) != 0 ||
-             PyDict_SetItemString(dict, "readonly", Py_True) != 0;
+    failed =
+        PyDict_SetItemString(dict, "shape", shape) != 0 || PyDict_SetItemString(dict, "typestr", ts) != 0 ||
+        PyDict_SetItemString(dict, "data", data) != 0 || PyDict_SetItemString(dict, "version", ver) != 0 ||
+        PyDict_SetItemString(dict, "readonly", Py_True) != 0;
     Py_DECREF(shape);
     Py_DECREF(data);
     Py_DECREF(ts);
