@@ -671,6 +671,53 @@ which is why sizing it from the machine came before quoting the chart. The chart
 now carries that footprint in its footer (and says when a run exhausted it), so
 the flattening curve has its cause next to it.
 
+## Where parallelism pays (measured)
+
+Two constraints decide this before any experiment does. The client's decode holds
+the GIL — the only `Py_BEGIN_ALLOW_THREADS` in the read path sit around libpq and
+the ring's `sem_timedwait` — and the object arena's bump pointer and the segment
+map cache (a `std::vector`) are unsynchronized: the GIL is what keeps them
+correct, so a threaded decode owes per-thread arenas before it owes anything else.
+And a PostgreSQL backend must not use threads at all, so server-side parallelism
+is more processes, never threads.
+
+Measured, 8-core container, reads of 100k rows through the DB-API (execute +
+fetchall), total rows/s, one ring per worker:
+
+| workers | threads | processes |
+|---|---|---|
+| 1 | 5.78M | 5.09M |
+| 2 | 6.10M (+6%) | 9.02M (+77%) |
+| 4 | 6.45M (+12%) | 12.05M (+137%) |
+| 6 | — | 11.80M (+132%) |
+
+Threads get the worker's turn and nothing else: 25% of a read is the worker, 75%
+is the client's decode, and the GIL serializes the second. Processes get both and
+plateau at four, where the cores and the memory traffic run out — each stream
+moves ~350 B/row through the segment and the arena.
+
+Two things the measurement turned up:
+
+- **a forked worker inherited the parent's ring name.** `_pool_prefix` was
+  computed at import, and gunicorn/uwsgi/multiprocessing all import first and fork
+  after, so every worker opened the *same* ring and the *same* segment: the run
+  showed 1 shm read out of 8, the rest silently on libpq, at 3.04M rows/s — slower
+  than a single process. The stem is per-pid now, a pid change resets the pool
+  (the parent's rings are not the child's), and a test forks and checks the names
+  differ.
+- **the ring budget is `max_worker_processes`.** One background worker per ring, 8
+  by default, and the seventh `Ring.start` already fails ("could not register
+  background worker"); past that the DB-API marks the pool broken and every read
+  falls back to libpq, silently. Practical concurrency is 7 rings system-wide, so
+  `FASTPOSTGRES_SHM_POOL` (4 per process) wants lowering when several processes
+  share a server, or `max_worker_processes` raising.
+
+What is left for a *single* stream is pipelining rather than paralleling: the ring
+is synchronous, so the worker's 38.6 ns and the client's 130 ns add. Two
+alternating data segments, with the next request issued before the current batch
+is decoded, would hide the worker's turn behind the decode — ~1.2x on a read, ~5%
+on CORE — with no threads and no GIL to fight.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
