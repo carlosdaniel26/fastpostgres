@@ -157,13 +157,20 @@ row_prepare(RowReceiver *rx, const Datum *values, const bool *isnull)
 }
 
 /* Write the tuple row_prepare measured: the same header members heap_form_tuple
- * sets, then PostgreSQL's own filler for the data area. */
+ * sets, then PostgreSQL's own filler for the data area. The whole row is zeroed
+ * first: the header because xmin/xmax/ctid are not the reader's business, and
+ * the data area because heap_fill_tuple leaves the alignment padding it inserts
+ * unwritten - heap_form_tuple gets away with that only because its palloc0 has
+ * already zeroed the tuple - while the reader's att_align_pointer mirror reads a
+ * zero pad as "align this value". The segment's bytes are stale from the
+ * previous batch, so a nonzero pad here decodes a >126-byte varlena after an
+ * unaligned offset through its own 4-byte header. */
 static void
 row_build(RowReceiver *rx, char *out, uint32 len)
 {
     HeapTupleHeader th = (HeapTupleHeader)out;
 
-    memset(out, 0, (size_t)rx->hoff); /* xmin/xmax/ctid: not the reader's business */
+    memset(out, 0, (size_t)len);
     HeapTupleHeaderSetNatts(th, (uint16)rx->tdesc->natts);
     th->t_hoff = (uint8)rx->hoff;
     heap_fill_tuple(rx->tdesc, rx->values, rx->isnull, out + rx->hoff, (Size)(len - rx->hoff),

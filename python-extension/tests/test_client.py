@@ -118,6 +118,38 @@ class RingReadTest(unittest.TestCase):
         )
         self.assertEqual(first, {"id": 1, "big": 2, "f": 1.5, "b": (0, 1), "name": b"row1"})
 
+    def test_row_frame_built_tuple_padding_is_zero(self):
+        """A projection's row is built by the worker (heap_fill_tuple), and the
+        filler leaves the alignment padding it inserts unwritten - in PostgreSQL
+        those bytes are zero because heap_form_tuple palloc0s the tuple. The
+        reader's att_align_pointer mirror reads a zero pad as "align this
+        value", so a byte left over from an earlier batch sends a >126-byte
+        varlena down the 1-byte-header path and its own header arrives as text.
+        """
+        # all values 4-aligned, so the dirtying pass has no padding of its own
+        # and its own decode is safe whatever the segment held before
+        dirty = (
+            "SELECT g::int4 AS id, repeat('Z', 28)::text AS sku, repeat('Z', 28)::text AS name "
+            "FROM generate_series(1, 20) g"
+        )
+        # id (4) + 'SKU-g' (6) leaves the 200-byte text at offset 10: unaligned
+        sql = (
+            "SELECT g::int4 AS id, ('SKU-' || g)::text AS sku, "
+            "CASE WHEN g % 2 = 0 THEN repeat('x', 200) ELSE repeat('y', 3) END AS name "
+            "FROM generate_series(1, 40) g"
+        )
+        expected = fp.Connection(CONNINFO).exec(sql).rows
+
+        self.ring.open("fp_py_seg", dirty)
+        self.assertEqual(self.ring.next_rows(20), 20)
+        _client.read_rows("fp_py_seg")  # leaves the segment's bytes behind
+
+        self.ring.open("fp_py_seg", sql)
+        for start in (0, 20):
+            self.assertEqual(self.ring.next_rows(20), 20)
+            self.assertEqual(_client.read_rows("fp_py_seg").rows, expected[start : start + 20])
+        self.ring.close()
+
     def test_synchronous_row_pull(self):
         """next_rows() is the one-call pull: post_rows(self->data) + wait()."""
         self.ring.open("fp_py_seg", QUERY)
