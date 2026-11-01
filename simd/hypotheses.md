@@ -799,6 +799,26 @@ spreading one copy over cores, and not sharding one query either, which the tabl
 above prices at 1.05x. The only copy-heavy path in the tree is ingest, and it has
 no client-side producer since the generators were deleted.
 
+### The three fast paths, in the benchmark
+
+The benchmark's third phase now runs what a consumer can opt into, against CORE on
+the same rows (`FAST PATHS` in the output, one process per size):
+
+| rows | SQLAlchemy CORE | core stand-in | `stream()` + numpy | CORE x 4 processes |
+|---|---|---|---|---|
+| 100K | 1.73M | 6.81M (**+293%**) | 7.52M (**+334%**) | 3.69M (**+113%**) |
+| 1M | 1.44M | 6.53M (**+353%**) | 7.76M (**+438%**) | 4.21M (**+192%**) |
+| 10M | 1.15M | 3.22M* | 8.15M (**+610%**) | 2.47M* |
+
+\* the 10M object-building rows are pool-limited: that phase reads the table six
+times in one process, so the immortal arena fills and they fall back to the normal
+constructors. `stream()` never builds an object, so it is unaffected — and it is
+the row that scales, +334% -> +610% as the load grows.
+
+The shape of it: the object-free paths are worth 3-6x, the object-building stand-in
+is worth 3-4x while the arena can hold its cells, and processes are worth 2-3x and
+compose with both.
+
 ## Page mechanisms (measured on this host)
 
 Facts first, because they decide which mechanisms exist:
