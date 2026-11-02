@@ -75,7 +75,7 @@ test:
 bench *args:
     benchmarks/harness/workloads_bench.sh {{args}}
 
-# the competitive benchmarks: adbc | arrow-memory | cache | cache-budget
+# the competitive benchmarks: adbc | arrow-transport | arrow-memory | cache | cache-budget
 rivals target="" *args:
     benchmarks/dispatch/rivals.sh {{target}} {{args}}
 
@@ -87,7 +87,7 @@ internals target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | transport | transport-e2e | ab
+# one figure per log: workloads | arrow | arrow-transport | arrow-memory | cache | cache-budget | codec | transport | transport-e2e | ab
 charts target="" *args:
     benchmarks/dispatch/charts.sh {{target}} {{args}}
 
@@ -96,6 +96,13 @@ charts target="" *args:
 [private]
 bench-adbc *sizes:
     just _run benchmarks.sh {{sizes}}
+
+# the same read with the ring engine as a second factor (rivals arrow-transport):
+# one fresh process per (engine, size) over shm and over regipc, ADBC measured
+# once - the container gets the host's /dev/regipc with --device
+[private]
+arrow-transport *args:
+    benchmarks/harness/arrow_transport_bench.sh {{args}}
 
 # fastpostgres against ADBC + Arrow with the ring's buffer fixed (rivals
 # arrow-memory): the same reads and what each side held while it delivered them

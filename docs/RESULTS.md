@@ -10,6 +10,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 |---|---|---|
 | `fastpostgres-vs-psycopg.log` | the workload suite: seven scenarios over the commerce schema, against psycopg 3 | [`BENCHMARKS.md`](BENCHMARKS.md), the README's workload table |
 | `fastpostgres-vs-arrow.log`, `-mixed`, `-small` | the read against ADBC + Arrow, at three sizes and two shapes | [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](LIMITATIONS.md) |
+| `arrow-transport.log` | the same read with the ring's engine as a second factor: fastpostgres over shm and over regipc, ADBC measured once, one process per (engine, size) | [`TRANSPORTS.md`](TRANSPORTS.md#the-arrow-read-both-engines), [`BENCHMARKS.md`](BENCHMARKS.md) |
 | `fastpostgres-vs-arrow-memory.log` | the same reads with the ring's buffer fixed: what each side held | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
 | `fastpostgres-vs-pgcache.log` | against a CDC-maintained result cache, each side at its defaults | [`PG-CACHE.md`](PG-CACHE.md) |
 | `fastpostgres-vs-pgcache-memory.log` | the same comparison under one memory budget on both sides | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |

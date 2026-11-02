@@ -134,6 +134,64 @@ carry the module's `leaf.calls` (13 and 2,000 timed calls) — ring 0 ran. What 
 numbers do not carry: the worker's CPU (the record measures the client process
 only, and a regipc worker spins too), and any concurrency.
 
+### The Arrow read, both engines
+
+The records above answer what a handoff costs, but on the workload suite's
+schema: 100k-row batches, one bulk scan, one client. The Arrow comparison
+(`just rivals adbc`, catalogued in [`BENCHMARKS.md`](BENCHMARKS.md)) is the other
+delivered-rows measurement — a six-column, 1M/10M-row read with each stack's own
+players — and its committed record was measured on one engine, so it cannot say
+what the transport costs that read. This record adds the engine as a second
+factor: per size, one fresh process per engine runs
+`benchmarks/rivals/sqlalchemy_bench.py` (`FASTPOSTGRES_TRANSPORT` is read at
+import and a ring's engine is fixed at creation, so no process can serve both),
+and the ADBC players ride inside those runs and are recorded once — they do not
+depend on the engine.
+
+```bash
+just rivals arrow-transport            # 1M and 10M, both engines
+just rivals arrow-transport --quick    # 100k, for a smoke run
+just charts arrow-transport            # docs/assets/arrow-transport.png
+```
+
+The regipc cell needs the module and the device, so the harness runs the dev
+image with `docker run --device /dev/regipc`, as the end-to-end record does; a
+container that cannot see the node fails the run with the remedy, never silently
+dropping an engine. Every fastpostgres record carries its cell's proof: the
+control rings the cell's processes left in the container's `/dev/shm` all name
+the engine that was asked for, their requests are answered, and the harness's own
+probe read was served by the ring, with the same digest (count + column sums) in
+every cell. Record: `benchmarks/results/arrow-transport.log`.
+
+**At this read's scale the engine does not move the delivered rate.**
+
+| read, 1M / 10M rows | shm | regipc | regipc/shm |
+|---|---|---|---|
+| DBAPI (typed tuples) | 6.23M / 6.64M rows/s | 5.87M / 6.54M | 0.94x / 0.98x |
+| stream()+sum (zero-copy) | 8.28M / 8.25M | 7.93M / 8.18M | 0.96x / 0.99x |
+| core interface | 6.05M / 6.45M | 5.99M / 6.66M | 0.99x / 1.03x |
+| SQLAlchemy CORE | 1.32M / 1.25M | 1.37M / 1.24M | 1.04x / 0.99x |
+| 4 processes | 10.62M / 6.03M | 11.71M / 6.97M | 1.10x / 1.16x |
+| ADBC + Arrow, arrow+sum (once per size) | 2.33M / 2.32M | — | — |
+
+Every single-process ratio is inside ±6%, the run's own spread (the 1M tuple
+read spreads ±1.0% over its reps on shm and ±5.8% on regipc); the only path that
+leans one way at both sizes is the 4-process read, the noisiest one. That is the
+end-to-end scan's result on a different schema, batch size and set of players: a
+1M-row read is ten 100k-row batches, and ten handoffs at either engine's price
+are not a measurable share of a read that takes 120-170 ms.
+
+**The Arrow family reproduces the committed record**: `arrow+sum` 2.33M/2.32M
+rows/s here against 2.28M/2.24M in
+[`fastpostgres-vs-arrow.log`](../benchmarks/results/fastpostgres-vs-arrow.log)
+(+2%/+4%), `table+to_pylist` 1.29M/1.24M against its 1.27M/1.27M, and
+`stream()+sum` 8.28M/8.25M against its 8.23M/8.42M. The row-decode paths run
+below the committed record's numbers (DBAPI 6.2-6.6M against 7.27-7.33M, the
+4-process read 6.0-10.6M against 8.9-13.4M); the client's own report puts the
+decode at ~345 cycles/row at 1M against ~315 in the committed run, so the gap is
+the machine's state (background load, the governor), not the code — and it is the
+same on both engines, which is what this record is about.
+
 ## Reproducing
 
 ```bash

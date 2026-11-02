@@ -11,6 +11,8 @@ charts: one figure per log
 
   workloads      the realistic workload suite (benchmarks/results/fastpostgres-vs-psycopg.log)
   arrow          fastpostgres vs ADBC + Arrow (benchmarks/results/fastpostgres-vs-arrow.log)
+  arrow-transport  the same read per ring engine, from its record
+                 (benchmarks/results/arrow-transport.log)
   arrow-memory   the same reads under a fixed ring buffer
   cache          fastpostgres vs PgCache, defaults
   cache-budget   fastpostgres vs PgCache under one memory budget
@@ -27,6 +29,7 @@ EOF
 case "$target" in
   workloads)    exec benchmarks/charts/workloads.py "$@" ;;
   arrow)        exec benchmarks/charts/adbc.py "$@" ;;
+  arrow-transport) exec benchmarks/charts/arrow_transport.py "$@" ;;
   arrow-memory) exec benchmarks/charts/arrow_memory.py "$@" ;;
   cache)        exec benchmarks/charts/cache.py "$@" ;;
   cache-budget) exec benchmarks/charts/cache_budget.py "$@" ;;

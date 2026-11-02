@@ -101,12 +101,14 @@ read, and the README's workload table is this log's headline numbers.
 ```
 just rivals                  # list the targets
 just rivals adbc             # the ADBC + Arrow comparison, unchanged
+just rivals arrow-transport --quick   # the same read over both ring engines
 just rivals cache --quick
 ```
 
 | target | the question | record | method and caveats |
 |---|---|---|---|
 | `adbc` | the read against the Arrow ecosystem's own answer, same output | [`fastpostgres-vs-arrow.log`](../benchmarks/results/fastpostgres-vs-arrow.log), [`-mixed`](../benchmarks/results/fastpostgres-vs-arrow-mixed.log), [`-small`](../benchmarks/results/fastpostgres-vs-arrow-small.log) | [`METHODOLOGY.md`](METHODOLOGY.md), [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](LIMITATIONS.md) |
+| `arrow-transport` | the same read with the ring's engine as a second factor: fastpostgres over shm, fastpostgres over regipc and ADBC + Arrow in one run, one fresh process per (engine, size) | [`arrow-transport.log`](../benchmarks/results/arrow-transport.log) | [`TRANSPORTS.md`](TRANSPORTS.md#the-arrow-read-both-engines) |
 | `arrow-memory` | the same reads with the ring's buffer fixed: what each side holds | [`fastpostgres-vs-arrow-memory.log`](../benchmarks/results/fastpostgres-vs-arrow-memory.log) | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
 | `cache` | a CDC-maintained result cache in front of the same server, its defaults | [`fastpostgres-vs-pgcache.log`](../benchmarks/results/fastpostgres-vs-pgcache.log) | [`PG-CACHE.md`](PG-CACHE.md) |
 | `cache-budget` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](../benchmarks/results/fastpostgres-vs-pgcache-memory.log) | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
@@ -131,7 +133,9 @@ costs - and their results live in the lab notebook rather than in this catalog.
 
 ## Charts: `just charts [target]`
 
-`workloads` · `arrow` · `arrow-memory` · `cache` · `cache-budget` · `codec` ·
+`workloads` · `arrow` · `arrow-transport` - the Arrow read per ring engine:
+delivered rates, the ratio against Arrow, the p50 per read.
+`arrow-memory` · `cache` · `cache-budget` · `codec` ·
 `transport` - the two doorbells: hops/s, µs per hop, µs of CPU per hop.
 `transport-e2e` - the same two, end to end: delivered rates, ms per read, the
 client's µs of CPU per row.

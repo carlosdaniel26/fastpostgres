@@ -16,6 +16,9 @@ rivals: the competitive benchmarks
 
   adbc           fastpostgres vs ADBC + Arrow over the same rows
                  (benchmarks/results/fastpostgres-vs-arrow.log, -mixed, -small)
+  arrow-transport  the same read once per ring engine, ADBC measured once: the
+                 engine as a second factor (needs the host's /dev/regipc)
+                 (benchmarks/results/arrow-transport.log)
   arrow-memory   the same reads with the ring's buffer fixed (--mib=N)
                  (benchmarks/results/fastpostgres-vs-arrow-memory.log)
   cache          vs a CDC-maintained result cache, each side at its defaults
@@ -29,6 +32,7 @@ EOF
 
 case "$target" in
   adbc)         just bench-adbc "$@" ;;
+  arrow-transport) just arrow-transport "$@" ;;
   arrow-memory) just arrow-memory-bench "$@" ;;
   cache)        just pgcache-bench "$@" ;;
   cache-budget) just pgcache-memory-bench "$@" ;;
