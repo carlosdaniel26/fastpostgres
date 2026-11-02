@@ -115,11 +115,12 @@ def style(ax, ticks, ylabel, log_y=False):
     ax.set_ylabel(ylabel)
     if log_y:
         ax.set_yscale("log")
-        ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=12))
+        # binary buffer sizes: what the lines are read against are MiB figures
+        ax.yaxis.set_major_locator(mticker.FixedLocator([2**i * 1048576 for i in range(0, 12)]))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_bytes))
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     else:
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_rows))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
@@ -147,23 +148,27 @@ def main():
 
     for player, color in (("ring", ACCENT), ("arrow-batch", GREEN), ("arrow-table", ORANGE)):
         xs = [n for n in rows if player in data[n]]
-        line(ax_rate, xs, [data[n][player] for n in xs], color, fmt=fmt_rows)
+        # the two Arrow paths sit within a few percent of each other: keep their
+        # labels apart, one above the point and one below
+        line(ax_rate, xs, [data[n][player] for n in xs], color, fmt=fmt_rows,
+             dy=7 if player != "arrow-table" else -11)
     ax_rate.set_title("the same read, same output, same rows", fontsize=9.5)
 
     # the ring's fixed budget first: the line the others are read against
-    budget = next((c["ring"]["seg_bytes"] for n in rows if "ring" in carried.get(n, {})
-                   and carried[n]["ring"].get("seg_bytes")), 0)
+    budget = next((carried[n]["ring"]["seg_bytes"] for n in rows
+                   if carried.get(n, {}).get("ring", {}).get("seg_bytes")), 0)
     if budget:
         line(ax_bytes, [rows[0], rows[-1]], [budget, budget], GREY, ls="--", marker=None,
-             width=1.4, fmt=fmt_bytes, dy=7)
+             width=1.4, labels=False)
         ax_bytes.annotate(f"the ring's transfer buffer: {fmt_bytes(budget)}, fixed",
                           xy=(rows[0], budget), textcoords="offset points", xytext=(6, -12),
                           fontsize=7, color="#888888", zorder=4)
-    for player, key, color in (("ring", "max_batch_bytes", ACCENT),
-                               ("arrow-batch", "max_batch_bytes", GREEN),
-                               ("arrow-table", "result_bytes", ORANGE)):
+    # the table path is the tallest line, so its labels go below the markers
+    for player, key, color, dy in (("ring", "max_batch_bytes", ACCENT, -11),
+                                   ("arrow-batch", "max_batch_bytes", GREEN, -11),
+                                   ("arrow-table", "result_bytes", ORANGE, -11)):
         xs = [n for n in rows if carried.get(n, {}).get(player, {}).get(key)]
-        line(ax_bytes, xs, [carried[n][player][key] for n in xs], color, dy=-11)
+        line(ax_bytes, xs, [carried[n][player][key] for n in xs], color, dy=dy)
     ax_bytes.set_title("what each held while it delivered", fontsize=9.5)
 
     handles = [
@@ -191,11 +196,12 @@ def main():
     print(f"wrote {path}")
     for n in rows:
         ring = carried.get(n, {}).get("ring", {})
-        batch = carried.get(n, {}).get("arrow", {})
+        batch = carried.get(n, {}).get("arrow-batch", {})
+        table = carried.get(n, {}).get("arrow-table", {})
         print(f"  rows {fmt_rows(n)}: ring buffer {fmt_bytes(ring.get('seg_bytes', 0))}, "
               f"batch {fmt_bytes(ring.get('max_batch_bytes', 0))}; "
               f"arrow batch {fmt_bytes(batch.get('max_batch_bytes', 0))}, "
-              f"arrow table {fmt_bytes(batch.get('result_bytes', 0))}")
+              f"arrow table {fmt_bytes(table.get('result_bytes', 0))}")
 
 
 if __name__ == "__main__":

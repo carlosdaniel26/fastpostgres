@@ -84,11 +84,18 @@ def read_ring(conn):
 
 
 def frame_bytes(batch):
-    """What one columnar batch carried: the column buffers the reader got views of."""
+    """What one columnar batch carried: each column's bytes, plus its null bitmap.
+
+    `data` is the whole column region - for text that is the offset table followed
+    by the text itself - and `bytes`/`offsets` are views *into* it, so they must
+    not be added on top or the text is counted twice. That is what the first
+    version of this benchmark did, and it made the ring look ~50% fatter per row
+    than Arrow while carrying the same bytes.
+    """
     def n(view):
         return len(view) if view is not None else 0
 
-    return sum(n(c.data) + n(c.bytes) + n(c.nulls) for c in batch.columns)
+    return sum(n(c.data) + n(c.nulls) for c in batch.columns)
 
 
 def read_arrow_batch(conn):
