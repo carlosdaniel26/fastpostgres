@@ -17,7 +17,15 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 | `cache-stat.log` | the host PMU's counters: decodes per row, transports per KiB | [`DECODE-NOTES.md`](DECODE-NOTES.md) |
 | `ab/*.log` | the before/after pairs the `improve-*` charts are drawn from | [`DECODE-NOTES.md`](DECODE-NOTES.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
 
-## House rules
+## Housing rules
+
+- A record is produced by redirecting its harness to a file *outside* the tree and
+  copying it in, so the `git:` stamp is taken while the record file is still
+  untouched and the stamp is clean:
+
+  ```
+  just bench > /tmp/workloads.log && cp /tmp/workloads.log benchmarks/results/fastpostgres-vs-psycopg.log
+  ```
 
 - One file per run family; a re-run replaces it, and the `git:` stamp says which
   commit produced the numbers.
