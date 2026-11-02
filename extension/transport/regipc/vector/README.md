@@ -259,3 +259,37 @@ sudo insmod extension/transport/regipc/vector/regipcvec.ko width=1024 mode=0666
 make -C extension/transport/regipc/vector sweep        # unloads itself
 sudo rmmod regipcvec                                   # if the sweep was run by hand
 ```
+
+## Measured: the sweep, on this machine
+
+`make sweep`, 3 reps per width, one module reload per point, every run verified
+(the child received exactly what the caller sent, the leaf counted every call).
+
+| width | real bytes | p50 | p99 | calls/s | arena GB/s |
+|---|---|---|---|---|---|
+| 0 (FP tax only) | 0 | 0.651 µs | 0.822 µs | 1.449 M | - |
+| 256 | 256 | 0.671 µs | 0.691 µs | 1.434 M | 0.367 |
+| 1024 | 1024 | 0.672 µs | 0.752 µs | 1.416 M | 1.450 |
+| 4096 | 2456 | 0.711 µs | 0.722 µs | 1.355 M | 5.548 |
+
+Against the plain ABI 2 call (0.521 µs), the fit is:
+
+- **intercept: +130 ns per call (+25%), carrying nothing** - that is
+  `kernel_fpu_begin/end`, and it is paid on every call whatever the width;
+- **slope: +60 ns for 2456 bytes** (~24 ns/KiB, 2.6x a hot userspace copy) - the
+  copy is cheap; the tax is not;
+- at the widest point the channel moves 3.3 GB/s of *real* state (5.5 GB/s of
+  arena), which is ~26x the 72 B GPR channel's 125 MB/s.
+
+The verdict, now measured rather than projected: the width works, and it still
+does not pay. A real batch is ~4.7 MB, i.e. ~1900 calls of 2456 B; at 0.711 µs
+each that is 1.36 ms of calls per batch, ~3.4% added to a 40 ms batch, on top of
+the payload still having to be built by the worker and copied here page by page -
+where the segment path copies it once and the client reads it in place. And the
+per-call tax is on every call, including the ones that carry nothing.
+
+What the numbers point at instead: the caller can `xsave` its own state into a
+shared page in ~52 ns and issue a payload-free call, avoiding the kernel's 130 ns
+entirely - which is the architecture fastpostgres already has (the segment moves
+the bytes at memcpy speed, the call moves the notification at 0.5 µs).
+
