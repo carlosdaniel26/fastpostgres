@@ -106,3 +106,6 @@ selftest: fpvec
 	./fpvec --selftest --width $(WIDTH)
 
 endif
+
+chart:
+	python3 chart.py --out ../../../../docs/assets
