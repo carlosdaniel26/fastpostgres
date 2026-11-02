@@ -15,6 +15,7 @@ shape) and [`fastpostgres-vs-arrow-small.log`](fastpostgres-vs-arrow-small.log)
 | NULLs, both varlena header sizes, non-ASCII | yes | `SHAPE=mixed` log |
 | 100K / 1M / 10M rows | yes | all three logs |
 | a small result | 1K rows | `fastpostgres-vs-arrow-small.log` |
+| what each side holds while it reads | 1M / 5M / 10M rows | `fastpostgres-vs-arrow-memory.log` |
 
 ## What it does not cover, and what happens there
 
@@ -34,6 +35,12 @@ shape) and [`fastpostgres-vs-arrow-small.log`](fastpostgres-vs-arrow-small.log)
 - **ADBC parallelism.** The ADBC player is a single connection doing one fetch.
   A threaded ADBC consumer is not measured, so "ADBC is slower" means this ADBC
   usage, not every possible one.
+- **Memory as a budget.** `just arrow-memory-bench` fixes the ring's transfer
+  buffer (512 MiB by default) and reports what each side held — the ring's segment
+  and batch, ADBC's largest Arrow batch, the Arrow table's whole result — in
+  [`fastpostgres-vs-arrow-memory.log`](fastpostgres-vs-arrow-memory.log). It is
+  one shape, three sizes and three reps; it does not measure allocation *rates*,
+  page faults, or a consumer that holds several results at once.
 
 ## Small results: where the rankings invert
 

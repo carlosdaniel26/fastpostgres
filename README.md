@@ -40,6 +40,18 @@ a second time into Python objects. (Comparing fast-postgres's tuples against
 ADBC's Arrow table would price those two outputs, not the two transports, which
 is why neither table above does it.)
 
+Both of those are about speed. What each side *holds* while it delivers the same
+rows is the other half of the comparison
+([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), `just arrow-memory-bench`):
+with the ring's transfer buffer fixed at 512 MiB, the ring's segment is 512 MiB
+at 1M rows and at 10M, ~4.9 MiB of it in flight per 100k-row batch and a flat
+~143 MiB RSS — while ADBC's record-batch reader holds one 11.6 MiB batch at a
+time, and its Arrow table path holds the whole result, 475.9 MiB at 10M rows
+(649 MiB of RSS), in buffers. The ring is 3.6–3.8× faster there too, the same
+ranking as above.
+
+![fast-postgres against Arrow under a fixed 512 MiB buffer](assets/arrow-memory.png)
+
 The ranking survives a harder shape. With `SHAPE=mixed` — NULLs on ~10% of the
 values, text on both sides of the 126-byte varlena split, a non-ASCII value every
 eighth row — the same two comparisons read **4.7–6.0×** and **4.1–4.3×**: the
