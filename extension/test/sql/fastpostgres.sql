@@ -12,14 +12,14 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'fastpostgres';
 SELECT proname, pg_get_function_identity_arguments(oid) AS args
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
-ORDER BY proname;
+ORDER BY proname, args;
 
--- Both are STRICT VOLATILE C functions of one text argument, and neither is
--- leaked to public callers by a default grant beyond the database's.
+-- All are STRICT VOLATILE C functions: the ring's start (one overload for the
+-- shm default, one that names a transport) and its stop.
 SELECT proname, provolatile, proisstrict, pronargs
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
-ORDER BY proname;
+ORDER BY proname, pronargs;
 
 DROP EXTENSION fastpostgres;
 

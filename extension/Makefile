@@ -9,17 +9,19 @@
 EXTENSION = fastpostgres
 MODULE_big = fastpostgres
 
-OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o
+OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o \
+       transport/transport.o transport/engine_shm.o transport/engine_regipc.o
 
 # The version lives in this file and in fastpostgres.control, and the SQL file is
-# named after it; `just check-version` proves the three agree.
-DATA = sql/fastpostgres--1.0.0.sql
+# named after it; `just check-version` proves the three agree. The 1.0.0 file and
+# the 1.0.0 -> 1.1.0 upgrade path stay so an installed 1.0.0 can be updated.
+DATA = sql/fastpostgres--1.0.0.sql sql/fastpostgres--1.1.0.sql sql/fastpostgres--1.0.0--1.1.0.sql
 
 REGRESS = fastpostgres
 REGRESS_OPTS = --inputdir=test
 
 PG_CONFIG = pg_config
-PG_CPPFLAGS += -I$(srcdir)/include
+PG_CPPFLAGS += -I$(srcdir)/include -I$(srcdir)
 
 # -O3 for the serialization hot loops (PGXS defaults to -O2).
 PG_CFLAGS += -O3

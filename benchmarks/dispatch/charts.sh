@@ -15,6 +15,7 @@ charts: one figure per log
   cache          fastpostgres vs PgCache, defaults
   cache-budget   fastpostgres vs PgCache under one memory budget
   codec          the codec x transport matrix
+  transport      the two doorbells: hops/s, us per hop, us of CPU per hop
   ab             before/after, from an improve-*.log pair (--log=...)
 
 Arguments after the target go to that chart's script.
@@ -28,6 +29,7 @@ case "$target" in
   cache)        exec benchmarks/charts/cache.py "$@" ;;
   cache-budget) exec benchmarks/charts/cache_budget.py "$@" ;;
   codec)        exec benchmarks/charts/codec.py "$@" ;;
+  transport)    exec benchmarks/charts/transport.py "$@" ;;
   ab)           exec benchmarks/charts/ab.py "$@" ;;
   "" | list | help) usage ;;
   *)

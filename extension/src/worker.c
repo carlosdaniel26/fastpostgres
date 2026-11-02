@@ -39,6 +39,7 @@
 #include "columnar.h"
 #include "fastpostgres/ring.h"
 #include "stream.h"
+#include "transport/transport.h"
 
 #define FASTPOSTGRES_RING_WAIT_MS 100 /* only so the worker notices SIGTERM */
 
@@ -265,17 +266,36 @@ PGDLLEXPORT void fastpostgres_ring_main(Datum main_arg);
 PGDLLEXPORT void
 fastpostgres_ring_main(Datum main_arg)
 {
-    BackgroundWorker *bw  = MyBgworkerEntry;
-    const char       *seg = bw->bgw_extra; /* "ring\0dbname\0" */
-    const char       *db  = seg + strlen(seg) + 1;
-    FastpostgresRing *r;
-    size_t            rsize;
-    uint64_t          handled = 0;
+    BackgroundWorker            *bw  = MyBgworkerEntry;
+    const char                  *seg = bw->bgw_extra; /* "ring\0dbname\0transport\0" */
+    const char                  *db  = seg + strlen(seg) + 1;
+    const char                  *tname;
+    const FastpostgresTransport *t;
+    FastpostgresRing            *r;
+    size_t                       rsize;
+    /* The engine's per-process state; the union is the larger of the two,
+     * because each hook reads only the ctx shaped for the engine it belongs
+     * to. Nothing here is shared with the client. */
+    union
+    {
+        FastpostgresShmCtx    shm;
+        FastpostgresRegipcCtx regipc;
+    } ctx;
 
     (void)main_arg;
 
     pqsignal(SIGTERM, ring_sigterm);
     BackgroundWorkerUnblockSignals();
+
+    /* The third NUL-separated field of bgw_extra names the engine. A ring
+     * registered by a server that predates the field carries none, and that
+     * is the shm ring it always was. */
+    tname = db + strlen(db) + 1;
+    if (tname >= bw->bgw_extra + BGW_EXTRALEN) tname = "";
+    t = fastpostgres_transport_by_name(tname[0] ? tname : "shm");
+    if (t == NULL)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("fastpostgres_ring_main: unknown transport \"%s\"", tname)));
 
     BackgroundWorkerInitializeConnection(db[0] ? db : "postgres", NULL, 0);
 
@@ -285,48 +305,67 @@ fastpostgres_ring_main(Datum main_arg)
         elog(LOG, "fastpostgres_ring_main: cannot map ring \"%s\"", seg);
         proc_exit(1);
     }
+
+    /* Before anything else reads or writes the segment: a ring another
+     * version or another engine wrote is refused, never driven. */
+    if (fastpostgres_transport_check(r, t) != 0)
+    {
+        elog(LOG, "fastpostgres_ring_main: ring \"%s\" is not a %s ring", seg, t->name);
+        munmap(r, rsize);
+        proc_exit(1);
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+    if (t->worker_init(r, &ctx) < 0)
+    {
+        elog(LOG, "fastpostgres_ring_main: %s worker_init failed: %m", t->name);
+        munmap(r, rsize);
+        proc_exit(1);
+    }
     __atomic_store_n(&r->worker_ready, 1, __ATOMIC_RELEASE);
 
     for (;;)
     {
-        struct timespec ts;
-        int             rc;
-        uint64_t        seq;
+        uint64_t seq;
+        int      rc;
 
         if (got_sigterm) break;
 
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += FASTPOSTGRES_RING_WAIT_MS * 1000000L;
-        if (ts.tv_nsec >= 1000000000L)
+        rc = t->wait_request(r, &ctx, &seq, FASTPOSTGRES_RING_WAIT_MS);
+        if (rc == 0)
         {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-
-        rc = sem_timedwait(&r->req_ready, &ts);
-        if (rc != 0)
-        {
-            /* timeout or EINTR: re-check SIGTERM, and whether the client that
-             * owns this ring is gone (then there is nobody to serve) */
+            /* Timeout: re-check SIGTERM, the client that owns this ring (gone
+             * means there is nobody to serve), and the ring's op. The op check
+             * is what makes fastpostgres_ring_stop work on the regipc engine:
+             * that function only posts the semaphore, and no leaf call carries
+             * the STOP, so the wake surfaces here as a timeout. */
+            if (r->op == FASTPOSTGRES_OP_STOP) break;
             if (r->client_pid != 0 && kill((pid_t)r->client_pid, 0) != 0 && errno == ESRCH) break;
             continue;
         }
-
-        seq = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
-        if (seq == handled) continue;
-        handled = seq;
+        if (rc < 0)
+        {
+            /* SIGTERM ends a sem_timedwait with EINTR; that is an exit, not an
+             * engine failure worth logging. */
+            if (!got_sigterm) elog(LOG, "fastpostgres_ring_main: %s wait_request failed: %m", t->name);
+            break;
+        }
 
         r->status   = 0;
         r->nrows    = 0;
         r->error[0] = 0;
 
         if (!ring_handle(r, seg)) break;
-        __atomic_store_n(&r->resp_seq, handled, __ATOMIC_RELEASE);
-        sem_post(&r->resp_ready);
+        if (t->post_response(r, &ctx, seq) < 0)
+        {
+            elog(LOG, "fastpostgres_ring_main: %s post_response failed: %m", t->name);
+            break;
+        }
     }
 
     abort_txn();
     __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
+    t->worker_fini(r, &ctx);
     munmap(r, rsize);
     proc_exit(0);
 }
@@ -337,12 +376,52 @@ PG_FUNCTION_INFO_V1(fastpostgres_ring_start);
 Datum
 fastpostgres_ring_start(PG_FUNCTION_ARGS)
 {
-    char                   *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const char             *db  = get_database_name(MyDatabaseId);
-    BackgroundWorker        w;
-    BackgroundWorkerHandle *handle;
-    size_t                  slen;
-    char                    summary[256];
+    char                        *seg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const FastpostgresTransport *t   = &fastpostgres_transport_shm;
+    const char                  *db  = get_database_name(MyDatabaseId);
+    BackgroundWorker             w;
+    BackgroundWorkerHandle      *handle;
+    size_t                       slen;
+    size_t                       dlen;
+    size_t                       tlen;
+    size_t                       rsize;
+    FastpostgresRing            *r;
+    char                         summary[256];
+
+    /* The one-argument form is the shm ring it always was; the two-argument
+     * overload names the engine. An unknown name is an error rather than a
+     * silent fallback: the caller would otherwise believe it asked for the
+     * transport it got. */
+    if (PG_NARGS() > 1)
+    {
+        char *name = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+        t = fastpostgres_transport_by_name(name);
+        if (t == NULL)
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("fastpostgres_ring_start: unknown transport \"%s\"", name)));
+    }
+
+    /* The ring's transport field is the segment's provenance. A v4 ring made
+     * before the field was filled in reads zero and is stamped here; one
+     * already stamped for a different engine is refused, because driving it
+     * with the wrong doorbell would corrupt the session it is serving. */
+    r = ring_map_rw(seg, &rsize);
+    if (r != NULL)
+    {
+        if (r->transport == 0)
+            r->transport = t->id;
+        else if (r->transport != t->id)
+        {
+            uint32_t have = r->transport;
+
+            munmap(r, rsize);
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("fastpostgres_ring_start: ring \"%s\" was made for transport %u, not %s",
+                                   seg, have, t->name)));
+        }
+        munmap(r, rsize);
+    }
 
     memset(&w, 0, sizeof(w));
     snprintf(w.bgw_name, BGW_MAXLEN, "fastpostgres ring");
@@ -356,9 +435,12 @@ fastpostgres_ring_start(PG_FUNCTION_ARGS)
 
     memset(w.bgw_extra, 0, BGW_EXTRALEN);
     slen = strlen(seg);
-    if (slen + strlen(db) + 2 > BGW_EXTRALEN) elog(ERROR, "fastpostgres_ring_start: ring name too long");
-    memcpy(w.bgw_extra, seg, slen + 1);                 /* ring name */
-    memcpy(w.bgw_extra + slen + 1, db, strlen(db) + 1); /* database name */
+    dlen = strlen(db);
+    tlen = strlen(t->name);
+    if (slen + dlen + tlen + 3 > BGW_EXTRALEN) elog(ERROR, "fastpostgres_ring_start: ring name too long");
+    memcpy(w.bgw_extra, seg, slen + 1);                       /* ring name */
+    memcpy(w.bgw_extra + slen + 1, db, dlen + 1);             /* database name */
+    memcpy(w.bgw_extra + slen + dlen + 2, t->name, tlen + 1); /* transport */
 
     if (!RegisterDynamicBackgroundWorker(&w, &handle))
         elog(ERROR, "fastpostgres_ring_start: could not register background worker");

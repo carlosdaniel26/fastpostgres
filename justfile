@@ -79,7 +79,7 @@ bench *args:
 rivals target="" *args:
     benchmarks/dispatch/rivals.sh {{target}} {{args}}
 
-# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat
+# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport
 internals target="" *args:
     benchmarks/dispatch/internals.sh {{target}} {{args}}
 
@@ -128,6 +128,12 @@ decode-ir *args:
 [private]
 decode-mca *args:
     just _run_profile decode-mca.sh {{args}}
+
+# the ring's two doorbells, isolated, on the host (internals transport): the
+# regipc module cannot be loaded inside the image, so this one never runs in it
+[private]
+transport *args:
+    benchmarks/jobs/transport.sh {{args}}
 
 # cache counters on the host's PMU (internals cache-stat)
 [private]

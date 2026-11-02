@@ -8,30 +8,32 @@ CREATE EXTENSION fastpostgres;
 SELECT extname, extversion FROM pg_extension WHERE extname = 'fastpostgres';
    extname    | extversion 
 --------------+------------
- fastpostgres | 1.0.0
+ fastpostgres | 1.1.0
 (1 row)
 
 SELECT proname, pg_get_function_identity_arguments(oid) AS args
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
-ORDER BY proname;
-         proname         | args 
--------------------------+------
+ORDER BY proname, args;
+         proname         |    args    
+-------------------------+------------
  fastpostgres_ring_start | text
+ fastpostgres_ring_start | text, text
  fastpostgres_ring_stop  | text
-(2 rows)
+(3 rows)
 
--- Both are STRICT VOLATILE C functions of one text argument, and neither is
--- leaked to public callers by a default grant beyond the database's.
+-- All are STRICT VOLATILE C functions: the ring's start (one overload for the
+-- shm default, one that names a transport) and its stop.
 SELECT proname, provolatile, proisstrict, pronargs
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
-ORDER BY proname;
+ORDER BY proname, pronargs;
          proname         | provolatile | proisstrict | pronargs 
 -------------------------+-------------+-------------+----------
  fastpostgres_ring_start | v           | t           |        1
+ fastpostgres_ring_start | v           | t           |        2
  fastpostgres_ring_stop  | v           | t           |        1
-(2 rows)
+(3 rows)
 
 DROP EXTENSION fastpostgres;
 SELECT count(*) FROM pg_proc WHERE proname LIKE 'fastpostgres\_%';

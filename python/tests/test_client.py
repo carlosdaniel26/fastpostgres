@@ -7,8 +7,11 @@ Zero-copy contract: a column's ``data``/``bytes``/``nulls`` memoryviews alias
 the mapped segment, which the worker rewrites on the next chunk — decode (or
 copy) before the next ``ring.next()``.
 """
+import errno
 import os
 import struct
+import subprocess
+import sys
 import unittest
 
 import fastpostgres as fp
@@ -574,6 +577,65 @@ class DbapiTest(unittest.TestCase):
                 list(conn.cursor().stream("SELECT 1"))
         finally:
             conn.close()
+
+
+class TransportTest(unittest.TestCase):
+    """The transport knob, without a live server: a Ring resolves its engine once,
+    at construction, and a ring that cannot open that engine is refused — never
+    quietly served by the other one."""
+
+    @staticmethod
+    def _env_without_transport():
+        """This environment, minus the knob, with the checkout importable."""
+        env = {k: v for k, v in os.environ.items() if k != "FASTPOSTGRES_TRANSPORT"}
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [src, env.get("PYTHONPATH")]))
+        return env
+
+    def test_unknown_transport_raises(self):
+        with self.assertRaises(ValueError) as cm:
+            _client.Ring("fp_py_bogus_transport", 0, "nope")
+        message = str(cm.exception)
+        self.assertIn("nope", message)
+        self.assertIn('"shm" or "regipc"', message)  # the choices are named
+
+    @unittest.skipIf(os.path.exists("/dev/regipc"), "this machine has /dev/regipc")
+    def test_regipc_without_the_device_raises_with_errno(self):
+        with self.assertRaises(OSError) as cm:
+            _client.Ring("fp_py_no_regipc", 0, "regipc")
+        message = str(cm.exception)
+        self.assertIn("regipc", message)
+        self.assertIn(os.strerror(errno.ENOENT), message)  # the errno text, not a fallback
+
+    def test_default_transport_is_shm(self):
+        """A fresh interpreter with no FASTPOSTGRES_TRANSPORT reads shm."""
+        from fastpostgres import dbapi
+
+        out = subprocess.check_output(
+            [sys.executable, "-c", "from fastpostgres import dbapi; print(dbapi.transport())"],
+            env=self._env_without_transport(),
+            text=True,
+        )
+        self.assertEqual(out.strip(), "shm")
+        self.assertEqual(dbapi.transport(), os.environ.get("FASTPOSTGRES_TRANSPORT") or "shm")
+
+    def test_unknown_transport_from_the_env_is_refused(self):
+        env = self._env_without_transport()
+        env["FASTPOSTGRES_TRANSPORT"] = "bogus"
+        proc = subprocess.run(
+            [sys.executable, "-c", "from fastpostgres import dbapi"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("FASTPOSTGRES_TRANSPORT", proc.stderr)
+        self.assertIn("bogus", proc.stderr)
+
+    def test_explicit_shm_constructs_and_stops_without_a_worker(self):
+        ring = _client.Ring("fp_py_explicit_shm", 0, "shm")
+        ring.stop()  # no worker was started; teardown must still be safe
+        ring.stop()  # and idempotent
 
 
 if __name__ == "__main__":

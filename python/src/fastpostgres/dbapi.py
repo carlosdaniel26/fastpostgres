@@ -335,8 +335,23 @@ _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
 # ask to [64 KiB, 1 GiB].
 _SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
 _SEGMENT_BYTES = int(_SEGMENT_ENV) if _SEGMENT_ENV else 0
+# The transport every ring this process creates speaks: "shm" (the ring's own
+# semaphores, the default) or "regipc" (the regipc kernel module, /dev/regipc).
+# It is read once, at import, and an unknown value is refused here rather than
+# passed down, where the ring would have no engine to resolve it to.
+_TRANSPORT_ENV = os.environ.get("FASTPOSTGRES_TRANSPORT")
+_TRANSPORT = _TRANSPORT_ENV or "shm"
+if _TRANSPORT not in ("shm", "regipc"):
+    raise ValueError(
+        f"fastpostgres: FASTPOSTGRES_TRANSPORT must be 'shm' or 'regipc', not {_TRANSPORT!r}"
+    )
 _THREADS_PER_STREAM = 1.2
 _POOL_MAX = 8
+# The backend_type every ring worker shows in pg_stat_activity. Both engines run
+# through the same fastpostgres_ring_start and the same worker entry point, which
+# registers one type for both ("fastpostgres ring worker", worker.c); the chosen
+# transport only rides in bgw_extra's third field, so there is nothing per-engine
+# to count here.
 _RING_BACKEND = "fastpostgres ring worker"
 
 _pool_idle = queue.Queue()
@@ -472,6 +487,12 @@ def pool_size():
     return _machine_streams()
 
 
+def transport():
+    """The transport every ring this process creates speaks: "shm" (default) or
+    "regipc", from FASTPOSTGRES_TRANSPORT."""
+    return _TRANSPORT
+
+
 def pool_created():
     """Rings created so far (idle + checked out)."""
     return _pool_created
@@ -497,7 +518,7 @@ def _ring_acquire(bootstrap):
 
     name = f"{prefix}_{index}"
     try:
-        ring = _client.Ring(name, _SEGMENT_BYTES)
+        ring = _client.Ring(name, _SEGMENT_BYTES, transport())
         ring.start(bootstrap)
     except Exception as exc:
         with _pool_lock:

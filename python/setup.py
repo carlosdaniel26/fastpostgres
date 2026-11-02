@@ -19,6 +19,9 @@ if not os.path.isdir(PG_EXTENSION):
         "  the client builds from a checkout of the repository, where the\n"
         "  extension's headers are the single copy of the wire format."
     )
+# Sources must be relative to this setup.py: setuptools refuses an absolute
+# source path when it builds a wheel, and `pip install ./python` builds one.
+PG_EXTENSION_REL = os.path.join(os.pardir, "extension")
 
 
 def pg_config(option):
@@ -37,7 +40,7 @@ if pg_config("--includedir") is None:
         "  (postgresql-libs + postgresql on Arch, libpq-dev on Debian)."
     )
 
-include_dirs = [os.path.join(PG_EXTENSION, "include")]
+include_dirs = [os.path.join(PG_EXTENSION, "include"), os.path.join(PG_EXTENSION, "transport")]
 library_dirs = []
 for option, target in (("--includedir", include_dirs), ("--libdir", library_dirs)):
     path = pg_config(option)
@@ -55,6 +58,12 @@ setup(
                 "src/fastpostgres/native/segment.cpp",
                 "src/fastpostgres/native/codec.cpp",
                 "src/fastpostgres/native/types.cpp",
+                # The two engines and their name resolution: the client speaks
+                # the same ops table the worker does, from the same files. None
+                # of them touches PostgreSQL, only the ring header and syscalls.
+                os.path.join(PG_EXTENSION_REL, "transport", "transport.c"),
+                os.path.join(PG_EXTENSION_REL, "transport", "engine_shm.c"),
+                os.path.join(PG_EXTENSION_REL, "transport", "engine_regipc.c"),
             ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,

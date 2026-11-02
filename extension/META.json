@@ -2,14 +2,14 @@
   "name": "fastpostgres",
   "abstract": "PostgreSQL query results through POSIX shared memory, as typed arrays",
   "description": "A background worker runs each read with a portal and publishes every batch in /dev/shm: the result tuples as the executor laid them out (FPROWS) or a columnar frame (FPCOLUMN). The Python client maps the segment and reads it in place; writes, DDL and transactions keep using libpq.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "maintainer": "Carlos Daniel <105173667+carlosdaniel26@users.noreply.github.com>",
   "license": "mit",
   "provides": {
     "fastpostgres": {
       "abstract": "query results over POSIX shared memory",
-      "file": "sql/fastpostgres--1.0.0.sql",
-      "version": "1.0.0"
+      "file": "sql/fastpostgres--1.1.0.sql",
+      "version": "1.1.0"
     }
   },
   "prereqs": {

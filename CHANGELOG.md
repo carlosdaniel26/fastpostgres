@@ -7,6 +7,37 @@ are released together.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-02
+
+### Added
+
+- **Two transports, selectable.** The ring's notification path is now an engine:
+  `FASTPOSTGRES_TRANSPORT=shm` (the ring's own semaphores: one futex wake and a
+  scheduler handoff per batch, no privileges) or `regipc` (a cross-process call
+  through the regipc kernel module: the client puts the request descriptor in the
+  nine carrier registers, one ioctl makes ring 0 write it into a page the worker
+  pinned, and both sides poll this segment's counters before falling back to the
+  semaphores when idle). The payload is untouched: it is the data segment, and no
+  doorbell carries bytes. Measured in isolation (`just internals transport`):
+  **162k hops/s at p50 6.38 us for shm, 1.76M hops/s at p50 0.521 us for
+  regipc**, at 6.2 us against 1.15 us of CPU per hop - the regipc side spends
+  that CPU spinning, which is the trade the technique makes.
+- `fastpostgres_ring_start(text, text)` names the engine; the one-argument form
+  stays shm. The ring (magic `FPRING04`) records which engine made it, and a
+  segment written for one engine is refused by the other rather than driven.
+- The regipc ABI (version 2) is vendored at
+  [`extension/include/fastpostgres/regipc.h`](extension/include/fastpostgres/regipc.h)
+  with the module it belongs to
+  ([`extension/transport/regipc/module/`](extension/transport/regipc/module/)),
+  from the technique's own repository.
+
+### Changed
+
+- `python/`: `Ring(name, segment_bytes, transport=...)` and the
+  `FASTPOSTGRES_TRANSPORT` knob; the client compiles the engine it uses out of
+  `extension/transport/`, so both sides run the same doorbell code.
+
+
 ## [1.0.0] - 2026-11-01
 
 ### Added
@@ -44,5 +75,6 @@ are released together.
 - The logo's cut-out has no light pixels along the silhouette (closed-form alpha
   matting over the original artwork).
 
-[Unreleased]: https://github.com/carlosdaniel26/fastpostgres/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/carlosdaniel26/fastpostgres/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/carlosdaniel26/fastpostgres/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/carlosdaniel26/fastpostgres/releases/tag/v1.0.0

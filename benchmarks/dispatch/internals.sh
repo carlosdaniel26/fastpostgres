@@ -23,6 +23,9 @@ internals: the meters behind the design notes
                    (docs/CODEC-TRANSPORT.md, benchmarks/results/codec-transport.log)
   cache-stat       cache counters on the host's PMU: decodes per row, transports
                    per KiB (benchmarks/results/cache-stat.log)
+  transport        the ring's two doorbells, isolated: the semaphores against the
+                   regipc kernel call, one hop at a time (host, /dev/regipc)
+                   (docs/TRANSPORTS.md, benchmarks/results/transport-shm-vs-regipc.log)
 
 Arguments after the target go to that target's recipe.
 EOF
@@ -34,6 +37,7 @@ case "$target" in
   decode-mca)      just decode-mca "$@" ;;
   codec-transport) just codec-transport "$@" ;;
   cache-stat)      just cache-stat "$@" ;;
+  transport)       just transport "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "internals: unknown target '$target'" >&2
