@@ -55,6 +55,36 @@ The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)
 
 All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 
+### Realistic workloads: FastPostgres against psycopg 3
+
+The comparison above is one statement over one table. The workload suite asks the
+pragmatic question: over a commerce schema with foreign keys and indexes (10k
+customers, 10k products, 1M orders, 3M order items), the same application on both
+drivers, the same app-facing call, per-statement latency and throughput
+([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
+[`log`](docs/fastpostgres-vs-psycopg.log)):
+
+| scenario | FastPostgres | psycopg 3 | |
+|---|---|---|---|
+| primary-key lookups, statements/s | 8.2K | **38.6K** | each ring statement opens and closes a stream |
+| a filtered, ordered page of 100, statements/s | 2.2K | **4.7K** | same trade, and p95 1.03 ms against 0.23 |
+| the scan (1M rows out), rows/s | **2.21M** | 0.84M | 2.6x the socket |
+| the join (2.7M rows out), rows/s | **2.18M** | 1.26M | 1.7x |
+| the aggregate, ms/read | 231.3 | **85.2** | the ring's read runs as a serial plan in its worker |
+| four clients on the page, statements/s | 13.3K | **16.8K** | the per-statement cost again |
+| 90/10 reads and inserts, reads/s | 2.57K | **3.09K** | writes 286 against 343 per second |
+
+Three things this says that the transport benchmark cannot. **Bulk delivery is
+where the ring wins**, at every size. **A small statement is where it loses**:
+opening a stream is two semaphore round trips, where psycopg pays one socket
+round trip - so a point read belongs on libpq, not on the ring. And **a parallel
+plan is neither stack's to win**: the aggregate is slower on the ring because
+its background worker runs the plan serially (the ring's 231.3 ms matches the
+same query with `max_parallel_workers_per_gather = 0`, 224 ms, while psycopg's
+backend gets a parallel plan).
+
+![Realistic workloads over a commerce schema](assets/workloads.png)
+
 ### Read path: FastPostgres against ADBC + Arrow
 
 The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose results arrive as Arrow record batches - and each comparison asks both stacks for the same output.
@@ -138,17 +168,17 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 
 ### Benchmarks and meters
 
-| command | what it measures | record |
+| class | command | what it answers |
 |---|---|---|
-| `just bench [nrows...]` | the read against ADBC + Arrow, and the paths inside FastPostgres | [`fastpostgres-vs-arrow.log`](docs/fastpostgres-vs-arrow.log), [`-mixed`](docs/fastpostgres-vs-arrow-mixed.log), [`-small`](docs/fastpostgres-vs-arrow-small.log) |
-| `just arrow-memory-bench [--mib=N]` | what each side holds under a fixed ring buffer | [`fastpostgres-vs-arrow-memory.log`](docs/fastpostgres-vs-arrow-memory.log) |
-| `just pgcache-bench` | against a CDC-maintained result cache | [`fastpostgres-vs-pgcache.log`](docs/fastpostgres-vs-pgcache.log) |
-| `just pgcache-memory-bench` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](docs/fastpostgres-vs-pgcache-memory.log) |
-| `just codec-transport` | format cost against transport cost, isolated (2x2 matrix) | [`codec-transport.log`](docs/codec-transport.log) |
-| `just decode-cycles`, `just decode-ir`, `just decode-mca` | the row decode's cycles per row, instructions and miss profile, ports and latency | [`simd/hypotheses.md`](simd/hypotheses.md) |
-| `just cache-stat` | cache counters on the host's PMU: decodes per row, transports per KiB | [`cache-stat.log`](docs/cache-stat.log) |
+| workloads | `just bench [scenario...]` | does swapping the driver help an application: lookups, pages, scans, joins, aggregates, concurrency, read/write mixes |
+| rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
+| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat]` | what the row decode and the transport cost at the instruction, cache and port level |
 
-`just charts`, `just codec-charts`, `just pgcache-charts`, `just pgcache-memory-charts` and `just arrow-memory-charts` render the corresponding logs into images under `assets/`. The harnesses read two host-side settings: `SHM` for the container's `/dev/shm` size (default `3g`) and `SHAPE` for the data shape (`bench`, the friendly one, or `mixed`).
+The full catalog - the scenarios, the method, the log behind every number and the
+caveats - is [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); `just charts <target>`
+renders any of the logs into an image under `assets/`. The harnesses read two
+host-side settings: `SHM` for the container's `/dev/shm` size (default `3g`) and
+`SHAPE` for the data shape (`bench`, the friendly one, or `mixed`).
 
 ## Usage
 

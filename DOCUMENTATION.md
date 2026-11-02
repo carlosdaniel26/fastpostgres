@@ -11,15 +11,17 @@ and the formal bits.
 |---|---|
 | `pg-extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python-extension/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
-| `benchmark/`, `tools/`, `image/` | the harnesses, the host-side chart scripts, and the Docker image and entrypoint they run in |
+| `benchmark/` | the harnesses: `workloads/` (the realistic suite), `sqlalchemy_bench.py` and `pgcache/` (the rivals), `codec_transport/` (the matrix) |
+| `tools/`, `image/` | the host-side dispatchers and chart scripts, and the Docker image and entrypoint they run in |
 | `demo/` | the driver-swap demo application |
-| `docs/` | methodology, limitations, the codec/transport matrix, the result-cache comparison, and every committed log |
+| `docs/` | the benchmark catalog, methodology, limitations, the comparisons, and every committed log |
 | `simd/` | the decode's lab notebook: hypotheses, meters and their results |
 
 ## Documentation index
 
 | I want to... | go here |
 |---|---|
+| run or read about the benchmarks | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | understand the wire format and the two frames | [`pg-extension/fastpostgres_shm.h`](pg-extension/fastpostgres_shm.h) |
 | reproduce a measurement, or read the statistics | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
@@ -27,7 +29,6 @@ and the formal bits.
 | compare against a result cache | [`docs/PG-CACHE.md`](docs/PG-CACHE.md) |
 | separate format cost from transport cost | [`docs/CODEC-TRANSPORT.md`](docs/CODEC-TRANSPORT.md) |
 | see a run end to end | [`docs/*.log`](docs) |
-| run the benchmarks | the [README](README.md#benchmarks-and-meters) |
 
 ## Known limitations
 

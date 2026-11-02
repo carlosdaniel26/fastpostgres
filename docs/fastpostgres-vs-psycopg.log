@@ -1,0 +1,77 @@
+tools/workloads_bench.sh 
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+cores: 16
+postgres: 18.6
+python: 3.13.5
+psycopg: 3.2.6
+fastpostgres image: fastpostgres-dev sha256:2472c25621c3
+shm: 3g
+ring segment: 64 MiB x2
+scale: 1 (10000 customers, 10000 products, 1000000 orders, 3000000 order items)
+seed: 7
+git: c81488f
+### END ENV
+
+# scenario lookup (app): primary-key lookups, one row out, 200 statements x 3 reps
+                                                       p50         p95         p99  vs psycopg 3
+  lookup       fastpostgres    8183.0 stmt/s    p50    0.12 ms  p95    0.15 ms  p99    0.18 ms         
+               fastpostgres ring   reads=600 writes=0 served_by_shm=600 pool=6 mapped_bytes=134217728 rss_bytes=54464512
+  lookup       psycopg 3      38576.5 stmt/s    p50    0.02 ms  p95    0.03 ms  p99    0.05 ms    +371%
+               psycopg 3    session  reads=600 writes=0 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=42332160
+  lookup       digest ok (count=600, sum=2,976,004, sum=7,723.0)
+
+# scenario paged (app): filtered, ordered page of 100 rows, 200 statements x 3 reps
+                                                       p50         p95         p99  vs psycopg 3
+  paged        fastpostgres    2187.2 stmt/s    p50    0.32 ms  p95    1.03 ms  p99    1.30 ms         
+               fastpostgres ring   reads=600 writes=0 served_by_shm=600 pool=6 mapped_bytes=134217728 rss_bytes=60522496
+  paged        psycopg 3       4726.2 stmt/s    p50    0.18 ms  p95    0.23 ms  p99    0.25 ms    +116%
+               psycopg 3    session  reads=600 writes=0 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=42135552
+  paged        digest ok (count=60,000, sum=29,998,876,000, sum=300,288,760.0)
+
+# scenario scan (analytics): orders x customers, every row out, 3 rep(s) of one statement
+                                                       p50         p95         p99  vs psycopg 3
+  scan         fastpostgres 2207737.8 rows/s    p50  452.95 ms  p95  452.95 ms  p99  452.95 ms         
+               fastpostgres ring   reads=3 writes=0 served_by_shm=3 pool=6 mapped_bytes=134217728 rss_bytes=1056157696
+  scan         psycopg 3     839160.8 rows/s    p50 1191.67 ms  p95 1191.67 ms  p99 1191.67 ms     -62%
+               psycopg 3    session  reads=3 writes=0 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=1171005440
+  scan         digest ok (count=3,000,000, sum=1,500,001,500,000, sum=15,015,015,000.0)
+
+# scenario join (analytics): order_items x products, 90% of the rows, 3 rep(s) of one statement
+                                                       p50         p95         p99  vs psycopg 3
+  join         fastpostgres 2178442.3 rows/s    p50 1239.42 ms  p95 1239.42 ms  p99 1239.42 ms         
+               fastpostgres ring   reads=3 writes=0 served_by_shm=3 pool=6 mapped_bytes=134217728 rss_bytes=2464485376
+  join         psycopg 3    1259876.7 rows/s    p50 2143.07 ms  p95 2143.07 ms  p99 2143.07 ms     -42%
+               psycopg 3    session  reads=3 writes=0 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=2707771392
+  join         digest ok (count=8,100,000, sum=3,645,004,050,000, sum=24,300,000.0)
+
+# scenario aggregate (analytics): group by country over the join, 3 rep(s) of one statement
+                                                       p50         p95         p99  vs psycopg 3
+  aggregate    fastpostgres     231.3 ms/read   p50  231.30 ms  p95  231.30 ms  p99  231.30 ms         
+               fastpostgres ring   reads=3 writes=0 served_by_shm=3 pool=6 mapped_bytes=134217728 rss_bytes=54005760
+  aggregate    psycopg 3         85.2 ms/read   p50   85.24 ms  p95   85.24 ms  p99   85.24 ms     -63%
+               psycopg 3    session  reads=3 writes=0 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=42446848
+  aggregate    digest ok (count=24, sum=3,000,000, sum=15,015,015,000.0)
+
+# scenario concurrent (concurrency): clients on the paged query, 4 client(s) x 10s
+# (each client runs its own window from a seeded, disjoint parameter stream)
+                                                       p50         p95         p99  vs psycopg 3
+  concurrent   fastpostgres   13345.0 stmt/s    p50    0.28 ms  p95    0.36 ms  p99    0.48 ms         
+               fastpostgres ring   reads=133454 writes=0 served_by_shm=133454 pool=6,6,6,6 mapped_bytes=536870912 rss_bytes=443449344
+  concurrent   psycopg 3      16810.8 stmt/s    p50    0.20 ms  p95    0.27 ms  p99    0.32 ms     +26%
+               psycopg 3    session  reads=168111 writes=0 served_by_shm=0 pool=0,0,0,0 mapped_bytes=0 rss_bytes=43991040
+  concurrent   digest validated per statement (a window's statement count is not comparable)
+
+# scenario mixed (mixed): 90/10 paged reads and order inserts, 1 client(s) x 10s
+# (each client runs its own window from a seeded, disjoint parameter stream)
+                                                       p50         p95         p99  vs psycopg 3
+  mixed        fastpostgres    2570.7 reads/s   p50    0.26 ms  p95    0.32 ms  p99    0.38 ms         
+  mixed        fastpostgres     285.6 writes/s  p50    0.99 ms  p95    1.09 ms  p99    1.17 ms         
+               fastpostgres ring   reads=25707 writes=2856 served_by_shm=25707 pool=6 mapped_bytes=134217728 rss_bytes=353394688
+  mixed        psycopg 3       3088.9 reads/s   p50    0.18 ms  p95    0.25 ms  p99    0.30 ms     +20%
+  mixed        psycopg 3        343.2 writes/s  p50    0.91 ms  p95    1.00 ms  p99    1.09 ms         
+               psycopg 3    session  reads=30890 writes=3432 served_by_shm=0 pool=0 mapped_bytes=0 rss_bytes=44515328
+  mixed        digest validated per statement (a window's statement count is not comparable)
+
+# the same output across players: ok
