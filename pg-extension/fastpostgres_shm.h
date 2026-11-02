@@ -22,9 +22,11 @@
 #define FASTPOSTGRES_SHM_VERSION     1
 #define FASTPOSTGRES_SHM_HEADER_SIZE 64
 
-/* Fixed capacity for a data segment (lazily faulted: only what is written
- * costs memory). */
+/* Default capacity for a data segment (lazily faulted: only what is written
+ * costs memory). A client may ask for less - FastpostgresRing.data_bytes - as
+ * long as it clears the header, a frame's own header and one row. */
 #define FASTPOSTGRES_SEGMENT_BYTES (1024u * 1024u * 1024u)
+#define FASTPOSTGRES_SEGMENT_MIN   (64u * 1024u)
 
 typedef struct FastpostgresShmHeader {
     char     magic[8];     /* "FPQSHMEM" */

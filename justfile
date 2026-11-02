@@ -3,6 +3,7 @@
 #   just test                 the Python client's test suite
 #   just bench [nrows ...]    fast-postgres vs ADBC + Arrow read benchmarks
 #   just pgcache-bench [args] fast-postgres vs a result cache (PgCache), same rows
+#   just pgcache-memory-bench [args] the same, with one memory budget on both sides
 #   just demo [nrows]         the psycopg 3 vs fastpostgres driver swap
 #   just charts [nrows ...]   run the benchmarks and render the charts
 #   just decode-cycles [args] the row decode's cycles/row, on a fixed shape
@@ -116,6 +117,17 @@ pgcache-bench *args:
 # the chart for that comparison: the full scan against the aggregate, one image
 pgcache-charts *args:
     tools/pgcache_charts.py {{args}}
+
+# fastpostgres against a result cache with the *same memory budget on both
+# sides*: the ring's two transfer segments against PgCache's own memory limit
+# and result memo, swept across the budget a result stops fitting in. Redirect
+# it to docs/fastpostgres-vs-pgcache-memory.log
+pgcache-memory-bench *args:
+    tools/pgcache_memory_bench.sh {{args}}
+
+# the chart for that sweep: the budget on the x axis, one image
+pgcache-memory-charts *args:
+    tools/pgcache_memory_charts.py {{args}}
 
 # drop the built images
 clean:

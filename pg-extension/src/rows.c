@@ -177,6 +177,29 @@ row_build(RowReceiver *rx, char *out, uint32 len)
                     &th->t_infomask, rx->hasnull ? th->t_bits : NULL);
 }
 
+/* The row the last batch had no room for.
+ *
+ * Filling a destination slot makes the executor consume the tuple, so a row the
+ * segment cannot take would otherwise be lost - and the portal would read the
+ * short fetch as end-of-data besides (see the atEnd note in
+ * fastpostgres_rows_fetch). One worker serves one stream at a time, so one
+ * carried row is the whole of the state this needs. It lives in TopMemoryContext
+ * because the executor's context dies with the portal.
+ */
+static char   *carry_row;
+static uint32  carry_len;
+
+void
+fastpostgres_rows_carry_reset(void)
+{
+    if (carry_row != NULL)
+    {
+        pfree(carry_row);
+        carry_row = NULL;
+    }
+    carry_len = 0;
+}
+
 static bool
 row_receive(TupleTableSlot *slot, DestReceiver *self)
 {
@@ -212,9 +235,27 @@ row_receive(TupleTableSlot *slot, DestReceiver *self)
         else
             row_build(rx, row, len);
     }
+    else if (rx->w.nrows == 0)
+        elog(ERROR, "fastpostgres: result row exceeds the segment");
     else
     {
-        if (rx->w.nrows == 0) elog(ERROR, "fastpostgres: result row exceeds the segment");
+        /* The batch is full. The tuple is already the executor's to drop, so
+         * keep it (the next batch writes it first) and stop the scan here. */
+        MemoryContext top = MemoryContextSwitchTo(TopMemoryContext);
+
+        if (carry_len < len)
+        {
+            if (carry_row == NULL)
+                carry_row = palloc(len);
+            else
+                carry_row = repalloc(carry_row, len);
+        }
+        if (tup != NULL)
+            memcpy(carry_row, tup->t_data, (size_t)len);
+        else
+            row_build(rx, carry_row, len);
+        carry_len = len;
+        MemoryContextSwitchTo(top);
         ok = false; /* the batch is full: the client asks again for the rest */
     }
 
@@ -280,14 +321,13 @@ fastpostgres_rows_native(TupleDesc td)
 }
 
 uint64
-fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch)
+fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity)
 {
-    size_t                 cap     = FASTPOSTGRES_SEGMENT_BYTES;
+    size_t                 cap     = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
     void                  *map     = fastpostgres_shm_map_rw(path, cap);
     char                  *payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
     RowReceiver            rx;
     FastpostgresRowsWrite *w = &rx.w;
-    uint64                 nrows;
     int                    i;
 
     memset(&rx, 0, sizeof(rx));
@@ -318,7 +358,25 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
     rx.pub.rDestroy    = row_destroy;
     rx.pub.mydest      = DestNone;
 
-    nrows = PortalRunFetch(portal, FETCH_FORWARD, (long)batch, &rx.pub);
+    /* a row the previous batch had no room for goes first, in the slot it would
+     * have had: the batch that carried it stopped one row short of the data */
+    if (carry_len > 0)
+    {
+        char *row = fastpostgres_rows_reserve(w, carry_len, rx.end);
+
+        if (row == NULL) elog(ERROR, "fastpostgres: result row exceeds the segment");
+        memcpy(row, carry_row, carry_len);
+        fastpostgres_rows_carry_reset();
+    }
+
+    PortalRunFetch(portal, FETCH_FORWARD, (long)batch, &rx.pub);
+
+    /* A batch cut short by the segment is not the end of the data, but a fetch
+     * shorter than it asked for means "no more rows" to the portal
+     * (PortalRunSelect sets atEnd when nprocessed < count), which would end the
+     * stream with the carried row and the rest still to come. The executor
+     * stopped between rows rather than running out, so it can be run again. */
+    if (carry_len > 0) portal->atEnd = false;
 
     fastpostgres_rows_write_end(w);
     fastpostgres_shm_publish(map, cap, (uint64)(w->p - payload));
@@ -328,5 +386,5 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
     pfree(rx.isnull);
     MemoryContextDelete(rx.tmpctx);
     munmap(map, cap);
-    return nrows;
+    return w->nrows; /* the rows the batch carries, carried row included */
 }

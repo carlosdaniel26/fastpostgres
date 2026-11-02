@@ -6,6 +6,9 @@
  *
  * Reads only: one OPEN/NEXT/CLOSE request at a time, the batch landing in a
  * separate segment. Writes, DDL and transactions stay on libpq.
+ *
+ * That data segment is the worker's to create and size, so the client says how
+ * big it wants it in the ring (data_bytes) before starting the worker.
  */
 #ifndef FASTPOSTGRES_RING_H
 #define FASTPOSTGRES_RING_H
@@ -14,9 +17,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#define FASTPOSTGRES_RING_MAGIC   "FPRING02" /* 02: the ring layout changed; an old segment is re-made */
-#define FASTPOSTGRES_RING_VERSION 2u
-#define FASTPOSTGRES_RING_BYTES   (8u << 20) /* 8 MiB segment */
+#define FASTPOSTGRES_RING_MAGIC   "FPRING03" /* 03: the ring carries the data-segment capacity; an old segment is re-made */
+#define FASTPOSTGRES_RING_VERSION 3u
+#define FASTPOSTGRES_RING_BYTES   (8u << 20) /* 8 MiB control segment */
 #define FASTPOSTGRES_RING_ARG     4096
 #define FASTPOSTGRES_RING_ERR     256
 
@@ -31,10 +34,11 @@ enum FastpostgresRingOp
 };
 
 typedef struct FastpostgresRing {
-    char     magic[8];     /* "FPRING01" */
+    char     magic[8];     /* "FPRING03" */
     uint32_t version;
     uint32_t worker_ready; /* release-store once the worker has mapped it */
     uint32_t client_pid;   /* owning client: the worker exits once it is gone */
+    uint64_t data_bytes;   /* capacity the client asks for a data segment (0 = FASTPOSTGRES_SEGMENT_BYTES) */
     uint64_t req_seq;      /* bumped by the client per request */
     uint64_t resp_seq;     /* bumped by the worker per response */
     sem_t    req_ready;    /* client -> worker */

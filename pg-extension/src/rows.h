@@ -15,7 +15,14 @@
 bool fastpostgres_rows_native(TupleDesc td);
 
 /* Fetch up to `batch` tuples from `portal` into /dev/shm/<path> as FPROWS and
- * publish the segment; returns the rows written. */
-uint64 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch);
+ * publish the segment; returns the rows the batch carries. `capacity` fixes the
+ * segment size the worker maps (0 = FASTPOSTGRES_SEGMENT_BYTES). A batch that
+ * runs out of room ends there without losing the row that did not fit: it is
+ * kept and delivered first by the next call. */
+uint64 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity);
+
+/* Drop a carried row. A stream must be opened or closed with none pending: the
+ * row belongs to the stream it was read from, not to whatever comes next. */
+void fastpostgres_rows_carry_reset(void);
 
 #endif

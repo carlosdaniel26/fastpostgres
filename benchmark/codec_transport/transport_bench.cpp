@@ -90,7 +90,7 @@ static const int TP_DEFAULT_IN_FLIGHT = 1; /* one chunk in flight: the original 
  * cache line with the payload it is copying, and window i+1 must not share one
  * with window i). */
 static const size_t   TP_SHM_DATA_OFF = 4096;
-/* 8 bytes, NUL-padded — the same shape as FASTPOSTGRES_RING_MAGIC ("FPRING02"). */
+/* 8 bytes, NUL-padded — the same shape as FASTPOSTGRES_RING_MAGIC ("FPRING03"). */
 static const char     TP_SHM_MAGIC[8]  = "FPTP01";
 static const uint32_t TP_SHM_VERSION   = 1;
 

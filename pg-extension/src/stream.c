@@ -35,6 +35,9 @@ fastpostgres_stream_open(const char *stream, const char *query)
     char  *name = cursor_name(stream);
     Portal portal;
 
+    /* whatever the last stream left carried belongs to it, not to this one */
+    fastpostgres_rows_carry_reset();
+
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_open: SPI_connect failed");
 
     portal = SPI_cursor_open_with_args(name, query, 0, NULL, NULL, NULL, true, CURSOR_OPT_PARALLEL_OK);
@@ -47,7 +50,7 @@ fastpostgres_stream_open(const char *stream, const char *query)
 }
 
 uint64
-fastpostgres_stream_next(const char *stream, const char *seg, int64 batch)
+fastpostgres_stream_next(const char *stream, const char *seg, int64 batch, size_t capacity)
 {
     char      *path = fastpostgres_shm_path(seg);
     char      *name = cursor_name(stream);
@@ -71,7 +74,7 @@ fastpostgres_stream_next(const char *stream, const char *seg, int64 batch)
     nrows  = SPI_processed;
     td     = SPI_tuptable ? SPI_tuptable->tupdesc : portal->tupDesc;
     tuples = SPI_tuptable ? SPI_tuptable->vals : NULL;
-    fastpostgres_publish_columnar_shm(path, td, tuples, nrows, 0); /* chunk-sized */
+    fastpostgres_publish_columnar_shm(path, td, tuples, nrows, capacity);
     SPI_finish();
     return nrows;
 }
@@ -87,13 +90,15 @@ fastpostgres_stream_close(const char *stream)
     portal = SPI_cursor_find(name);
     if (portal != NULL) SPI_cursor_close(portal);
 
+    fastpostgres_rows_carry_reset();
+
     SPI_finish();
 }
 
 /* The same batch as the result tuples themselves: the executor's bytes are
  * copied into the segment once, and the client walks them. */
 uint64
-fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch)
+fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch, size_t capacity)
 {
     char     *path = fastpostgres_shm_path(seg);
     char     *name = cursor_name(stream);
@@ -117,10 +122,10 @@ fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch)
     {
         /* an attribute the client cannot walk in place: the columnar frame */
         SPI_finish();
-        return fastpostgres_stream_next(stream, seg, batch);
+        return fastpostgres_stream_next(stream, seg, batch, capacity);
     }
 
-    nrows = fastpostgres_rows_fetch(portal, td, path, batch);
+    nrows = fastpostgres_rows_fetch(portal, td, path, batch, capacity);
     SPI_finish();
     return nrows;
 }

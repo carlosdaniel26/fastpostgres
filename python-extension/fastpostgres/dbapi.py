@@ -322,8 +322,19 @@ class _Result:
 # usable). So the pool is resolved once per process, on the first read that needs
 # a ring, from the machine and from the server. FASTPOSTGRES_SHM_POOL still
 # overrides it; 0 still turns the shared-memory path off.
+#
+# FASTPOSTGRES_SEGMENT_BYTES is the other shared-memory knob and it is per ring,
+# not per pool: it sizes each of the two alternating data segments a read streams
+# through, so a stream's transfer buffer is twice it. That is the memory a budget
+# is spent through, which is why it is worth being able to set it.
 
 _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
+# The capacity of each of the two alternating data segments, in bytes: the
+# shared memory a read streams through. Unset, the worker's own default (1 GiB)
+# applies. The 8 MiB control ring is not part of it, and the worker clamps the
+# ask to [64 KiB, 1 GiB].
+_SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
+_SEGMENT_BYTES = int(_SEGMENT_ENV) if _SEGMENT_ENV else 0
 _THREADS_PER_STREAM = 1.2
 _POOL_MAX = 8
 _RING_BACKEND = "fastpostgres ring worker"
@@ -486,7 +497,7 @@ def _ring_acquire(bootstrap):
 
     name = f"{prefix}_{index}"
     try:
-        ring = _client.Ring(name)
+        ring = _client.Ring(name, _SEGMENT_BYTES)
         ring.start(bootstrap)
     except Exception as exc:
         with _pool_lock:

@@ -1,7 +1,8 @@
-/* ring.cpp — Ring(seg): the request/response channel the backend worker
- * services. The client creates /dev/shm/<seg>, initialises the semaphores, and
- * bootstraps the worker with one SQL call over libpq (start); open/next/close
- * then travel through shared memory only. */
+/* ring.cpp — Ring(seg, segment_bytes=0): the request/response channel the
+ * backend worker services, and the data segment's capacity. The client creates
+ * /dev/shm/<seg>, initialises the semaphores, and bootstraps the worker with one
+ * SQL call over libpq (start); open/next/close then travel through shared memory
+ * only, and the worker maps each data segment at the capacity the ring carries. */
 #include "ring.hpp"
 
 #include <fcntl.h>
@@ -27,9 +28,16 @@ Ring_dealloc(RingObject *self)
 static int
 Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 {
-    static const char *kwlist[] = {"segment", nullptr};
-    const char        *seg;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s", (char **)kwlist, &seg)) return -1;
+    static const char  *kwlist[] = {"segment", "segment_bytes", nullptr};
+    const char         *seg;
+    unsigned long long  data_bytes = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|K", (char **)kwlist, &seg, &data_bytes)) return -1;
+
+    if (data_bytes != 0)
+    {
+        if (data_bytes < FASTPOSTGRES_SEGMENT_MIN) data_bytes = FASTPOSTGRES_SEGMENT_MIN;
+        else if (data_bytes > FASTPOSTGRES_SEGMENT_BYTES) data_bytes = FASTPOSTGRES_SEGMENT_BYTES;
+    }
 
     for (const char *p = seg; *p; p++)
     {
@@ -82,6 +90,8 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     self->map  = map;
     self->size = FASTPOSTGRES_RING_BYTES;
     memcpy(self->data, seg, std::strlen(seg) + 1);
+    /* the capacity the worker is to map each data segment at (0 = its default) */
+    r->data_bytes = data_bytes;
     r->client_pid = (uint32_t)getpid(); /* the worker exits once this process is gone */
     return 0;
 }

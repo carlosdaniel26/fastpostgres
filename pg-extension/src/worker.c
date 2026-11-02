@@ -130,6 +130,20 @@ ring_set_error(FastpostgresRing *r)
     FreeErrorData(edata);
 }
 
+/* How big the client asked for a data segment to be, clamped to something that
+ * can hold a frame. Read from the ring per request: the client writes it before
+ * starting the worker. */
+static size_t
+ring_data_capacity(const FastpostgresRing *r)
+{
+    uint64_t want = r->data_bytes;
+
+    if (want == 0) return FASTPOSTGRES_SEGMENT_BYTES;
+    if (want < FASTPOSTGRES_SEGMENT_MIN) return FASTPOSTGRES_SEGMENT_MIN;
+    if (want > FASTPOSTGRES_SEGMENT_BYTES) return FASTPOSTGRES_SEGMENT_BYTES;
+    return (size_t)want;
+}
+
 /* Returns false when the worker should stop. */
 static bool
 ring_handle(FastpostgresRing *r, const char *ring_name)
@@ -189,7 +203,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_TRY();
             {
-                n         = fastpostgres_stream_next(a1, a2, (int64)r->batch);
+                n         = fastpostgres_stream_next(a1, a2, (int64)r->batch, ring_data_capacity(r));
                 r->status = 0;
                 r->nrows  = (int64)n;
             }
@@ -210,7 +224,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_TRY();
             {
-                n         = fastpostgres_stream_next_rows(a1, a2, (int64)r->batch);
+                n         = fastpostgres_stream_next_rows(a1, a2, (int64)r->batch, ring_data_capacity(r));
                 r->status = 0;
                 r->nrows  = (int64)n;
             }

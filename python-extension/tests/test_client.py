@@ -192,6 +192,37 @@ class RingReadTest(unittest.TestCase):
         )
         self.ring.close()
 
+    def test_the_data_segment_capacity_is_the_clients_ask(self):
+        """Ring(seg, segment_bytes) is the client's ask for how big the worker
+        maps each data segment. A batch that no longer fits ends early - the row
+        path stops at the row that did not fit, and the next request continues
+        from it - so a small buffer costs round trips, never rows."""
+        seg = "fp_py_cap_seg"
+        try:
+            os.unlink(os.path.join("/dev/shm", seg))  # grow-only: what a previous
+        except FileNotFoundError:                     # run left behind would not shrink
+            pass
+        ring = fp.Ring("fp_py_cap_ring", 256 * 1024)
+        ring.start(self.conn)
+        batches = []
+        try:
+            ring.open(seg, "SELECT g::int AS id, ('x' || g)::text AS s FROM generate_series(1, 20000) g")
+            while True:
+                n = ring.next_rows(100000)
+                if n == 0:
+                    break
+                rows = _client.read_rows(seg).rows
+                self.assertEqual(len(rows), n)
+                self.assertEqual(rows[0][0], sum(batches) + 1)  # no gap, no repeat
+                batches.append(n)
+            ring.close()
+        finally:
+            ring.stop()
+
+        self.assertEqual(sum(batches), 20000)
+        self.assertGreater(len(batches), 1, "a 256 KiB segment should split the batch")
+        self.assertEqual(os.stat(os.path.join("/dev/shm", seg)).st_size, 256 * 1024)
+
 
 class DbapiTest(unittest.TestCase):
     def setUp(self):

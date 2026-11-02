@@ -190,7 +190,7 @@ def do_setup(n):
     conn.close()
 
 
-def do_read(player, workload, n, reps, cold):
+def do_read(player, workload, n, reps, cold, evidence=None):
     sql = WORKLOADS[workload]
     open_handle, read = PLAYERS[player]
     handle = open_handle()
@@ -204,11 +204,17 @@ def do_read(player, workload, n, reps, cold):
             else:
                 read(handle, sql)  # warm: connections, rings, plans
         warm_misses = (miss_total() - misses_before) if player == "pgcache" else 0
+        ring_before = getattr(handle, "shm_reads", 0)
         times = []
         rows = None
         for _ in range(reps):
             ms, rows = read(handle, sql)
             times.append(ms)
+        if evidence is not None:
+            # the timed reads that actually took the ring: one that fell back to
+            # libpq is not counted, which is what lets a caller notice the
+            # fallback instead of measuring it as if it were the ring
+            evidence["shm_reads"] = getattr(handle, "shm_reads", 0) - ring_before
         rep_misses = (miss_total() - misses_before - warm_misses) if player == "pgcache" else 0
         check = digest(rows, workload)
         if len(rows) != (1 if workload == "small" else n):
@@ -232,7 +238,7 @@ def do_read(player, workload, n, reps, cold):
         f"{check[2]:.1f}",
         str(check[3]),
     ]
-    print(" ".join(fields))
+    return fields
 
 
 def main(argv):
@@ -250,7 +256,8 @@ def main(argv):
             raise SystemExit(f"unknown workload {workload!r}: {sorted(WORKLOADS)}")
         if SHAPE not in SHAPES:
             raise SystemExit(f"SHAPE={SHAPE!r}: choose one of {sorted(SHAPES)}")
-        do_read(player, workload, n, reps, "--cold" in argv)
+        fields = do_read(player, workload, n, reps, "--cold" in argv)
+        print(" ".join(fields))
         return
     raise SystemExit(__doc__)
 
