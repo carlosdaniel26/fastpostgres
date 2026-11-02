@@ -29,7 +29,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 
 - One file per run family; a re-run replaces it, and the `git:` stamp says which
   commit produced the numbers.
-- The charts in [`assets/`](assets/) are rendered from these files by
+- The charts in `docs/assets/` are rendered from these files by
   `just charts <target>`; no chart is drawn from a number typed by hand.
 - No record is edited by hand. A number that is not in one of these files is not
   quoted.

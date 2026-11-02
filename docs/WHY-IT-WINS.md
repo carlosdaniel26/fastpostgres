@@ -227,7 +227,7 @@ sequential stream the prefetcher keeps fed, not a working set that fits in cache
 At 1M rows about 1.2 lines per row come from L3 or beyond, and it still
 costs 17 cycles — the flatness is the result, not residency. The meter is
 `just cache-stat`, the run is `benchmarks/results/cache-stat.log`, and the analysis is the
-cache section of [`docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md).
+cache section of [`docs/DECODE-NOTES.md`](DECODE-NOTES.md).
 
 Arrow is zero-copy too, in the part of the path people usually mean: wrapping
 existing buffers in arrays costs nothing, and the record-batch wrap is counted as
@@ -299,7 +299,7 @@ throughput falls back and the median grows roughly linearly with the window,
 because what it then measures is queueing. So the protocol is not optimal for
 throughput; it is optimal for *latency*, which is what the query path needs, since
 it is not transport-bound. `transport_bench --in-flight N` is the experiment, and
-the sweep is in [`docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md).
+the sweep is in [`docs/DECODE-NOTES.md`](DECODE-NOTES.md).
 
 **Costs:** same host only; the segment itself is the interface, so its
 permissions and lifetime are the security boundary (same user, single host, an
