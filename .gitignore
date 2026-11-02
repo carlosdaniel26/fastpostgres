@@ -25,3 +25,5 @@ extension/test/regression.diffs
 extension/test/regression.out
 site/
 .ruff_cache/
+*.ko
+extension/transport/regipc/vector/fpvec
