@@ -212,8 +212,8 @@ def main():
     else:
         j, k = max(cands, key=lambda c: c[1] - c[0])
         if anchor is None:
-            print(f"loop-asm: region: the outermost loop in the symbol"
-                  f" (--line N models another; --list shows the candidates)", file=sys.stderr)
+            print("loop-asm: region: the outermost loop in the symbol"
+                  " (--line N models another; --list shows the candidates)", file=sys.stderr)
         else:
             print("loop-asm: WARNING: no loop contains the anchor, using the widest span",
                   file=sys.stderr)

@@ -31,8 +31,10 @@
 #include <immintrin.h> /* _mm256_stream_si256, _mm_sfence: copy_nt's streamed stores */
 #endif
 
-namespace fpg {
-namespace {
+namespace fpg
+{
+namespace
+{
 
 [[noreturn]] void
 fail(const char *what)
@@ -44,8 +46,7 @@ fail(const char *what)
 /* The dataset's columns as they go on the wire, in frame order. `kind` is the
  * wire kind (fastpostgres_shm.h), `pgtype` the PostgreSQL OID the column would
  * carry from the server. */
-struct ColumnSpec
-{
+struct ColumnSpec {
     const char *name;
     uint32_t    name_len;
     uint8_t     kind;
@@ -159,8 +160,7 @@ frame_matches_dataset(const FpView &v)
  * 4-byte boundary. The client's walk applies the same rule (att_align for the
  * fixed widths, att_align_pointer for the varlena kinds), so the bytes decode
  * where they were written. */
-struct RowLayout
-{
+struct RowLayout {
     uint32_t hoff;
     uint32_t id;
     uint32_t sku;
@@ -180,17 +180,17 @@ row_layout(const Dataset &ds, uint64_t r)
     uint32_t  off = 24; /* MAXALIGN(sizeof(HeapTupleHeaderData)) */
 
     l.hoff = off;
-    l.id = off;
+    l.id   = off;
     off += 4; /* off is 4-aligned here: every varlena starts where it should */
     l.sku = off;
     off += 4 + l1;
-    off = (off + 3) & ~3u;
+    off    = (off + 3) & ~3u;
     l.name = off;
     off += 4 + l2;
-    off = (off + 7) & ~7u;
+    off     = (off + 7) & ~7u;
     l.price = off;
     off += 8;
-    off = (off + 3) & ~3u;
+    off     = (off + 3) & ~3u;
     l.stock = off;
     off += 4;
     l.active = off;
@@ -225,7 +225,7 @@ generate(uint64_t rows)
     for (uint64_t g = 1; g <= rows; g++)
     {
         char     buf[32];
-        uint64_t r = g - 1;
+        uint64_t r  = g - 1;
         int      n1 = std::snprintf(buf, sizeof(buf), "SKU-%" PRIu64, g);
 
         ds.sku.insert(ds.sku.end(), buf, buf + n1);
@@ -248,7 +248,8 @@ generate(uint64_t rows)
  * FPCOLUMN — the shipping columnar frame
  * ------------------------------------------------------------------------ */
 
-namespace {
+namespace
+{
 
 uint64_t
 column_data_len(const Dataset &ds, int c)
@@ -361,8 +362,8 @@ fpcolumn_capacity(const Dataset &ds)
     uint64_t       off        = FASTPOSTGRES_COLUMNAR_FRAME;
 
     for (int c = 0; c < kDatasetColumns; c++)
-        off = fastpostgres_columnar_next_offset(off, kColumns[c].name_len, null_bytes,
-                                                column_data_len(ds, c));
+        off =
+            fastpostgres_columnar_next_offset(off, kColumns[c].name_len, null_bytes, column_data_len(ds, c));
     return off;
 }
 
@@ -374,8 +375,8 @@ fpcolumn_capacity(const Dataset &ds)
 uint64_t
 fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 {
-    const uint64_t n          = ds.rows;
-    const uint32_t null_bytes = (uint32_t)((n + 7) / 8);
+    const uint64_t            n          = ds.rows;
+    const uint32_t            null_bytes = (uint32_t)((n + 7) / 8);
     FastpostgresColumnarWrite w;
 
     fastpostgres_columnar_write_begin(&w, out, (uint32_t)kDatasetColumns, n);
@@ -405,8 +406,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* id: int32, g */
         need_header(kColumns[kColId]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColId].name, kColumns[kColId].name_len,
-                                                        kColumns[kColId].kind, kColumns[kColId].pgtype, null_bytes);
+        char *data =
+            fastpostgres_columnar_write_column(&w, kColumns[kColId].name, kColumns[kColId].name_len,
+                                               kColumns[kColId].kind, kColumns[kColId].pgtype, null_bytes);
 
         need_data(data, n * 4);
         /* one bulk copy: the payload's column data *is* the dataset's array */
@@ -416,8 +418,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* sku: text, offset table then the bytes */
         need_header(kColumns[kColSku]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColSku].name, kColumns[kColSku].name_len,
-                                                        kColumns[kColSku].kind, kColumns[kColSku].pgtype, null_bytes);
+        char *data =
+            fastpostgres_columnar_write_column(&w, kColumns[kColSku].name, kColumns[kColSku].name_len,
+                                               kColumns[kColSku].kind, kColumns[kColSku].pgtype, null_bytes);
         uint64_t off_bytes = (n + 1) * 4;
         char    *bytes     = data + off_bytes;
 
@@ -434,8 +437,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* name: text */
         need_header(kColumns[kColName]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColName].name, kColumns[kColName].name_len,
-                                                        kColumns[kColName].kind, kColumns[kColName].pgtype, null_bytes);
+        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColName].name,
+                                                        kColumns[kColName].name_len, kColumns[kColName].kind,
+                                                        kColumns[kColName].pgtype, null_bytes);
         uint64_t off_bytes = (n + 1) * 4;
         char    *bytes     = data + off_bytes;
 
@@ -448,8 +452,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* price: float64, g * 0.5 */
         need_header(kColumns[kColPrice]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColPrice].name, kColumns[kColPrice].name_len,
-                                                        kColumns[kColPrice].kind, kColumns[kColPrice].pgtype, null_bytes);
+        char *data = fastpostgres_columnar_write_column(
+            &w, kColumns[kColPrice].name, kColumns[kColPrice].name_len, kColumns[kColPrice].kind,
+            kColumns[kColPrice].pgtype, null_bytes);
 
         need_data(data, n * 8);
         put(data, ds.price.data(), (size_t)n * 8);
@@ -458,8 +463,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* stock: int32, g % 500 */
         need_header(kColumns[kColStock]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColStock].name, kColumns[kColStock].name_len,
-                                                        kColumns[kColStock].kind, kColumns[kColStock].pgtype, null_bytes);
+        char *data = fastpostgres_columnar_write_column(
+            &w, kColumns[kColStock].name, kColumns[kColStock].name_len, kColumns[kColStock].kind,
+            kColumns[kColStock].pgtype, null_bytes);
 
         need_data(data, n * 4);
         put(data, ds.stock.data(), (size_t)n * 4);
@@ -468,8 +474,9 @@ fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store)
 
     { /* active: bool, g % 2 == 0 */
         need_header(kColumns[kColActive]);
-        char *data = fastpostgres_columnar_write_column(&w, kColumns[kColActive].name, kColumns[kColActive].name_len,
-                                                        kColumns[kColActive].kind, kColumns[kColActive].pgtype, null_bytes);
+        char *data = fastpostgres_columnar_write_column(
+            &w, kColumns[kColActive].name, kColumns[kColActive].name_len, kColumns[kColActive].kind,
+            kColumns[kColActive].pgtype, null_bytes);
 
         need_data(data, n);
         /* 1 B/row, so copy_nt's threshold is what decides for this column: at 1M
@@ -552,17 +559,19 @@ fprows_capacity(const Dataset &ds)
 {
     uint64_t off = FASTPOSTGRES_ROWS_FRAME;
 
-    for (int c = 0; c < kDatasetColumns; c++) off += 4 + kColumns[c].name_len + 1 + 4;
+    for (int c = 0; c < kDatasetColumns; c++)
+        off += 4 + kColumns[c].name_len + 1 + 4;
     off = FASTPOSTGRES_ALIGN8(off); /* rows_begin aligns the row area */
 
-    for (uint64_t r = 0; r < ds.rows; r++) off += 8 + FASTPOSTGRES_ALIGN8(row_layout(ds, r).total);
+    for (uint64_t r = 0; r < ds.rows; r++)
+        off += 8 + FASTPOSTGRES_ALIGN8(row_layout(ds, r).total);
     return off;
 }
 
 uint64_t
 fprows_encode(const Dataset &ds, char *out, uint64_t capacity)
 {
-    const uint64_t n = ds.rows;
+    const uint64_t        n = ds.rows;
     FastpostgresRowsWrite w;
 
     fastpostgres_rows_write_begin(&w, out, (uint32_t)kDatasetColumns);
@@ -575,10 +584,10 @@ fprows_encode(const Dataset &ds, char *out, uint64_t capacity)
 
     for (uint64_t r = 0; r < n; r++)
     {
-        RowLayout  l   = row_layout(ds, r);
-        uint32_t   l1  = ds.sku_off[r + 1] - ds.sku_off[r];
-        uint32_t   l2  = ds.name_off[r + 1] - ds.name_off[r];
-        char      *row = fastpostgres_rows_reserve(&w, l.total, end);
+        RowLayout l   = row_layout(ds, r);
+        uint32_t  l1  = ds.sku_off[r + 1] - ds.sku_off[r];
+        uint32_t  l2  = ds.name_off[r + 1] - ds.name_off[r];
+        char     *row = fastpostgres_rows_reserve(&w, l.total, end);
 
         if (row == nullptr) fail("fprows: row does not fit the capacity");
 
@@ -651,18 +660,30 @@ fprows_decode(const uint8_t *payload, uint64_t payload_bytes, FpView *out)
  * The walks — both sinks read the aliased bytes and nothing else
  * ------------------------------------------------------------------------ */
 
-namespace {
+namespace
+{
 
 /* The six timed aggregates: every method is a load plus an add, no allocation,
  * no value materialized. */
-struct AggregateSink
-{
+struct AggregateSink {
     Aggregates a;
 
-    inline void id(const uint8_t *p) { a.sum_id += (uint64_t)(int64_t)rd_i32(p); }
-    inline void stock(const uint8_t *p) { a.sum_stock += (uint64_t)(int64_t)rd_i32(p); }
-    inline void price(const uint8_t *p) { a.sum_price += rd_f64(p); }
-    inline void active(const uint8_t *p) { a.trues += (*p != 0) ? 1u : 0u; }
+    inline void id(const uint8_t *p)
+    {
+        a.sum_id += (uint64_t)(int64_t)rd_i32(p);
+    }
+    inline void stock(const uint8_t *p)
+    {
+        a.sum_stock += (uint64_t)(int64_t)rd_i32(p);
+    }
+    inline void price(const uint8_t *p)
+    {
+        a.sum_price += rd_f64(p);
+    }
+    inline void active(const uint8_t *p)
+    {
+        a.trues += (*p != 0) ? 1u : 0u;
+    }
     inline void text(const uint8_t *p, uint32_t n)
     {
         (void)p; /* the aggregate only needs the length */
@@ -672,14 +693,25 @@ struct AggregateSink
 
 /* The logical checksum: the same walk plus the price bits and the FNV over the
  * text bytes, both read where they lie. */
-struct ChecksumSink
-{
+struct ChecksumSink {
     Checksum c;
 
-    inline void id(const uint8_t *p) { c.sum_id += (uint64_t)(int64_t)rd_i32(p); }
-    inline void stock(const uint8_t *p) { c.sum_stock += (uint64_t)(int64_t)rd_i32(p); }
-    inline void price(const uint8_t *p) { c.sum_price_bits += rd_u64(p); }
-    inline void active(const uint8_t *p) { c.trues += (*p != 0) ? 1u : 0u; }
+    inline void id(const uint8_t *p)
+    {
+        c.sum_id += (uint64_t)(int64_t)rd_i32(p);
+    }
+    inline void stock(const uint8_t *p)
+    {
+        c.sum_stock += (uint64_t)(int64_t)rd_i32(p);
+    }
+    inline void price(const uint8_t *p)
+    {
+        c.sum_price_bits += rd_u64(p);
+    }
+    inline void active(const uint8_t *p)
+    {
+        c.trues += (*p != 0) ? 1u : 0u;
+    }
     inline void text(const uint8_t *p, uint32_t n)
     {
         c.text_hash = fnv1a_u32le(c.text_hash, n);
@@ -698,7 +730,8 @@ visit_columnar(const FpView &v, Sink &sink)
 
     {
         const uint8_t *p = v.cols[kColId].data;
-        for (uint64_t r = 0; r < n; r++) sink.id(p + r * 4);
+        for (uint64_t r = 0; r < n; r++)
+            sink.id(p + r * 4);
     }
     {
         const uint8_t *tab = v.cols[kColSku].data;
@@ -724,15 +757,18 @@ visit_columnar(const FpView &v, Sink &sink)
     }
     {
         const uint8_t *p = v.cols[kColPrice].data;
-        for (uint64_t r = 0; r < n; r++) sink.price(p + r * 8);
+        for (uint64_t r = 0; r < n; r++)
+            sink.price(p + r * 8);
     }
     {
         const uint8_t *p = v.cols[kColStock].data;
-        for (uint64_t r = 0; r < n; r++) sink.stock(p + r * 4);
+        for (uint64_t r = 0; r < n; r++)
+            sink.stock(p + r * 4);
     }
     {
         const uint8_t *p = v.cols[kColActive].data;
-        for (uint64_t r = 0; r < n; r++) sink.active(p + r);
+        for (uint64_t r = 0; r < n; r++)
+            sink.active(p + r);
     }
 }
 
@@ -745,7 +781,8 @@ visit_rows(const FpView &v, Sink &sink)
 {
     FastpostgresRowsReader rd;
 
-    if (!fastpostgres_rows_init(&rd, v.payload, (size_t)v.payload_bytes)) fail("fprows: cannot re-init the reader");
+    if (!fastpostgres_rows_init(&rd, v.payload, (size_t)v.payload_bytes))
+        fail("fprows: cannot re-init the reader");
 
     const uint8_t *row = nullptr;
     uint32_t       len = 0;
@@ -754,10 +791,11 @@ visit_rows(const FpView &v, Sink &sink)
     while (fastpostgres_rows_next(&rd, &row, &len))
     {
         /* The row aliases the payload; nothing was materialized to walk it. */
-        if (row < v.payload || row + len > v.payload + v.payload_bytes) fail("fprows: row outside the payload");
+        if (row < v.payload || row + len > v.payload + v.payload_bytes)
+            fail("fprows: row outside the payload");
 
-        uint32_t off    = fastpostgres_tuple_hoff(row);
-        uint32_t natts  = fastpostgres_tuple_natts(row);
+        uint32_t off     = fastpostgres_tuple_hoff(row);
+        uint32_t natts   = fastpostgres_tuple_natts(row);
         bool     hasnull = fastpostgres_tuple_hasnull(row) != 0;
 
         if (off < FASTPOSTGRES_HT_BITS || off > len || natts < v.ncols) fail("fprows: bad tuple header");
@@ -765,15 +803,15 @@ visit_rows(const FpView &v, Sink &sink)
 
         for (uint32_t c = 0; c < v.ncols; c++)
         {
-            uint8_t  kind   = v.cols[c].kind;
+            uint8_t  kind    = v.cols[c].kind;
             uint32_t alignby = (uint32_t)fastpostgres_kind_alignby(kind);
-            int      width  = fastpostgres_kind_width(kind);
+            int      width   = fastpostgres_kind_width(kind);
 
             if (width == 0)
             {
                 if (!fastpostgres_kind_is_varlena(kind)) fail("fprows: unknown wire kind");
-                off = fastpostgres_att_pointer_align(off, alignby, row + off);
-                const uint8_t *p = row + off;
+                off               = fastpostgres_att_pointer_align(off, alignby, row + off);
+                const uint8_t *p  = row + off;
                 uint32_t       vs = fastpostgres_varsize_any(p);
 
                 if (off + vs > len) fail("fprows: varlena runs past the row");
@@ -821,14 +859,14 @@ visit_rows(const FpView &v, Sink &sink)
 void
 checksum_columnar(const FpView &v, ChecksumSink &sink)
 {
-    const uint8_t *id_tab = v.cols[kColId].data;
-    const uint8_t *sku_tab = v.cols[kColSku].data;
-    const uint8_t *sku_txt = v.cols[kColSku].bytes;
+    const uint8_t *id_tab   = v.cols[kColId].data;
+    const uint8_t *sku_tab  = v.cols[kColSku].data;
+    const uint8_t *sku_txt  = v.cols[kColSku].bytes;
     const uint8_t *name_tab = v.cols[kColName].data;
     const uint8_t *name_txt = v.cols[kColName].bytes;
-    const uint8_t *price = v.cols[kColPrice].data;
-    const uint8_t *stock = v.cols[kColStock].data;
-    const uint8_t *active = v.cols[kColActive].data;
+    const uint8_t *price    = v.cols[kColPrice].data;
+    const uint8_t *stock    = v.cols[kColStock].data;
+    const uint8_t *active   = v.cols[kColActive].data;
 
     for (uint64_t r = 0; r < v.nrows; r++)
     {

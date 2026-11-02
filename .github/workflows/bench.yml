@@ -1,0 +1,27 @@
+name: bench-smoke
+
+# The harnesses, run on a schedule and on demand. The numbers a shared runner
+# produces are not comparable to the committed records, so this job publishes the
+# log as an artifact and fails on a broken digest - it never calls the output a
+# measurement.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays, 03:00 UTC
+
+jobs:
+  workloads:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the dev image
+        run: docker build --target dev -t fastpostgres-dev -f docker/Dockerfile .
+      - name: the workload suite, quick
+        run: |
+          docker run --rm --shm-size=3g -e BENCH_GIT_REV="${GITHUB_SHA}" fastpostgres-dev \
+            python3 /src/benchmarks/workloads/runner.py --quick | tee workload-smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workload-smoke
+          path: workload-smoke.log

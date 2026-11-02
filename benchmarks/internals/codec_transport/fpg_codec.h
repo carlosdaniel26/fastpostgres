@@ -33,7 +33,8 @@
 
 #include "fastpostgres/fastpostgres_shm.h"
 
-namespace fpg {
+namespace fpg
+{
 
 /* The dataset's columns, in frame order (SPEC.md "Dataset"). */
 enum DatasetColumn : int
@@ -54,16 +55,15 @@ constexpr uint32_t kMaxColumns = 16;
  * Dataset
  * ------------------------------------------------------------------------ */
 
-struct Dataset
-{
+struct Dataset {
     uint64_t              rows = 0;
-    std::vector<int32_t>  id;     /* g                       */
-    std::vector<int32_t>  stock;  /* g % 500                 */
-    std::vector<double>   price;  /* g * 0.5                 */
-    std::vector<uint8_t>  active; /* g % 2 == 0              */
-    std::vector<char>     sku;    /* "SKU-" + g, concatenated */
-    std::vector<uint32_t> sku_off; /* rows + 1 offsets into sku  */
-    std::vector<char>     name;   /* "Product " + g, concatenated */
+    std::vector<int32_t>  id;       /* g                       */
+    std::vector<int32_t>  stock;    /* g % 500                 */
+    std::vector<double>   price;    /* g * 0.5                 */
+    std::vector<uint8_t>  active;   /* g % 2 == 0              */
+    std::vector<char>     sku;      /* "SKU-" + g, concatenated */
+    std::vector<uint32_t> sku_off;  /* rows + 1 offsets into sku  */
+    std::vector<char>     name;     /* "Product " + g, concatenated */
     std::vector<uint32_t> name_off; /* rows + 1 offsets into name */
 };
 
@@ -74,15 +74,14 @@ Dataset generate(uint64_t rows);
  * Decoded views — pointers into the payload, never a copy
  * ------------------------------------------------------------------------ */
 
-struct FpColumnView
-{
-    const char    *name = nullptr;
+struct FpColumnView {
+    const char    *name     = nullptr;
     uint32_t       name_len = 0;
-    uint8_t        kind = 0;
-    uint32_t       pgtype = 0;
-    const uint8_t *nulls = nullptr;
-    const uint8_t *data = nullptr;  /* fixed-width values, or the offset table */
-    const uint8_t *bytes = nullptr; /* text/bytea bytes, varlena kinds only   */
+    uint8_t        kind     = 0;
+    uint32_t       pgtype   = 0;
+    const uint8_t *nulls    = nullptr;
+    const uint8_t *data     = nullptr; /* fixed-width values, or the offset table */
+    const uint8_t *bytes    = nullptr; /* text/bytea bytes, varlena kinds only   */
     uint64_t       data_len = 0;
 };
 
@@ -92,14 +91,13 @@ enum class Frame
     fprows
 };
 
-struct FpView
-{
-    Frame         frame = Frame::fpcolumn;
-    const uint8_t *payload = nullptr;
-    uint64_t      payload_bytes = 0;
-    uint32_t      ncols = 0;
-    uint64_t      nrows = 0;
-    FpColumnView  cols[kMaxColumns];
+struct FpView {
+    Frame          frame         = Frame::fpcolumn;
+    const uint8_t *payload       = nullptr;
+    uint64_t       payload_bytes = 0;
+    uint32_t       ncols         = 0;
+    uint64_t       nrows         = 0;
+    FpColumnView   cols[kMaxColumns];
 };
 
 /* fpcolumn: payload written with fastpostgres_columnar_write_begin()/write_column()
@@ -121,27 +119,25 @@ bool     fprows_decode(const uint8_t *payload, uint64_t payload_bytes, FpView *o
 
 /* The six aggregates SPEC.md's timed region computes, over the decoded view.
  * Read-only: every input is an aliased payload byte. */
-struct Aggregates
-{
-    uint64_t rows = 0;
-    uint64_t sum_id = 0;
-    uint64_t sum_stock = 0;
-    double   sum_price = 0.0;
-    uint64_t trues = 0;
+struct Aggregates {
+    uint64_t rows       = 0;
+    uint64_t sum_id     = 0;
+    uint64_t sum_stock  = 0;
+    double   sum_price  = 0.0;
+    uint64_t trues      = 0;
     uint64_t text_bytes = 0; /* sum of len(sku) + len(name) */
 };
 
 /* The logical checksum (SPEC.md), computed once outside the timed region.
  * `text_bytes` is not part of the reported checksum; it is carried so the
  * harness can prove the timed aggregates and this pass saw the same data. */
-struct Checksum
-{
-    uint64_t sum_id = 0;
-    uint64_t sum_stock = 0;
+struct Checksum {
+    uint64_t sum_id         = 0;
+    uint64_t sum_stock      = 0;
     uint64_t sum_price_bits = 0;
-    uint64_t trues = 0;
-    uint64_t text_hash = 0;
-    uint64_t text_bytes = 0;
+    uint64_t trues          = 0;
+    uint64_t text_hash      = 0;
+    uint64_t text_bytes     = 0;
 };
 
 Aggregates aggregate(const FpView &view);
@@ -157,8 +153,8 @@ Checksum   checksum(const FpView &view);
  * aggregate/checksum passes load scalars out of those pointers without
  * materializing anything.
  * ------------------------------------------------------------------------ */
-constexpr int kCopiesValuesToPayload = 1;  /* encoder: dataset arrays -> frame            */
-constexpr int kCopiesPayloadToViews = 0;   /* decode: readers alias the payload           */
+constexpr int kCopiesValuesToPayload  = 1; /* encoder: dataset arrays -> frame            */
+constexpr int kCopiesPayloadToViews   = 0; /* decode: readers alias the payload           */
 constexpr int kCopiesViewsToAggregate = 0; /* timed pass: sums read the aliased bytes     */
 constexpr int kCopies = kCopiesValuesToPayload + kCopiesPayloadToViews + kCopiesViewsToAggregate;
 

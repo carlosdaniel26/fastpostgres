@@ -1,0 +1,9 @@
+# The committed records and rendered charts are generated: GitHub collapses them
+# in diffs and keeps them out of the language statistics.
+benchmarks/results/*.log linguist-generated=true
+benchmarks/results/ab/*.log linguist-generated=true
+docs/assets/*.png linguist-generated=true
+
+# The image and the demo are not part of the library's language split.
+docs/** linguist-documentation
+*.c linguist-language=C

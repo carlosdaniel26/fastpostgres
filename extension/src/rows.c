@@ -186,8 +186,8 @@ row_build(RowReceiver *rx, char *out, uint32 len)
  * carried row is the whole of the state this needs. It lives in TopMemoryContext
  * because the executor's context dies with the portal.
  */
-static char   *carry_row;
-static uint32  carry_len;
+static char  *carry_row;
+static uint32 carry_len;
 
 void
 fastpostgres_rows_carry_reset(void)

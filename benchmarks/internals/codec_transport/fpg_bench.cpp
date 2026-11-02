@@ -40,12 +40,13 @@
  * because fpg_codec.h is not this change's file; the payload is byte for byte
  * the same either way, which is what the --emit-payload comparison and the
  * checksum check. */
-namespace fpg {
-uint64_t
-fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store);
+namespace fpg
+{
+uint64_t fpcolumn_encode(const Dataset &ds, char *out, uint64_t capacity, bool nt_store);
 } /* namespace fpg */
 
-namespace {
+namespace
+{
 
 void
 usage(const char *argv0)
@@ -159,7 +160,8 @@ main(int argc, char **argv)
         {
             char *endp = nullptr;
             rows       = std::strtoull(v, &endp, 10);
-            if (endp == v || *endp != '\0' || rows < 1 || rows > 0x7fffffffull) die("--rows must be 1..2147483647");
+            if (endp == v || *endp != '\0' || rows < 1 || rows > 0x7fffffffull)
+                die("--rows must be 1..2147483647");
         }
         else if ((v = take("--format")))
         {
@@ -170,7 +172,8 @@ main(int argc, char **argv)
         {
             char *endp = nullptr;
             reps       = std::strtol(v, &endp, 10);
-            if (endp == v || *endp != '\0' || reps < 1 || reps > 100000) die("--reps must be a positive integer");
+            if (endp == v || *endp != '\0' || reps < 1 || reps > 100000)
+                die("--reps must be a positive integer");
         }
         else if ((v = take("--emit-payload")))
         {
@@ -207,18 +210,18 @@ main(int argc, char **argv)
     enc_ms.reserve((size_t)reps);
     dec_ms.reserve((size_t)reps);
 
-    uint64_t          payload_bytes = 0;
-    fpg::FpView       last_view{};
-    fpg::Aggregates   last_agg{};
+    uint64_t        payload_bytes = 0;
+    fpg::FpView     last_view{};
+    fpg::Aggregates last_agg{};
 
     for (long r = 0; r < reps; r++)
     {
         double t0 = now_ms();
         /* --nt-store selects the store instruction, never the bytes: it is the
          * columnar encoder's knob, since the row frame copies no bulk arrays. */
-        uint64_t n = fpcolumn ? fpg::fpcolumn_encode(ds, reinterpret_cast<char *>(buf), capacity, nt_store)
-                              : fpg::fprows_encode(ds, reinterpret_cast<char *>(buf), capacity);
-        double t1 = now_ms();
+        uint64_t n  = fpcolumn ? fpg::fpcolumn_encode(ds, reinterpret_cast<char *>(buf), capacity, nt_store)
+                               : fpg::fprows_encode(ds, reinterpret_cast<char *>(buf), capacity);
+        double   t1 = now_ms();
 
         if (r == 0)
             payload_bytes = n;
@@ -256,37 +259,40 @@ main(int argc, char **argv)
         FILE *f = std::fopen(emit_path, "wb");
 
         if (f == nullptr) die("cannot open --emit-payload path");
-        if (std::fwrite(buf, 1, (size_t)payload_bytes, f) != (size_t)payload_bytes) die("short write on --emit-payload");
+        if (std::fwrite(buf, 1, (size_t)payload_bytes, f) != (size_t)payload_bytes)
+            die("short write on --emit-payload");
         if (std::fclose(f) != 0) die("cannot close --emit-payload path");
     }
 
-    const double enc_med   = median(enc_ms);
-    const double dec_med   = median(dec_ms);
-    const double total_ms  = enc_med + dec_med;
-    const double total_s   = total_ms > 0.0 ? total_ms / 1000.0 : 0.0;
-    const double rows_s    = total_s > 0.0 ? (double)rows / total_s : 0.0;
-    const double gb_s      = total_s > 0.0 ? ((double)payload_bytes / 1e9) / total_s : 0.0;
+    const double enc_med  = median(enc_ms);
+    const double dec_med  = median(dec_ms);
+    const double total_ms = enc_med + dec_med;
+    const double total_s  = total_ms > 0.0 ? total_ms / 1000.0 : 0.0;
+    const double rows_s   = total_s > 0.0 ? (double)rows / total_s : 0.0;
+    const double gb_s     = total_s > 0.0 ? ((double)payload_bytes / 1e9) / total_s : 0.0;
 
     std::vector<double> totals;
     totals.reserve(enc_ms.size());
-    for (size_t i = 0; i < enc_ms.size(); i++) totals.push_back(enc_ms[i] + dec_ms[i]);
+    for (size_t i = 0; i < enc_ms.size(); i++)
+        totals.push_back(enc_ms[i] + dec_ms[i]);
     std::sort(totals.begin(), totals.end());
 
     struct rusage ru;
     std::memset(&ru, 0, sizeof(ru));
     (void)getrusage(RUSAGE_SELF, &ru);
 
-    std::printf("{\"cell\": \"%s\", \"rows\": %" PRIu64 ", \"payload_bytes\": %" PRIu64 ", \"encode_ms\": %.3f, "
-                "\"decode_ms\": %.3f, \"rows_per_s\": %.1f, \"gb_per_s\": %.6f, \"p50_ms\": %.3f, \"p99_ms\": %.3f, "
-                "\"nt_store\": %s, "
-                "\"copies\": %d, \"copy_stages\": {\"values->payload\": %d, \"payload->decoded-views\": %d, "
-                "\"decoded-views->aggregates\": %d}, \"cpu_user_ms\": %.1f, \"cpu_sys_ms\": %.1f, \"rss_kb\": %ld, "
-                "\"checksum\": {\"sum_id\": %" PRIu64 ", \"sum_stock\": %" PRIu64 ", \"sum_price_bits\": %" PRIu64
-                ", \"trues\": %" PRIu64 ", \"text_hash\": %" PRIu64 "}}\n",
-                format.c_str(), rows, payload_bytes, enc_med, dec_med, rows_s, gb_s, percentile(totals, 50.0),
-                percentile(totals, 99.0), nt_store ? "true" : "false", fpg::kCopies, fpg::kCopiesValuesToPayload, fpg::kCopiesPayloadToViews,
-                fpg::kCopiesViewsToAggregate, tv_ms(ru.ru_utime), tv_ms(ru.ru_stime), peak_rss_kb(), chk.sum_id,
-                chk.sum_stock, chk.sum_price_bits, chk.trues, chk.text_hash);
+    std::printf(
+        "{\"cell\": \"%s\", \"rows\": %" PRIu64 ", \"payload_bytes\": %" PRIu64 ", \"encode_ms\": %.3f, "
+        "\"decode_ms\": %.3f, \"rows_per_s\": %.1f, \"gb_per_s\": %.6f, \"p50_ms\": %.3f, \"p99_ms\": %.3f, "
+        "\"nt_store\": %s, "
+        "\"copies\": %d, \"copy_stages\": {\"values->payload\": %d, \"payload->decoded-views\": %d, "
+        "\"decoded-views->aggregates\": %d}, \"cpu_user_ms\": %.1f, \"cpu_sys_ms\": %.1f, \"rss_kb\": %ld, "
+        "\"checksum\": {\"sum_id\": %" PRIu64 ", \"sum_stock\": %" PRIu64 ", \"sum_price_bits\": %" PRIu64
+        ", \"trues\": %" PRIu64 ", \"text_hash\": %" PRIu64 "}}\n",
+        format.c_str(), rows, payload_bytes, enc_med, dec_med, rows_s, gb_s, percentile(totals, 50.0),
+        percentile(totals, 99.0), nt_store ? "true" : "false", fpg::kCopies, fpg::kCopiesValuesToPayload,
+        fpg::kCopiesPayloadToViews, fpg::kCopiesViewsToAggregate, tv_ms(ru.ru_utime), tv_ms(ru.ru_stime),
+        peak_rss_kb(), chk.sum_id, chk.sum_stock, chk.sum_price_bits, chk.trues, chk.text_hash);
 
     std::free(mem);
     return 0;

@@ -1,0 +1,13 @@
+# The repository's Python lint, deliberately conservative: pyflakes plus the
+# pycodestyle errors that are typos, not style arguments. Run from the root:
+#   ruff check python benchmarks
+
+line-length = 100
+extend-exclude = [
+  "python/src/fastpostgres/native", # C++ sources, clang-format's business
+  "third_party",
+  "data",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

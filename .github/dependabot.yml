@@ -1,0 +1,14 @@
+version: 2
+
+updates:
+  # the actions the workflows pin
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  # the benchmark-only Python dependencies the image installs
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: monthly

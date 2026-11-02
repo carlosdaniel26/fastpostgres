@@ -1,0 +1,42 @@
+# The repository's own tooling: lint, tests, benchmarks, docs.
+#
+# `ruff check` runs the conservative rule set configured in python/pyproject.toml;
+# clang-format is the repo's own .clang-format; shellcheck covers the harnesses;
+# the last two hooks are the cheap hygiene ones.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(python|benchmarks)/.*\.pyi?$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        entry: clang-format --dry-run --Werror
+        language: system
+        files: ^(extension/src/.*\.(c|h)|python/src/fastpostgres/native/.*\.(cpp|hpp|h)|benchmarks/internals/codec_transport/.*\.(cpp|h))$
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        files: \.sh$
+      - id: markdown-links
+        name: markdown links
+        entry: python3 tools/check_links.py
+        language: system
+        pass_filenames: false
+        files: \.md$

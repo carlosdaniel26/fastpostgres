@@ -127,6 +127,7 @@ diff_runs() {
 }
 
 # awk prints one table row from a file of six counters (label + 6 numbers).
+# shellcheck disable=SC2016 # the awk program's $ signs are awk's, not the shell's
 row_awk='BEGIN {
     getline < f
     cy = $1; ins = $2; l1l = $3; l1m = $4; l2r = $5; walk = $6

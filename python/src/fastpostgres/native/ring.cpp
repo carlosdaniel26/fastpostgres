@@ -28,15 +28,17 @@ Ring_dealloc(RingObject *self)
 static int
 Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 {
-    static const char  *kwlist[] = {"segment", "segment_bytes", nullptr};
-    const char         *seg;
-    unsigned long long  data_bytes = 0;
+    static const char *kwlist[] = {"segment", "segment_bytes", nullptr};
+    const char        *seg;
+    unsigned long long data_bytes = 0;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|K", (char **)kwlist, &seg, &data_bytes)) return -1;
 
     if (data_bytes != 0)
     {
-        if (data_bytes < FASTPOSTGRES_SEGMENT_MIN) data_bytes = FASTPOSTGRES_SEGMENT_MIN;
-        else if (data_bytes > FASTPOSTGRES_SEGMENT_BYTES) data_bytes = FASTPOSTGRES_SEGMENT_BYTES;
+        if (data_bytes < FASTPOSTGRES_SEGMENT_MIN)
+            data_bytes = FASTPOSTGRES_SEGMENT_MIN;
+        else if (data_bytes > FASTPOSTGRES_SEGMENT_BYTES)
+            data_bytes = FASTPOSTGRES_SEGMENT_BYTES;
     }
 
     for (const char *p = seg; *p; p++)

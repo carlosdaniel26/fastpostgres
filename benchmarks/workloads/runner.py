@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # benchmarks/
 
 from lib.harness import percentile, same_digest  # noqa: E402
 from scenarios import BY_NAME, SCENARIOS  # noqa: E402
-from schema import DATABASE_URL, counts, reset_reserved_orders, setup  # noqa: E402
+from schema import DATABASE_URL, reset_reserved_orders, setup  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PLAYER = HERE / "player.py"

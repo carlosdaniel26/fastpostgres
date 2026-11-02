@@ -350,11 +350,11 @@ static unsigned long long g_dec_cycles;
 static unsigned long long g_dec_rows;
 static unsigned long long g_read_cycles;
 static unsigned long long g_read_rows;
-static size_t     g_pool_births;
-static size_t     g_pool_fallbacks;
-static uintptr_t  g_pool_long_tag[4][2]; /* [ndigits][negative] */
-static char       g_pool_str_hdr[sizeof(PyASCIIObject)];
-static Py_ssize_t g_pool_str_data = (Py_ssize_t)sizeof(PyASCIIObject);
+static size_t             g_pool_births;
+static size_t             g_pool_fallbacks;
+static uintptr_t          g_pool_long_tag[4][2]; /* [ndigits][negative] */
+static char               g_pool_str_hdr[sizeof(PyASCIIObject)];
+static Py_ssize_t         g_pool_str_data = (Py_ssize_t)sizeof(PyASCIIObject);
 
 static inline void *
 pool_take(size_t n)
@@ -701,8 +701,8 @@ fp_objpool_report(void)
      * runs with the arena off too - that A/B is the one that prices the arena,
      * so it must not disappear with the pool. */
     if (g_pool_base != nullptr)
-        fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n", fp_objpool_mode(),
-                g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
+        fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n",
+                fp_objpool_mode(), g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
                 g_pool_on ? "" : " (values use the normal constructors)");
     if (g_read_rows != 0)
         fprintf(stderr, "read_rows: %.1f cycles/row over %llu rows (decode %.1f, frame+desc+list %.1f)\n",

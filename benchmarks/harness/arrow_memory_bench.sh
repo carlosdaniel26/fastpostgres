@@ -82,6 +82,7 @@ reps_for() {
   if [ "$quick" = 1 ]; then echo 1; else echo 3; fi
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
   if [ "$keep" = 1 ]; then return 0; fi
   docker rm -f "$origin" >/dev/null 2>&1 || true
@@ -158,7 +159,7 @@ for n in "${sizes[@]}"; do
     seg=-
     [ "$player_name" = ring ] && seg=$segment
     out=$(measure "$player_name" "$n" "$seg" "$reps")
-    read -r med lo hi rows total_sum <<< "$(sed -n 1p <<< "$out")"
+    read -r med lo hi _ total_sum <<< "$(sed -n 1p <<< "$out")"
     evidence[$player_name]=$(sed -n 2p <<< "$out")
     rate[$player_name]=$(fmt_rate "$n" "$med")
     med_of[$player_name]=$med

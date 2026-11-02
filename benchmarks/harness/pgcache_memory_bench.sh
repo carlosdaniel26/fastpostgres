@@ -118,6 +118,7 @@ reps_for() {
   if [ "$quick" = 1 ] || [ "$1" -gt "$reps_max_rows" ]; then echo 1; else echo 3; fi
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
   if [ "$keep" = 1 ]; then return 0; fi
   docker rm -f "$proxy" "$origin" >/dev/null 2>&1 || true
@@ -164,8 +165,8 @@ start_proxy() {  # <budget bytes>; non-zero: the cache cannot run at this budget
 # real failure and stops the run.
 unavailable_reason=""
 wait_proxy() {
-  local i state
-  for i in $(seq 120); do
+  local state
+  for _ in $(seq 120); do
     docker exec "$origin" python3 -c "$probe" 2>/dev/null && return 0
     state=$(docker inspect -f '{{.State.Running}} {{.State.OOMKilled}}' "$proxy" 2>/dev/null || echo "gone false")
     if [ "$state" = "false true" ]; then
@@ -278,13 +279,13 @@ for budget in "${budgets[@]}"; do
   fi
 
   for workload in large small through; do
-    read -r med lo hi wmiss rmiss wreads wms count idsum psum ssum \
+    read -r med _ _ wmiss rmiss wreads wms count idsum psum ssum \
       <<< "${res["fastpostgres/$workload"]}"
     fpg_med=$med
     fpg_check="$count $idsum $psum $ssum"
 
     if [ "$cache_up" = 1 ]; then
-      read -r med lo hi wmiss rmiss wreads wms count idsum psum ssum \
+      read -r med _ _ wmiss rmiss wreads wms count idsum psum ssum \
         <<< "${res["pgcache/$workload"]}"
       pgcache_med=$med
       if [ "$fpg_check" != "$count $idsum $psum $ssum" ]; then

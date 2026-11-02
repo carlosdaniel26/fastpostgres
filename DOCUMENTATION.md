@@ -22,13 +22,15 @@ and the formal bits.
 | I want to... | go here |
 |---|---|
 | run or read about the benchmarks | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| understand the wire format and the two frames | [`extension/fastpostgres_shm.h`](extension/fastpostgres_shm.h) |
+| see every committed measurement | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| understand the wire format and the two frames | [`extension/include/fastpostgres/fastpostgres_shm.h`](extension/include/fastpostgres/fastpostgres_shm.h) |
 | reproduce a measurement, or read the statistics | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
 | understand why it is faster than Arrow, mechanism by mechanism | [`docs/WHY-IT-WINS.md`](docs/WHY-IT-WINS.md) |
 | compare against a result cache | [`docs/PG-CACHE.md`](docs/PG-CACHE.md) |
 | separate format cost from transport cost | [`docs/CODEC-TRANSPORT.md`](docs/CODEC-TRANSPORT.md) |
-| see a run end to end | [`docs/*.log`](docs) |
+| contribute, or report a vulnerability | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) |
+| know what changed | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Known limitations
 

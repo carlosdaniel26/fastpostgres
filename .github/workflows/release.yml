@@ -1,0 +1,41 @@
+name: release
+
+# A tag builds the two artifacts the project publishes - the extension tarball
+# and the wheel - and attaches them, with their checksums, to a GitHub Release.
+# `just check-version` has already failed CI if the tag, the control file and the
+# SQL file disagree.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build the dev image
+        run: docker build --target dev -t fastpostgres-dev -f docker/Dockerfile .
+
+      - name: the extension tarball
+        run: |
+          mkdir -p dist
+          docker run --rm -v "${PWD}/dist:/out" --entrypoint bash fastpostgres-dev -c \
+            "cd /src/extension && make dist && cp fastpostgres-*.zip /out/"
+
+      - name: the wheel
+        run: |
+          docker run --rm -v "${PWD}/dist:/out" --entrypoint bash fastpostgres-dev -c \
+            "cd /src/python && python3 -m pip wheel --no-deps -w /out ."
+
+      - name: checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

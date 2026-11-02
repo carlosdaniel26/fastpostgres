@@ -82,17 +82,17 @@ static const int    TP_SOCK_TIMEOUT  = 10;       /* seconds, SO_RCVTIMEO/SO_SNDT
 /* The deepest shm window --in-flight accepts. The control block carries one
  * 8-byte length per window, and 256 of them still fit in the page before the
  * data (see TP_SHM_DATA_OFF), so the limit is the layout, not the protocol. */
-static const int TP_MAX_IN_FLIGHT = 256;
+static const int TP_MAX_IN_FLIGHT     = 256;
 static const int TP_DEFAULT_IN_FLIGHT = 1; /* one chunk in flight: the original handshake */
 
 /* The shm segment: control block at offset 0, then in_flight chunk windows,
  * each page-aligned (the producer's stores to the control must not share a
  * cache line with the payload it is copying, and window i+1 must not share one
  * with window i). */
-static const size_t   TP_SHM_DATA_OFF = 4096;
+static const size_t TP_SHM_DATA_OFF = 4096;
 /* 8 bytes, NUL-padded — the same shape as FASTPOSTGRES_RING_MAGIC ("FPRING03"). */
-static const char     TP_SHM_MAGIC[8]  = "FPTP01";
-static const uint32_t TP_SHM_VERSION   = 1;
+static const char     TP_SHM_MAGIC[8] = "FPTP01";
+static const uint32_t TP_SHM_VERSION  = 1;
 
 /* Seed of the stream fold (the FNV-1a 64 offset basis). */
 static const uint64_t TP_FOLD_SEED = 0xcbf29ce484222325ull;
@@ -145,7 +145,8 @@ tp_sem_wait(sem_t *s, const char *what, char *err, size_t errsz)
     do
     {
         rc = sem_timedwait(s, &ts);
-    } while (rc != 0 && errno == EINTR);
+    }
+    while (rc != 0 && errno == EINTR);
 
     if (rc != 0)
     {
@@ -157,8 +158,7 @@ tp_sem_wait(sem_t *s, const char *what, char *err, size_t errsz)
 
 /* ------------------------------------------------------------ cpu and rss */
 
-struct TpCpu
-{
+struct TpCpu {
     uint64_t user_ns;
     uint64_t sys_ns;
 };
@@ -269,16 +269,15 @@ tp_fold(const void *p, size_t n, uint64_t h, uint64_t base_word)
  * The ring keeps the batch in a separate segment; one segment is enough here
  * because this cell has exactly one reader and one writer.
  */
-struct TpShmCtl
-{
-    char     magic[8];  /* "FPTP01" */
+struct TpShmCtl {
+    char     magic[8]; /* "FPTP01" */
     uint32_t version;
     uint32_t reserved;
-    uint64_t seq;      /* producer -> consumer: chunks published (RELEASE) */
-    uint64_t ack;      /* consumer -> producer: chunks consumed (RELEASE) */
+    uint64_t seq;                   /* producer -> consumer: chunks published (RELEASE) */
+    uint64_t ack;                   /* consumer -> producer: chunks consumed (RELEASE) */
     uint64_t len[TP_MAX_IN_FLIGHT]; /* bytes in window seq % in_flight */
-    sem_t    pub;      /* producer -> consumer doorbell */
-    sem_t    free_sem; /* in_flight permits: -1 per publish, +1 per ack */
+    sem_t    pub;                   /* producer -> consumer doorbell */
+    sem_t    free_sem;              /* in_flight permits: -1 per publish, +1 per ack */
 };
 
 /* -------------------------------------------- shared memory: bookkeeping --- */
@@ -299,8 +298,7 @@ struct TpShmCtl
  * so the consumer may spin briefly here — the spin is counted and reported, and
  * it happens after the receive timestamp is recorded, so it cannot pollute the
  * latency sample. */
-struct TpTsSlot
-{
+struct TpTsSlot {
     uint64_t seq;
     uint64_t t_pub_ns;
 };
@@ -310,18 +308,17 @@ struct TpTsSlot
  * through it. It carries what only the child can know (its own CPU, its own
  * peak RSS, the latencies it computed) since the SPEC asks each side to report
  * its own CPU. */
-struct TpShared
-{
+struct TpShared {
     uint32_t consumer_ready;  /* consumer's end is set up (RELEASE) */
     uint32_t consumer_failed; /* 1 = see err */
     char     err[256];
-    uint64_t cpu_user_ns;  /* getrusage(RUSAGE_SELF) delta measured IN the child */
+    uint64_t cpu_user_ns;     /* getrusage(RUSAGE_SELF) delta measured IN the child */
     uint64_t cpu_sys_ns;
-    uint64_t peak_rss_kb; /* VmHWM in the child */
-    uint64_t recv_bytes;  /* bytes the consumer actually took out of the transport */
+    uint64_t peak_rss_kb;     /* VmHWM in the child */
+    uint64_t recv_bytes;      /* bytes the consumer actually took out of the transport */
     uint64_t recv_chunks;
-    uint64_t integrity_ok; /* 0 = a length or edge check failed */
-    uint64_t fold;         /* in-place fold over everything received */
+    uint64_t integrity_ok;    /* 0 = a length or edge check failed */
+    uint64_t fold;            /* in-place fold over everything received */
     uint64_t first_recv_ns;
     uint64_t last_recv_ns;
     uint64_t ts_slot_spins;
@@ -337,8 +334,7 @@ struct TpShared
 
 struct TpXport;
 
-struct TpXport
-{
+struct TpXport {
     const char *name; /* "shm" | "uds" */
 
     /* both sides */
@@ -353,25 +349,26 @@ struct TpXport
     int      sock_buf; /* granted SO_SNDBUF, for the JSON */
 
     /* shm */
-    char      seg_name[64]; /* "/fastpostgres_tp_<pid>" */
+    char      seg_name[64];  /* "/fastpostgres_tp_<pid>" */
     size_t    seg_bytes;
     size_t    window_stride; /* bytes between window i and i+1 (page-rounded chunk) */
-    void     *map; /* this side's MAP_SHARED mapping of the segment */
-    TpShmCtl *ctl; /* == map (control block at offset 0) */
-    uint8_t  *data; /* == map + TP_SHM_DATA_OFF (window 0) */
+    void     *map;           /* this side's MAP_SHARED mapping of the segment */
+    TpShmCtl *ctl;           /* == map (control block at offset 0) */
+    uint8_t  *data;          /* == map + TP_SHM_DATA_OFF (window 0) */
 
     /* the pairing slot the producer is publishing into right now (see
      * tp_pair_publish); the consumer loop owns the array itself */
     TpTsSlot *pair;
 
     /* the only per-transport code: the two loops below never change */
-    int  (*open_producer)(TpXport *x);
-    int  (*open_consumer)(TpXport *x, TpShared *sh);
-    int  (*publish)(TpXport *x, const void *src, size_t len, uint64_t seq, uint64_t *t_pub);
-    int  (*receive)(TpXport *x, uint64_t seq, size_t expected, const void **view, size_t *len, uint64_t *t_recv);
+    int (*open_producer)(TpXport *x);
+    int (*open_consumer)(TpXport *x, TpShared *sh);
+    int (*publish)(TpXport *x, const void *src, size_t len, uint64_t seq, uint64_t *t_pub);
+    int (*receive)(TpXport *x, uint64_t seq, size_t expected, const void **view, size_t *len,
+                   uint64_t *t_recv);
     /* "I am done with chunk seq": the consumer's ack. It MUST come after the
      * consumer has finished reading the bytes, not when they arrive. */
-    int  (*release)(TpXport *x, uint64_t seq);
+    int (*release)(TpXport *x, uint64_t seq);
     void (*close_producer)(TpXport *x);
     void (*close_consumer)(TpXport *x);
 
@@ -446,7 +443,7 @@ shm_open_producer(TpXport *x)
         tp_seterr(x, "shm: %d windows of %zu bytes overflow the segment size", x->in_flight, stride);
         return -1;
     }
-    want = TP_SHM_DATA_OFF + stride * (size_t)x->in_flight;
+    want             = TP_SHM_DATA_OFF + stride * (size_t)x->in_flight;
     x->window_stride = stride;
     /* /dev/shm is a tmpfs; in the dev image it is 64 MiB. Fail with a clear
      * message instead of at the first touch. */
@@ -455,8 +452,8 @@ shm_open_producer(TpXport *x)
         unsigned long long avail = (unsigned long long)vfs.f_bavail * (unsigned long long)vfs.f_frsize;
         if ((unsigned long long)want > avail)
         {
-            tp_seterr(x, "shm: need %zu bytes for %d x %zu-byte windows, /dev/shm has %llu free", want, x->in_flight,
-                      x->chunk, avail);
+            tp_seterr(x, "shm: need %zu bytes for %d x %zu-byte windows, /dev/shm has %llu free", want,
+                      x->in_flight, x->chunk, avail);
             return -1;
         }
     }
@@ -521,8 +518,8 @@ shm_open_consumer(TpXport *x, TpShared *sh)
     if (x->map)
     {
         munmap(x->map, x->seg_bytes);
-        x->map = nullptr;
-        x->ctl = nullptr;
+        x->map  = nullptr;
+        x->ctl  = nullptr;
         x->data = nullptr;
     }
 
@@ -571,7 +568,8 @@ shm_publish(TpXport *x, const void *src, size_t len, uint64_t seq, uint64_t *t_p
      * exactly where the original did). At in_flight > 1 the producer may fill
      * the whole window before its first wait, which is the overlap the flag
      * exists to measure. */
-    if (tp_sem_wait(&c->free_sem, "shm: waiting for a free chunk window", x->err, sizeof x->err) != 0) return -1;
+    if (tp_sem_wait(&c->free_sem, "shm: waiting for a free chunk window", x->err, sizeof x->err) != 0)
+        return -1;
 
     /* Taking permit number seq+1 (the first in_flight are the initial count)
      * guarantees the consumer has released at least seq + 1 - in_flight chunks
@@ -616,7 +614,8 @@ shm_publish(TpXport *x, const void *src, size_t len, uint64_t seq, uint64_t *t_p
     {
         while (__atomic_load_n(&c->ack, __ATOMIC_ACQUIRE) != seq + 1)
         {
-            if (tp_sem_wait(&c->free_sem, "shm: waiting for the final ack", x->err, sizeof x->err) != 0) return -1;
+            if (tp_sem_wait(&c->free_sem, "shm: waiting for the final ack", x->err, sizeof x->err) != 0)
+                return -1;
         }
     }
     return 0;
@@ -645,8 +644,8 @@ shm_receive(TpXport *x, uint64_t seq, size_t expected, const void **view, size_t
     }
     if (got > seq + (uint64_t)x->in_flight)
     {
-        tp_seterr(x, "shm: seq is %llu, more than %d chunks ahead of chunk %llu", (unsigned long long)got, x->in_flight,
-                  (unsigned long long)seq);
+        tp_seterr(x, "shm: seq is %llu, more than %d chunks ahead of chunk %llu", (unsigned long long)got,
+                  x->in_flight, (unsigned long long)seq);
         return -1;
     }
 
@@ -668,8 +667,8 @@ shm_receive(TpXport *x, uint64_t seq, size_t expected, const void **view, size_t
      * producer overwrite it while the consumer is still reading it. With a
      * window of N, the producer can only reach this window again at chunk
      * seq+N, and free_sem holds it back until this release. */
-    *view = x->data + slot * x->window_stride;
-    *len  = n;
+    *view   = x->data + slot * x->window_stride;
+    *len    = n;
     *t_recv = tp_now_ns(); /* the SPEC's "right after receiving" */
     return 0;
 }
@@ -757,21 +756,25 @@ uds_open_producer(TpXport *x)
      * net.core.rmem_max, so an oversized --chunk is reported here instead of
      * failing later with EMSGSIZE or a silently truncated message. */
     int       eff_snd = 0, eff_rcv = 0;
-    socklen_t el      = sizeof eff_snd;
+    socklen_t el = sizeof eff_snd;
     getsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &eff_snd, &el);
     el = sizeof eff_rcv;
     getsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &eff_rcv, &el);
     x->sock_buf = eff_rcv;
     if ((size_t)eff_snd < x->chunk + 4096)
     {
-        tp_seterr(x, "uds: SO_SNDBUF is only %d bytes for a %zu-byte chunk: raise net.core.wmem_max or lower --chunk",
-                  eff_snd, x->chunk);
+        tp_seterr(
+            x,
+            "uds: SO_SNDBUF is only %d bytes for a %zu-byte chunk: raise net.core.wmem_max or lower --chunk",
+            eff_snd, x->chunk);
         return -1;
     }
     if ((size_t)eff_rcv < x->chunk + 4096)
     {
-        tp_seterr(x, "uds: SO_RCVBUF is only %d bytes for a %zu-byte chunk: raise net.core.rmem_max or lower --chunk",
-                  eff_rcv, x->chunk);
+        tp_seterr(
+            x,
+            "uds: SO_RCVBUF is only %d bytes for a %zu-byte chunk: raise net.core.rmem_max or lower --chunk",
+            eff_rcv, x->chunk);
         return -1;
     }
 
@@ -820,7 +823,8 @@ uds_publish(TpXport *x, const void *src, size_t len, uint64_t seq, uint64_t *t_p
     n = send(x->fd, src, len, MSG_NOSIGNAL);
     if (n != (ssize_t)len)
     {
-        tp_seterr(x, "uds: send of %zu bytes returned %zd: %s", len, n, n < 0 ? strerror(errno) : "short write");
+        tp_seterr(x, "uds: send of %zu bytes returned %zd: %s", len, n,
+                  n < 0 ? strerror(errno) : "short write");
         return -1;
     }
     *t_pub = tp_now_ns(); /* the SPEC's "right after publishing" */
@@ -857,7 +861,8 @@ uds_receive(TpXport *x, uint64_t seq, size_t expected, const void **view, size_t
     }
     if ((size_t)n != expected)
     {
-        tp_seterr(x, "uds: recv of chunk %llu returned %zd bytes, expected %zu", (unsigned long long)seq, n, expected);
+        tp_seterr(x, "uds: recv of chunk %llu returned %zd bytes, expected %zu", (unsigned long long)seq, n,
+                  expected);
         return -1;
     }
     *t_recv = tp_now_ns(); /* the SPEC's "right after receiving" */
@@ -946,13 +951,13 @@ producer_loop(TpXport *x, const uint8_t *payload, size_t bytes, size_t chunk, Tp
 static int
 consumer_loop(TpXport *x, TpShared *sh, const uint8_t *payload, size_t bytes, size_t chunk, TpTsSlot *slots)
 {
-    struct rusage        ru0, ru1;
+    struct rusage         ru0, ru1;
     std::vector<uint64_t> lat;
-    uint64_t             nchunks;
-    uint64_t             fold  = TP_FOLD_SEED;
-    uint64_t             got   = 0;
-    uint64_t             spins = 0;
-    int                  ok    = 1;
+    uint64_t              nchunks;
+    uint64_t              fold  = TP_FOLD_SEED;
+    uint64_t              got   = 0;
+    uint64_t              spins = 0;
+    int                   ok    = 1;
 
     getrusage(RUSAGE_SELF, &ru0);
     if (x->open_consumer(x, sh) != 0) return -1;
@@ -979,7 +984,8 @@ consumer_loop(TpXport *x, TpShared *sh, const uint8_t *payload, size_t bytes, si
         {
             if (++spins > 1000000000ull)
             {
-                tp_seterr(x, "consumer: publish timestamp for chunk %llu never arrived", (unsigned long long)seq);
+                tp_seterr(x, "consumer: publish timestamp for chunk %llu never arrived",
+                          (unsigned long long)seq);
                 return -1;
             }
         }
@@ -1004,9 +1010,8 @@ consumer_loop(TpXport *x, TpShared *sh, const uint8_t *payload, size_t bytes, si
         /* Integrity, at both edges of the slice, against the payload mapping the
          * fork inherited: the bytes that came through the transport must be the
          * bytes in the file. Two 8-byte compares per chunk, same on both cells. */
-        if (len >= 8 &&
-            (memcmp(view, payload + off, 8) != 0 ||
-             memcmp((const uint8_t *)view + len - 8, payload + off + len - 8, 8) != 0))
+        if (len >= 8 && (memcmp(view, payload + off, 8) != 0 ||
+                         memcmp((const uint8_t *)view + len - 8, payload + off + len - 8, 8) != 0))
             ok = 0;
 
         /* The consumer's work: fold the chunk where it lies. For shm the reads
@@ -1025,15 +1030,15 @@ consumer_loop(TpXport *x, TpShared *sh, const uint8_t *payload, size_t bytes, si
     getrusage(RUSAGE_SELF, &ru1);
 
     {
-        TpCpu c = tp_cpu_delta(ru0, ru1);
+        TpCpu c         = tp_cpu_delta(ru0, ru1);
         sh->cpu_user_ns = c.user_ns;
         sh->cpu_sys_ns  = c.sys_ns;
     }
-    sh->peak_rss_kb  = tp_vmhwm_kb();
-    sh->recv_bytes   = got;
-    sh->recv_chunks  = nchunks;
-    sh->integrity_ok = (uint64_t)ok;
-    sh->fold         = fold;
+    sh->peak_rss_kb   = tp_vmhwm_kb();
+    sh->recv_bytes    = got;
+    sh->recv_chunks   = nchunks;
+    sh->integrity_ok  = (uint64_t)ok;
+    sh->fold          = fold;
     sh->ts_slot_spins = spins;
 
     if (!lat.empty())
@@ -1047,7 +1052,8 @@ consumer_loop(TpXport *x, TpShared *sh, const uint8_t *payload, size_t bytes, si
         if (i50 >= n) i50 = n - 1;
         if (i99 >= n) i99 = n - 1;
         uint64_t sum = 0;
-        for (size_t i = 0; i < n; i++) sum += sorted[i];
+        for (size_t i = 0; i < n; i++)
+            sum += sorted[i];
         sh->lat_min_ns = sorted[0];
         sh->lat_p50_ns = sorted[i50];
         sh->lat_p99_ns = sorted[i99];
@@ -1125,9 +1131,9 @@ tp_fail_json(const char *name, const std::string &msg, int code)
 int
 main(int argc, char **argv)
 {
-    const char *which = nullptr;
-    const char *path  = nullptr;
-    size_t      req_chunk = TP_DEFAULT_CHUNK;
+    const char *which         = nullptr;
+    const char *path          = nullptr;
+    size_t      req_chunk     = TP_DEFAULT_CHUNK;
     int         req_in_flight = TP_DEFAULT_IN_FLIGHT;
     int         i;
 
@@ -1135,30 +1141,52 @@ main(int argc, char **argv)
 
     for (i = 1; i < argc; i++)
     {
-        std::string a = argv[i];
-        auto        next = [&]() -> const char * { return i + 1 < argc ? argv[++i] : nullptr; };
+        std::string a    = argv[i];
+        auto        next = [&]() -> const char        *{ return i + 1 < argc ? argv[++i] : nullptr; };
 
-        if (a == "--which") which = next();
-        else if (a == "--payload") path = next();
+        if (a == "--which")
+            which = next();
+        else if (a == "--payload")
+            path = next();
         else if (a == "--chunk")
         {
-            const char *v = next();
+            const char *v   = next();
             char       *end = nullptr;
-            if (!v) { tp_usage(); return 2; }
+            if (!v)
+            {
+                tp_usage();
+                return 2;
+            }
             unsigned long long n = strtoull(v, &end, 10);
-            if (!end || *end != 0 || n == 0) { tp_usage(); return 2; }
+            if (!end || *end != 0 || n == 0)
+            {
+                tp_usage();
+                return 2;
+            }
             req_chunk = (size_t)n;
         }
         else if (a == "--in-flight")
         {
-            const char *v = next();
+            const char *v   = next();
             char       *end = nullptr;
-            if (!v) { tp_usage(); return 2; }
+            if (!v)
+            {
+                tp_usage();
+                return 2;
+            }
             unsigned long long n = strtoull(v, &end, 10);
-            if (!end || *end != 0 || n == 0 || n > (unsigned long long)TP_MAX_IN_FLIGHT) { tp_usage(); return 2; }
+            if (!end || *end != 0 || n == 0 || n > (unsigned long long)TP_MAX_IN_FLIGHT)
+            {
+                tp_usage();
+                return 2;
+            }
             req_in_flight = (int)n;
         }
-        else if (a == "-h" || a == "--help") { tp_usage(); return 0; }
+        else if (a == "-h" || a == "--help")
+        {
+            tp_usage();
+            return 0;
+        }
         else
         {
             tp_usage();
@@ -1189,9 +1217,9 @@ main(int argc, char **argv)
     x.close_consumer = x.name[0] == 's' ? shm_close_consumer : uds_close_consumer;
 
     /* --- the payload: mapped read-only, never copied into the producer ---- */
-    int         pfd = open(path, O_RDONLY);
-    struct stat st;
-    size_t      bytes;
+    int            pfd = open(path, O_RDONLY);
+    struct stat    st;
+    size_t         bytes;
     const uint8_t *payload = nullptr;
 
     if (pfd < 0) tp_fail_json(x.name, std::string("open(") + path + "): " + strerror(errno), 1);
@@ -1224,13 +1252,16 @@ main(int argc, char **argv)
 
     /* --- bookkeeping shared with the child --------------------------------- */
     size_t    sh_bytes = sizeof(TpShared) + nchunks * sizeof(TpTsSlot);
-    TpShared *sh       = (TpShared *)mmap(nullptr, sh_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (sh == MAP_FAILED) tp_fail_json(x.name, std::string("mmap(shared bookkeeping): ") + strerror(errno), 1);
+    TpShared *sh =
+        (TpShared *)mmap(nullptr, sh_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (sh == MAP_FAILED)
+        tp_fail_json(x.name, std::string("mmap(shared bookkeeping): ") + strerror(errno), 1);
     memset(sh, 0, sh_bytes);
     TpTsSlot *slots = (TpTsSlot *)(void *)((char *)sh + sizeof(TpShared));
     /* Sentinel: the producer stores 0,1,2,... so an untouched slot must not look
      * like "chunk 0 has been published" (seq starts at 0). */
-    for (size_t k = 0; k < nchunks; k++) slots[k].seq = ~(uint64_t)0;
+    for (size_t k = 0; k < nchunks; k++)
+        slots[k].seq = ~(uint64_t)0;
 
     /* --- transport setup in the parent, before the fork -------------------- */
     if (x.open_producer(&x) != 0) tp_fail_json(x.name, x.err, 1);
@@ -1270,8 +1301,7 @@ main(int argc, char **argv)
             if (__atomic_load_n(&sh->consumer_failed, __ATOMIC_ACQUIRE))
                 tp_fail_json(x.name, std::string("consumer setup failed: ") + sh->err, 1);
             tp_sleep_ms(1);
-            if (++waited > TP_WAIT_MS)
-                tp_fail_json(x.name, "consumer did not become ready", 1);
+            if (++waited > TP_WAIT_MS) tp_fail_json(x.name, "consumer did not become ready", 1);
         }
     }
 
@@ -1300,16 +1330,16 @@ main(int argc, char **argv)
         tp_fail_json(x.name, std::string("consumer: ") + (sh->err[0] ? sh->err : "died"), 1);
 
     /* ------------------------------------------------------------------ out */
-    const bool    lengths_ok = sh->integrity_ok != 0;
-    const bool    counts_ok  = sh->recv_bytes == (uint64_t)bytes && x.copied_bytes == (uint64_t)bytes &&
-                               sh->recv_chunks == nchunks;
-    const bool    fold_ok    = sh->fold == ref_fold;
-    const bool    verified   = lengths_ok && counts_ok && fold_ok;
-    const double  transfer_ms = nchunks ? tp_ms(sh->last_recv_ns - first_pub_ns) : 0.0;
-    const double  gb_per_s    = transfer_ms > 0 ? ((double)bytes / (transfer_ms / 1000.0)) / 1e9 : 0.0;
-    const double  lat_mean_ms = nchunks ? tp_ms(sh->lat_sum_ns / nchunks) : 0.0;
-    const uint64_t rss_kb     = std::max(prod_rss, sh->peak_rss_kb);
-    const bool    is_shm      = strcmp(x.name, "shm") == 0;
+    const bool lengths_ok = sh->integrity_ok != 0;
+    const bool counts_ok =
+        sh->recv_bytes == (uint64_t)bytes && x.copied_bytes == (uint64_t)bytes && sh->recv_chunks == nchunks;
+    const bool     fold_ok     = sh->fold == ref_fold;
+    const bool     verified    = lengths_ok && counts_ok && fold_ok;
+    const double   transfer_ms = nchunks ? tp_ms(sh->last_recv_ns - first_pub_ns) : 0.0;
+    const double   gb_per_s    = transfer_ms > 0 ? ((double)bytes / (transfer_ms / 1000.0)) / 1e9 : 0.0;
+    const double   lat_mean_ms = nchunks ? tp_ms(sh->lat_sum_ns / nchunks) : 0.0;
+    const uint64_t rss_kb      = std::max(prod_rss, sh->peak_rss_kb);
+    const bool     is_shm      = strcmp(x.name, "shm") == 0;
 
     std::string j = "{";
     tp_appendf(j, "\"cell\":\"transport_%s\"", x.name);
@@ -1320,16 +1350,16 @@ main(int argc, char **argv)
      * because no codec is in the loop in this cell. checksum is null for the
      * same reason (the fold below is the integrity evidence instead). */
     j += ",\"rows\":null,\"rows_per_s\":null";
-    tp_appendf(j, ",\"payload_bytes\":%zu,\"chunks\":%zu,\"chunk_bytes\":%zu,\"chunk_requested_bytes\":%zu", bytes,
-               nchunks, chunk, req_chunk);
+    tp_appendf(j, ",\"payload_bytes\":%zu,\"chunks\":%zu,\"chunk_bytes\":%zu,\"chunk_requested_bytes\":%zu",
+               bytes, nchunks, chunk, req_chunk);
     /* in_flight is what ran (uds keeps one message in flight whatever the flag
      * says); in_flight_requested is the flag as given on the command line. */
     tp_appendf(j, ",\"in_flight\":%d,\"in_flight_requested\":%d", x.in_flight, req_in_flight);
     j += ",\"encode_ms\":0.0,\"decode_ms\":0.0";
     tp_appendf(j, ",\"gb_per_s\":%.4f,\"p50_ms\":%.4f,\"p99_ms\":%.4f", gb_per_s, tp_ms(sh->lat_p50_ns),
                tp_ms(sh->lat_p99_ns));
-    tp_appendf(j, ",\"latency_min_ms\":%.4f,\"latency_mean_ms\":%.4f,\"latency_max_ms\":%.4f", tp_ms(sh->lat_min_ns),
-               lat_mean_ms, tp_ms(sh->lat_max_ns));
+    tp_appendf(j, ",\"latency_min_ms\":%.4f,\"latency_mean_ms\":%.4f,\"latency_max_ms\":%.4f",
+               tp_ms(sh->lat_min_ns), lat_mean_ms, tp_ms(sh->lat_max_ns));
     /* Samples whose t_recv was earlier than t_pub: the transport handed the
      * chunk over in less time than the producer's own clock read took, so the
      * difference is recorded as 0 (see the comment in consumer_loop). */
@@ -1345,24 +1375,26 @@ main(int argc, char **argv)
     else
     {
         j += ",\"copies\":2";
-        j += ",\"copy_stages\":{\"file page cache -> producer mapping\":0,\"producer mmap -> kernel socket buffer\":1,"
+        j += ",\"copy_stages\":{\"file page cache -> producer mapping\":0,\"producer mmap -> kernel socket "
+             "buffer\":1,"
              "\"kernel socket buffer -> consumer buffer\":1}";
     }
     tp_appendf(j, ",\"copy_bytes\":{\"producer_to_transport\":%llu,\"consumer_received\":%llu}",
                (unsigned long long)x.copied_bytes, (unsigned long long)sh->recv_bytes);
 
     /* CPU: the sum of both sides plus each side on its own. */
-    tp_appendf(j, ",\"cpu_user_ms\":%.3f,\"cpu_sys_ms\":%.3f",
-               tp_ms(prod_cpu.user_ns + sh->cpu_user_ns), tp_ms(prod_cpu.sys_ns + sh->cpu_sys_ns));
+    tp_appendf(j, ",\"cpu_user_ms\":%.3f,\"cpu_sys_ms\":%.3f", tp_ms(prod_cpu.user_ns + sh->cpu_user_ns),
+               tp_ms(prod_cpu.sys_ns + sh->cpu_sys_ns));
     tp_appendf(j, ",\"producer_cpu_ms\":%.3f,\"consumer_cpu_ms\":%.3f",
                tp_ms(prod_cpu.user_ns + prod_cpu.sys_ns), tp_ms(sh->cpu_user_ns + sh->cpu_sys_ns));
-    tp_appendf(j, ",\"producer_user_ms\":%.3f,\"producer_sys_ms\":%.3f,\"consumer_user_ms\":%.3f,"
-                  "\"consumer_sys_ms\":%.3f",
-               tp_ms(prod_cpu.user_ns), tp_ms(prod_cpu.sys_ns), tp_ms(sh->cpu_user_ns), tp_ms(sh->cpu_sys_ns));
+    tp_appendf(j,
+               ",\"producer_user_ms\":%.3f,\"producer_sys_ms\":%.3f,\"consumer_user_ms\":%.3f,"
+               "\"consumer_sys_ms\":%.3f",
+               tp_ms(prod_cpu.user_ns), tp_ms(prod_cpu.sys_ns), tp_ms(sh->cpu_user_ns),
+               tp_ms(sh->cpu_sys_ns));
     /* The kernel's own accounting for the child, next to the child's own: they
      * should agree, which shows the fork resets the child's cpu counters. */
-    tp_appendf(j, ",\"consumer_cpu_wait4_ms\":%.3f",
-               tp_ms(tp_tv_ns(cru.ru_utime) + tp_tv_ns(cru.ru_stime)));
+    tp_appendf(j, ",\"consumer_cpu_wait4_ms\":%.3f", tp_ms(tp_tv_ns(cru.ru_utime) + tp_tv_ns(cru.ru_stime)));
 
     tp_appendf(j, ",\"rss_kb\":%llu,\"producer_rss_kb\":%llu,\"consumer_rss_kb\":%llu",
                (unsigned long long)rss_kb, (unsigned long long)prod_rss, (unsigned long long)sh->peak_rss_kb);
@@ -1371,13 +1403,14 @@ main(int argc, char **argv)
     tp_appendf(j, ",\"payload_fold\":\"%llu\",\"payload_fold_reference\":\"%llu\"",
                (unsigned long long)sh->fold, (unsigned long long)ref_fold);
     tp_appendf(j, ",\"verified\":%s", verified ? "true" : "false");
-    tp_appendf(j,
-               ",\"verify\":{\"chunks_ok\":%s,\"bytes_ok\":%s,\"lengths_ok\":%s,\"edges_ok\":%s,\"fold_match\":%s,"
-               "\"consumer_exit_ok\":%s,\"ts_slot_spins\":%llu}",
-               sh->recv_chunks == nchunks ? "true" : "false", sh->recv_bytes == (uint64_t)bytes ? "true" : "false",
-               counts_ok ? "true" : "false", lengths_ok ? "true" : "false", fold_ok ? "true" : "false",
-               (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? "true" : "false",
-               (unsigned long long)sh->ts_slot_spins);
+    tp_appendf(
+        j,
+        ",\"verify\":{\"chunks_ok\":%s,\"bytes_ok\":%s,\"lengths_ok\":%s,\"edges_ok\":%s,\"fold_match\":%s,"
+        "\"consumer_exit_ok\":%s,\"ts_slot_spins\":%llu}",
+        sh->recv_chunks == nchunks ? "true" : "false", sh->recv_bytes == (uint64_t)bytes ? "true" : "false",
+        counts_ok ? "true" : "false", lengths_ok ? "true" : "false", fold_ok ? "true" : "false",
+        (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? "true" : "false",
+        (unsigned long long)sh->ts_slot_spins);
 
     j += ",\"checksum\":null";
 
@@ -1385,33 +1418,44 @@ main(int argc, char **argv)
     j += ",\"method\":{";
     if (is_shm)
     {
+        tp_appendf(
+            j,
+            "\"handshake\":\"shm_open/ftruncate/mmap segment; ctl{magic FPTP01, seq bumped with a RELEASE "
+            "store per chunk, per-window len[]}; sem_t doorbell pub plus a counting sem_t with in_flight "
+            "permits (sem_post/sem_timedwait; the ring's mechanism: req_seq/resp_seq + "
+            "req_ready/resp_ready); "
+            "each publish takes one permit and each consumer release returns one, so at most in_flight "
+            "chunks "
+            "are unacked and window seq %% in_flight is rewritten only after chunk seq - in_flight has been "
+            "released\"");
         tp_appendf(j,
-                   "\"handshake\":\"shm_open/ftruncate/mmap segment; ctl{magic FPTP01, seq bumped with a RELEASE "
-                   "store per chunk, per-window len[]}; sem_t doorbell pub plus a counting sem_t with in_flight "
-                   "permits (sem_post/sem_timedwait; the ring's mechanism: req_seq/resp_seq + req_ready/resp_ready); "
-                   "each publish takes one permit and each consumer release returns one, so at most in_flight chunks "
-                   "are unacked and window seq %% in_flight is rewritten only after chunk seq - in_flight has been "
-                   "released\"");
-        tp_appendf(j, ",\"segment\":\"%s\",\"segment_bytes\":%zu,\"windows\":%d,\"window_stride_bytes\":%zu,"
-                      "\"window_offset\":%zu",
+                   ",\"segment\":\"%s\",\"segment_bytes\":%zu,\"windows\":%d,\"window_stride_bytes\":%zu,"
+                   "\"window_offset\":%zu",
                    x.seg_name, x.seg_bytes, x.in_flight, x.window_stride, TP_SHM_DATA_OFF);
     }
     else
     {
-        tp_appendf(j,
-                   "\"handshake\":\"socketpair(AF_UNIX, SOCK_SEQPACKET); one send/recv per chunk and message "
-                   "boundaries come free with SEQPACKET, so no framing/length prefix is needed; one 1-byte ack per "
-                   "chunk keeps exactly one message in flight, the same shape as shm at in_flight=1; "
-                   "SO_SNDBUF/SO_RCVBUF sized for one chunk; --in-flight is accepted and reported "
-                   "(in_flight_requested) but the uds cell does not widen its window\"");
+        tp_appendf(
+            j,
+            "\"handshake\":\"socketpair(AF_UNIX, SOCK_SEQPACKET); one send/recv per chunk and message "
+            "boundaries come free with SEQPACKET, so no framing/length prefix is needed; one 1-byte ack per "
+            "chunk keeps exactly one message in flight, the same shape as shm at in_flight=1; "
+            "SO_SNDBUF/SO_RCVBUF sized for one chunk; --in-flight is accepted and reported "
+            "(in_flight_requested) but the uds cell does not widen its window\"");
         tp_appendf(j, ",\"sock_buf_bytes\":%d", x.sock_buf);
     }
-    j += ",\"latency_pairing\":\"publish timestamps live in an anonymous MAP_SHARED array indexed by chunk ordinal, "
-         "written by the producer right after each publish and validated with slot.seq (RELEASE/ACQUIRE); the consumer "
-         "computes t_recv - t_pub, valid across processes because CLOCK_MONOTONIC is system-wide; a sample where the "
-         "consumer's clock read beat the producer's is reported as 0 and counted in latency_inverted_chunks\"";
-    j += ",\"consumer_work\":\"an in-place fold over every received byte (shm: read straight out of the mapping; uds: "
-         "read out of the preallocated receive buffer), recorded after the receive timestamp and before the chunk is "
+    j +=
+        ",\"latency_pairing\":\"publish timestamps live in an anonymous MAP_SHARED array indexed by chunk "
+        "ordinal, "
+        "written by the producer right after each publish and validated with slot.seq (RELEASE/ACQUIRE); the "
+        "consumer "
+        "computes t_recv - t_pub, valid across processes because CLOCK_MONOTONIC is system-wide; a sample "
+        "where the "
+        "consumer's clock read beat the producer's is reported as 0 and counted in latency_inverted_chunks\"";
+    j += ",\"consumer_work\":\"an in-place fold over every received byte (shm: read straight out of the "
+         "mapping; uds: "
+         "read out of the preallocated receive buffer), recorded after the receive timestamp and before the "
+         "chunk is "
          "released back to the producer\"";
     j += "}";
 

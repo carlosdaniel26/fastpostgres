@@ -142,13 +142,21 @@ codec-transport *args:
     just _image
     docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmarks/internals/codec_transport/run_matrix.py {{args}}
 
-# the release version lives in three places; this proves they agree
+# the release version agrees in pyproject.toml, the control file and sql/
 check-version:
-    @v=$(grep ^version python/pyproject.toml | head -1 | sed "s/[^0-9.]//g"); \
-     test -n "$v"; \
-     grep -q "default_version = .$v." extension/fastpostgres.control; \
-     test -f extension/sql/fastpostgres--$v.sql; \
-     echo "version $v: pyproject.toml, fastpostgres.control and sql/ agree"
+    @python3 tools/check_versions.py
+
+# every markdown link and cross-file anchor resolves
+check-links:
+    @python3 tools/check_links.py
+
+# what CI's lint job adds on top: ruff (python/), shellcheck (the harnesses)
+lint: check-version check-links
+
+# build the documentation site into site/ (mkdocs-material, in a throwaway image)
+docs:
+    docker run --rm -v "{{justfile_directory()}}:/docs" -w /docs python:3.12-slim \
+      sh -c "pip install -q mkdocs-material && mkdocs build --strict"
 
 # drop the built images
 clean:

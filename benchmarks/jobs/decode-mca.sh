@@ -39,7 +39,7 @@ if [ -z "$mca" ]; then
     exit 1
 fi
 
-so=$(ls /src/python/fastpostgres/_client*.so 2>/dev/null | head -1)
+so=$(find /src/python/src/fastpostgres -maxdepth 1 -name "_client*.so" 2>/dev/null | head -1)
 if [ -z "$so" ]; then
     echo "decode-mca: the client is not built in the image" >&2
     exit 1

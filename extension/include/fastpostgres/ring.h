@@ -17,7 +17,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#define FASTPOSTGRES_RING_MAGIC   "FPRING03" /* 03: the ring carries the data-segment capacity; an old segment is re-made */
+#define FASTPOSTGRES_RING_MAGIC                                                                              \
+    "FPRING03" /* 03: the ring carries the data-segment capacity; an old segment is re-made */
 #define FASTPOSTGRES_RING_VERSION 3u
 #define FASTPOSTGRES_RING_BYTES   (8u << 20) /* 8 MiB control segment */
 #define FASTPOSTGRES_RING_ARG     4096

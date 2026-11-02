@@ -52,6 +52,7 @@ reps_for() {
   if [ "$quick" = 1 ] || [ "$1" -gt "$reps_max_rows" ]; then echo 1; else echo 3; fi
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
   if [ "$keep" = 1 ]; then return 0; fi
   docker rm -f "$proxy" "$origin" >/dev/null 2>&1 || true
@@ -83,8 +84,7 @@ start_proxy() {
 }
 
 wait_proxy() {
-  local i
-  for i in $(seq 120); do
+  for _ in $(seq 120); do
     docker exec "$origin" python3 -c "$probe" 2>/dev/null && return 0
     sleep 1
   done
@@ -147,7 +147,7 @@ for n in "${sizes[@]}"; do
 
   for workload in large small through; do
     for player_name in fastpostgres pgcache; do
-      read -r med lo hi wmiss rmiss wreads wms count idsum psum ssum \
+      read -r med _ _ wmiss rmiss wreads wms count idsum psum ssum \
         <<< "${res["$player_name/$workload"]}"
       # the same output: count and the sums over the columns, across players
       check="$count $idsum $psum $ssum"
