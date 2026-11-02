@@ -127,11 +127,14 @@ costs - and their results live in the lab notebook rather than in this catalog.
 | `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](../benchmarks/results/codec-transport.log) |
 | `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](../benchmarks/results/cache-stat.log) |
 | `transport` | the ring's two doorbells, isolated: the semaphores against the regipc kernel call, one hop at a time (host, `/dev/regipc`) | [`TRANSPORTS.md`](TRANSPORTS.md), [`transport-shm-vs-regipc.log`](../benchmarks/results/transport-shm-vs-regipc.log) |
+| `transport-e2e` | the same two doorbells end to end: a real read through PostgreSQL in the dev image, once per engine (the host's `/dev/regipc` passed in with `--device`) | [`TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows`](TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows), `benchmarks/results/transport-e2e.log` |
 
 ## Charts: `just charts [target]`
 
 `workloads` · `arrow` · `arrow-memory` · `cache` · `cache-budget` · `codec` ·
 `transport` - the two doorbells: hops/s, µs per hop, µs of CPU per hop.
+`transport-e2e` - the same two, end to end: delivered rates, ms per read, the
+client's µs of CPU per row.
 
 `ab` - one figure per log, into `docs/assets/` by default.
 

@@ -26,6 +26,10 @@ internals: the meters behind the design notes
   transport        the ring's two doorbells, isolated: the semaphores against the
                    regipc kernel call, one hop at a time (host, /dev/regipc)
                    (docs/TRANSPORTS.md, benchmarks/results/transport-shm-vs-regipc.log)
+  transport-e2e    the two doorbells end to end: a real read through PostgreSQL,
+                   the worker's batches, the client's rows - once per engine,
+                   /dev/regipc passed into the dev image
+                   (docs/TRANSPORTS.md, benchmarks/results/transport-e2e.log)
 
 Arguments after the target go to that target's recipe.
 EOF
@@ -38,6 +42,7 @@ case "$target" in
   codec-transport) just codec-transport "$@" ;;
   cache-stat)      just cache-stat "$@" ;;
   transport)       just transport "$@" ;;
+  transport-e2e)   just transport-e2e "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "internals: unknown target '$target'" >&2

@@ -79,7 +79,7 @@ bench *args:
 rivals target="" *args:
     benchmarks/dispatch/rivals.sh {{target}} {{args}}
 
-# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport
+# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport | transport-e2e
 internals target="" *args:
     benchmarks/dispatch/internals.sh {{target}} {{args}}
 
@@ -87,7 +87,7 @@ internals target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | ab
+# one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | transport | transport-e2e | ab
 charts target="" *args:
     benchmarks/dispatch/charts.sh {{target}} {{args}}
 
@@ -134,6 +134,13 @@ decode-mca *args:
 [private]
 transport *args:
     benchmarks/jobs/transport.sh {{args}}
+
+# the same two doorbells end to end (internals transport-e2e): a real read
+# through PostgreSQL in the dev image, once per engine - the container gets the
+# host's /dev/regipc with --device, which is what makes the regipc cell possible
+[private]
+transport-e2e *args:
+    benchmarks/harness/transport_e2e_bench.sh {{args}}
 
 # cache counters on the host's PMU (internals cache-stat)
 [private]

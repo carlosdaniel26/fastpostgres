@@ -90,8 +90,49 @@ is where delivered rows are measured.
 What the numbers say, then, is narrow and useful: **the doorbell is no longer what
 a batch costs.** At 6.4 µs per handoff, a batch takes about as long to announce as
 a 100k-row `memcpy`-shaped publish takes to write; at 0.52 µs it does not. The
-question left for the end-to-end comparison is how much of a real read was the
-doorbell, which is what the workloads measure.
+question left is how much of a *real* read was the doorbell, which is what the
+end-to-end record below measures.
+
+### End to end: a real read, delivered in rows
+
+[`just internals transport-e2e`](BENCHMARKS.md) runs both engines through the
+whole path in the dev image — PostgreSQL executes the statement, the ring's
+background worker publishes batches into the data segment, the client decodes
+them — one fresh process per (engine, scenario, rep), with the transport passed
+in `FASTPOSTGRES_TRANSPORT`. The regipc cell works in a container because the
+device node travels: `docker run --device /dev/regipc`. Record:
+`benchmarks/results/transport-e2e.log`.
+
+Three scenarios, each on both engines, median of 3 processes, one client and one
+ring per process, 64 MiB data segments, a 100,000-row batch ask:
+
+| scenario | engine | delivered | p50 per read | client µs of CPU per row |
+|---|---|---|---|---|
+| scan, 1M rows in 10 batches of 100k | shm | 2.49 M rows/s | 400.9 ms | 0.238 |
+| | regipc | 2.49 M rows/s | 402.3 ms | 0.238 |
+| 500 primary-key lookups, one row each | shm | 8.5 k stmts/s | 0.110 ms | 37.5 |
+| | regipc | 14.3 k stmts/s | 0.064 ms | 69.4 |
+| 500 pages of 100 rows | shm | 3.8 k stmts/s | 0.245 ms | 0.74 |
+| | regipc | 4.5 k stmts/s | 0.206 ms | 2.08 |
+
+**At the scan's batch size the doorbell does not change the delivered rate at
+all: 2.49 M rows/s either way (−0.4%, inside the run-to-run spread). A 1M-row
+read is 13 handoffs; 13 × 6 µs is 0.002% of a 400 ms read.** What it does change
+is the small read, where the handoff *is* a measurable fraction of a statement:
+**+68% statements per second on the primary-key lookups** (p50 0.110 ms → 0.064 ms)
+and +20% on the 100-row pages, and the record shows what that costs — the client
+process's CPU per statement rises from 37.5 µs to 69.4 µs, because the regipc
+client polls the ring's counters while the shm client sleeps on a futex. The
+trade is the isolated table's, one level up: latency bought with CPU, and only
+where the doorbell is a visible share of the work.
+
+Each cell's record carries the proof: `conn.shm_reads` advanced exactly once per
+timed read (no libpq fallback), the ring's own header says `transport` 1 or 2 and
+the harness reads that header a second time from the container's `/dev/shm`, the
+digest (count and column sums) is identical on both engines, and the regipc cells
+carry the module's `leaf.calls` (13 and 2,000 timed calls) — ring 0 ran. What the
+numbers do not carry: the worker's CPU (the record measures the client process
+only, and a regipc worker spins too), and any concurrency.
 
 ## Reproducing
 
