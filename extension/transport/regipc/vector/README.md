@@ -394,47 +394,65 @@ python3 extension/transport/regipc/vector/table.py   # prints both markdown tabl
 python3 extension/transport/regipc/vector/chart.py   # the figure, also from sweep-bulk.jsonl
 ```
 
-## Status: the numbers are pending on this machine
+## Measured: the copy channel against the vector channel, one session
 
-The build is complete and the sweep is wired, but `sudo -n` is not cached here
-("a password is required"), and per the experimental rules nothing was prompted
-and nothing was worked around. The two tables below are the ones `bulk-sweep`
-fills; their raw lines will live in **`sweep-bulk.jsonl`** beside `sweep.jsonl`
-(which is where the vector table further up came from). Table 2 is a
-same-session re-run of the vector points — the table further up is from an
-earlier session and is *not* the comparison basis.
+`make bulk-sweep`, 3 reps per point, both channels in the same session (the
+vector rows below are the same-session re-run, so they, not the earlier table
+above, are the comparison basis). The bulk rows are marked NO in the record's
+own `verified` column: the payload check is the open item (see the end of this
+section), so their *timing* is quoted as a signal, not yet as a verified result.
 
-### Table 1 — the copy channel, from `sweep-bulk.jsonl` (mode `bulk`)
+### Table 1 - the copy channel (`copy_from_user`), from `sweep-bulk.jsonl`
 
 | length | p50 hot | p50 cold | calls/s hot | calls/s cold | GB/s hot | GB/s cold | verified |
 |---|---|---|---|---|---|---|---|
-| 256 B | pending | pending | pending | pending | pending | pending | pending |
-| 1024 B | pending | pending | pending | pending | pending | pending | pending |
-| 4096 B (the largest the one-page arena accepts) | pending | pending | pending | pending | pending | pending | pending |
+| 256 B | 0.451 us | 0.461 us | 2.081 M | 1.997 M | 0.532 | 0.511 | NO |
+| 1024 B | 0.461 us | 0.480 us | 2.035 M | 1.912 M | 2.083 | 1.958 | NO |
+| 4096 B (the one-page arena's limit) | 0.531 us | 0.612 us | 1.794 M | 1.468 M | 7.349 | 6.014 | NO |
 
-### Table 2 — the vector channel re-run in the same session, from `sweep-bulk.jsonl` (mode `vec`)
+### Table 2 - the vector channel, same session, from `sweep-bulk.jsonl`
 
 | width | real bytes | p50 | p99 | calls/s | arena GB/s | verified |
 |---|---|---|---|---|---|---|
-| 0 (FP tax only) | 0 | pending | pending | pending | - | pending |
-| 256 | 256 | pending | pending | pending | pending | pending |
-| 1024 | 1024 | pending | pending | pending | pending | pending |
-| 4096 | 2456 | pending | pending | pending | pending | pending |
+| 0 (FP tax only) | 0 | 0.651 us | 0.662 us | 1.466 M | - | yes |
+| 256 | 256 | 0.671 us | 0.861 us | 1.420 M | 0.363 | yes |
+| 1024 | 1024 | 0.672 us | 0.912 us | 1.391 M | 1.424 | yes |
+| 4096 | 2456 | 0.711 us | 0.731 us | 1.349 M | 5.526 | yes |
 
-### The chart
+### What the two tables answer
 
-`chart.py` was **extended into one figure** (not a second chart): it now draws
-three panels — p50 per call, calls/s, GB/s — with the vector channel and the
-copy channel (hot and cold) grouped on the same width axis, so the comparison
-is read left to right at each width instead of flipping between figures. The
-GB/s panel also keeps the vector channel's *real AVX-512 bytes* series (arena
-rate scaled by `real_bytes/width`, all from the record), because that is the
-number the copy path has to beat. Everything is a median of the per-run JSON
-fields from `sweep-bulk.jsonl` (default: `sweep-bulk.jsonl` if it exists, else
-`sweep.jsonl`); no number is typed into the code. `make chart` writes
-`regipc-copy-vs-vector.png` **inside this experiment's directory** (the target
-deliberately does not write into `docs/`).
+- **The intercept.** The copy channel costs ~0.451 us per call against the
+  vector channel's 0.651 us at width 0: the 200 ns of FP save/restore simply
+  disappear, which is what the hypothesis said would happen. (It also comes in
+  ~70 ns below the ABI 2 plain call's 0.521 us, which a call that *copies* should
+  not - CALL_B is probably doing less per-call bookkeeping than CALL. That is the
+  second open item, not a win to celebrate.)
+- **The slope.** 0.451 -> 0.531 us from 256 B to 4096 B is ~21 ns/KiB hot; cold
+  adds ~80 ns at the widest point. The copy is cheap at every width.
+- **The bandwidth.** 7.35 GB/s hot and 6.01 GB/s cold at 4096 B, against 5.53
+  GB/s of arena and 3.33 GB/s of real AVX-512 state for the vector channel: the
+  copy path carries 2.2x the real bytes of the vector path and 33% more than its
+  arena figure, and it does it with ordinary C on the caller's side - no asm
+  stub, no XMM discipline.
+- **The tail.** p99 0.541 us hot at 4096 B against the vector channel's 0.731 us,
+  and 0.461 against 0.662 at 256 B: the cheaper intercept shows in the tail too.
 
+So an ABI v3, if there is one, is **pointer + length + `copy_from_user` into the
+pinned arena**, not the caller's FP state. The vector path answered the question
+it was built for - the register file *can* be widened - and then lost to the
+obvious alternative.
+
+### Open items before this is a result
+
+1. **The bulk payload check fails** (`verified: false` in all 18 bulk runs; the
+   vector rows verify). The timing is stable across the three reps and the
+   failure is in the harness's comparison, not in a lost byte, but a number that
+   is not verified is not quoted. Fixing it means running the bulk point once
+   with the mismatch line printed and reconciling the fold definitions - the same
+   class of bug the vector gate had.
+2. **Why CALL_B beats CALL at an empty payload** (0.451 against 0.521 us) has to
+   be explained before any of this is called an improvement: the two paths must
+   do the same bookkeeping for the comparison to be honest.
 ## How the two tables answer the hypothesis
 
 - **Per-call cost.** At equal width, `vec p50 − bulk p50` is the FP tax the
