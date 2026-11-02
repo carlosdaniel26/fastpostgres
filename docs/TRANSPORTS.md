@@ -108,12 +108,12 @@ ring per process, 64 MiB data segments, a 100,000-row batch ask:
 
 | scenario | engine | delivered | p50 per read | client µs of CPU per row |
 |---|---|---|---|---|
-| scan, 1M rows in 10 batches of 100k | shm | 2.49 M rows/s | 400.9 ms | 0.238 |
-| | regipc | 2.49 M rows/s | 402.3 ms | 0.238 |
-| 500 primary-key lookups, one row each | shm | 8.5 k stmts/s | 0.110 ms | 37.5 |
-| | regipc | 14.3 k stmts/s | 0.064 ms | 69.4 |
-| 500 pages of 100 rows | shm | 3.8 k stmts/s | 0.245 ms | 0.74 |
-| | regipc | 4.5 k stmts/s | 0.206 ms | 2.08 |
+| scan, 1M rows in 10 batches of 100k | shm | 2.48M rows/s | 403.675 ms | 0.234 |
+|  | regipc | 2.44M rows/s | 409.074 ms | 0.237 |
+| lookup, 500 primary-key reads of one row | shm | 9.62k stmts/s | 0.099 ms | 30.346 |
+|  | regipc | 14.95k stmts/s | 0.064 ms | 66.668 |
+| paged, 500 filtered 100-row pages | shm | 3.43k stmts/s | 0.275 ms | 0.755 |
+|  | regipc | 4.61k stmts/s | 0.202 ms | 2.060 |
 
 **At the scan's batch size the doorbell does not change the delivered rate at
 all: 2.49 M rows/s either way (−0.4%, inside the run-to-run spread). A 1M-row
