@@ -9,20 +9,20 @@ and the formal bits.
 
 | path | what it is |
 |---|---|
-| `pg-extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
-| `python-extension/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
-| `benchmark/` | the harnesses: `workloads/` (the realistic suite), `sqlalchemy_bench.py` and `pgcache/` (the rivals), `codec_transport/` (the matrix) |
-| `tools/`, `image/` | the host-side dispatchers and chart scripts, and the Docker image and entrypoint they run in |
-| `demo/` | the driver-swap demo application |
+| `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
+| `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
+| `benchmarks/` | the harnesses (`workloads/`, `rivals/`, `internals/`), the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
+| `docker/` | the Dockerfile and entrypoint every harness runs in |
+| `examples/` | the driver-swap demo application |
 | `docs/` | the benchmark catalog, methodology, limitations, the comparisons, and every committed log |
-| `simd/` | the decode's lab notebook: hypotheses, meters and their results |
+| `docs/DECODE-NOTES.md` | the decode's lab notebook: hypotheses, meters and their results |
 
 ## Documentation index
 
 | I want to... | go here |
 |---|---|
 | run or read about the benchmarks | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| understand the wire format and the two frames | [`pg-extension/fastpostgres_shm.h`](pg-extension/fastpostgres_shm.h) |
+| understand the wire format and the two frames | [`extension/fastpostgres_shm.h`](extension/fastpostgres_shm.h) |
 | reproduce a measurement, or read the statistics | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
 | understand why it is faster than Arrow, mechanism by mechanism | [`docs/WHY-IT-WINS.md`](docs/WHY-IT-WINS.md) |
@@ -38,7 +38,7 @@ how this can be used:
 
 - **Research prototype.** Not for production, multi-user, or untrusted networks.
 - **Linux, same host.** The transport is POSIX shared memory; there is no network path to benchmark or to use.
-- **The segment is the trust boundary.** `/dev/shm/<seg>` is an SQL-execution endpoint: the client creates it `0600` and the worker widens it to `0666` (`pg-extension/src/shm.c`) so a client running as another user can map it. Treat the segment itself as the permission.
+- **The segment is the trust boundary.** `/dev/shm/<seg>` is an SQL-execution endpoint: the client creates it `0600` and the worker widens it to `0666` (`extension/src/shm.c`) so a client running as another user can map it. Treat the segment itself as the permission.
 - **Ring reads run in the worker's session.** They miss the calling connection's uncommitted writes; the driver is autocommit.
 - **`numeric` widens to `float8` on the wire.** Types whose storage is not the wire bytes (numeric, jsonb, arrays, enums) take the columnar frame, which is correct but not the zero-copy row path.
 - **One stream per ring.** The pool is sized on first use - one stream per ~1.2 hardware threads, divided by the SMT width (6 on this machine), clamped by the server's free `max_worker_processes` - and when it is exhausted the read falls back to libpq.

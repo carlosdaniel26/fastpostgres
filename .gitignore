@@ -19,4 +19,4 @@ fastpostgres_chart*.png
 codec_chart-*.png
 /improve-*.png
 /*.pdf
-benchmark/codec_transport/build/
+benchmarks/internals/codec_transport/build/

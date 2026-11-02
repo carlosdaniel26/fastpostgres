@@ -2,9 +2,9 @@
 
 Written for a reader deciding whether to trust the numbers or to use this. The
 method is in [`METHODOLOGY.md`](METHODOLOGY.md); the measured record is
-[`fastpostgres-vs-arrow.log`](fastpostgres-vs-arrow.log) (bench shape),
-[`fastpostgres-vs-arrow-mixed.log`](fastpostgres-vs-arrow-mixed.log) (the harder
-shape) and [`fastpostgres-vs-arrow-small.log`](fastpostgres-vs-arrow-small.log)
+[`fastpostgres-vs-arrow.log`](../benchmarks/results/fastpostgres-vs-arrow.log) (bench shape),
+[`fastpostgres-vs-arrow-mixed.log`](../benchmarks/results/fastpostgres-vs-arrow-mixed.log) (the harder
+shape) and [`fastpostgres-vs-arrow-small.log`](../benchmarks/results/fastpostgres-vs-arrow-small.log)
 (1K rows).
 
 ## What the benchmark covers
@@ -38,7 +38,7 @@ shape) and [`fastpostgres-vs-arrow-small.log`](fastpostgres-vs-arrow-small.log)
 - **Memory as a budget.** `just arrow-memory-bench` fixes the ring's transfer
   buffer (512 MiB by default) and reports what each side held — the ring's segment
   and batch, ADBC's largest Arrow batch, the Arrow table's whole result — in
-  [`fastpostgres-vs-arrow-memory.log`](fastpostgres-vs-arrow-memory.log). It is
+  [`fastpostgres-vs-arrow-memory.log`](../benchmarks/results/fastpostgres-vs-arrow-memory.log). It is
   one shape, three sizes and three reps; it does not measure allocation *rates*,
   page faults, or a consumer that holds several results at once.
 
@@ -130,7 +130,7 @@ clean stamp.
 **"Why not just cache the result?"** A result cache removes *execution* on
 repeated queries; this removes *delivery* on every query, and the two rank by
 workload shape. Measured against PgCache, a CDC-maintained result cache, in
-[`fastpostgres-vs-pgcache.log`](fastpostgres-vs-pgcache.log): a cached aggregate
+[`fastpostgres-vs-pgcache.log`](../benchmarks/results/fastpostgres-vs-pgcache.log): a cached aggregate
 is 51× faster than the ring at 1M rows — the executor is the cost, and no
 transport fixes that. A cached 1M-row result is the other way round: 1.47M rows/s
 against 6.35M on the ring, and a hit costs what its cold fill costs, because a hit
@@ -140,7 +140,7 @@ this path never builds them twice. Method and caveats in
 
 **"Would equal memory change that?"** It was measured, not argued
 (`just pgcache-memory-bench`, the record in
-[`fastpostgres-vs-pgcache-memory.log`](fastpostgres-vs-pgcache-memory.log)): one
+[`fastpostgres-vs-pgcache-memory.log`](../benchmarks/results/fastpostgres-vs-pgcache-memory.log)): one
 budget M on both sides, the ring's transfer buffer against the cache's own
 memory. Where the cache fits, the ranking is the same — at 1 GiB, the aggregate
 is 1.117 ms against the ring's 55.776 ms and the scan 1.47M against 6.53M rows/s.
@@ -150,4 +150,4 @@ below ~256 MiB the cache's container is OOM-killed before it can serve, and at
 256 MiB its registration is throttled to nothing.
 
 **"Which numbers should I quote?"** The committed logs, not the README:
-`docs/fastpostgres-vs-arrow*.log`.
+`benchmarks/results/fastpostgres-vs-arrow*.log`.

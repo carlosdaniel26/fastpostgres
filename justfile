@@ -20,12 +20,13 @@
 # This file is the frontend -- the only thing you run by hand. Everything else is
 # either baked into the image or a host-side helper:
 #
-#   image/       the image: its Dockerfile (a dev stage and the profile stage
-#                the offline meters need), its entrypoint, the jobs it runs
-#   benchmark/   the harnesses: workloads/ (the suite), sqlalchemy_bench.py and
-#                pgcache/ (the rivals), codec_transport/ (the matrix)
-#   demo/        the app the demo switches drivers on   (run inside the image)
-#   tools/       host-side helpers: the class dispatchers and the chart scripts
+#   docker/      the image: its Dockerfile (a dev stage and the profile stage
+#                the offline meters need) and its entrypoint
+#   benchmarks/  the harnesses, the class dispatchers, the chart scripts, the
+#                image-side jobs, and the committed records under results/
+#   extension/   the PostgreSQL extension;  python/  the client package
+#   examples/    the app the demo switches drivers on   (run inside the image)
+
 #
 # Row counts default to each harness's own; the workload suite takes --scale.
 # Override the ring's shared-memory size with SHM=<size> (default 3g); MCA_CPU
@@ -47,12 +48,12 @@ default:
 # build the dev image (client tests, benchmarks and demo all run in it)
 [private]
 _image:
-    docker build -q --target dev -t {{image}} -f image/Dockerfile . >/dev/null
+    docker build -q --target dev -t {{image}} -f docker/Dockerfile . >/dev/null
 
 # build the profile image: the dev image plus valgrind and llvm (the offline meters)
 [private]
 _image_profile:
-    docker build -q --target profile -t {{image}}-profile -f image/Dockerfile . >/dev/null
+    docker build -q --target profile -t {{image}}-profile -f docker/Dockerfile . >/dev/null
 
 # run a command in the image, on a fresh PostgreSQL with the extension
 [private]
@@ -72,23 +73,23 @@ test:
 
 # the workload suite: realistic scenarios, app-facing API on both sides (docs/BENCHMARKS.md)
 bench *args:
-    tools/workloads_bench.sh {{args}}
+    benchmarks/harness/workloads_bench.sh {{args}}
 
 # the competitive benchmarks: adbc | arrow-memory | cache | cache-budget
 rivals target="" *args:
-    tools/rivals.sh {{target}} {{args}}
+    benchmarks/dispatch/rivals.sh {{target}} {{args}}
 
 # the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat
 internals target="" *args:
-    tools/internals.sh {{target}} {{args}}
+    benchmarks/dispatch/internals.sh {{target}} {{args}}
 
 # the same SQLAlchemy app on psycopg 3 and on fastpostgres
 demo n="5000":
-    just _run demo.sh {{n}}
+    just _run run.sh {{n}}
 
 # one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | ab
 charts target="" *args:
-    tools/charts.sh {{target}} {{args}}
+    benchmarks/dispatch/charts.sh {{target}} {{args}}
 
 # the ADBC + Arrow read comparison (rivals adbc): fast-postgres against the
 # Arrow ecosystem's own answer over the same rows
@@ -100,18 +101,18 @@ bench-adbc *sizes:
 # arrow-memory): the same reads and what each side held while it delivered them
 [private]
 arrow-memory-bench *args:
-    tools/arrow_memory_bench.sh {{args}}
+    benchmarks/harness/arrow_memory_bench.sh {{args}}
 
 # fastpostgres against a result cache (rivals cache): the two regimes (large
 # result, small expensive result) and the cache's two taxes (cold fill, pass-through)
 [private]
 pgcache-bench *args:
-    tools/pgcache_bench.sh {{args}}
+    benchmarks/harness/pgcache_bench.sh {{args}}
 
 # the same comparison under one memory budget on both sides (rivals cache-budget)
 [private]
 pgcache-memory-bench *args:
-    tools/pgcache_memory_bench.sh {{args}}
+    benchmarks/harness/pgcache_memory_bench.sh {{args}}
 
 # the row decode's TSC cycles/row on a fixed shape (internals decode-cycles)
 [private]
@@ -131,15 +132,15 @@ decode-mca *args:
 # cache counters on the host's PMU (internals cache-stat)
 [private]
 cache-stat *args:
-    image/cache-stat.sh {{args}}
+    benchmarks/jobs/cache-stat.sh {{args}}
 
 # the codec x transport isolation matrix (internals codec-transport): sequential
-# by construction (docs/CODEC-TRANSPORT.md); writes docs/codec-transport.log as
+# by construction (docs/CODEC-TRANSPORT.md); writes benchmarks/results/codec-transport.log as
 # the invoking user so the log is writable
 [private]
 codec-transport *args:
     just _image
-    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmark/codec_transport/run_matrix.py {{args}}
+    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmarks/internals/codec_transport/run_matrix.py {{args}}
 
 # drop the built images
 clean:

@@ -1,17 +1,17 @@
 # fastpostgres against Arrow under one memory budget
 
-The [read benchmark](../README.md#measured) asks which transport hands over the
+The [read benchmark](../README.md#measured-results) asks which transport hands over the
 same rows faster. This one asks the question that decides whether either can be
 used at all: **what does each side hold while it delivers them?** The ring's
 transfer buffer is fixed and reported, the Arrow side is asked for its own
 accounting, and the same rows and the same output run through both.
 
 The measurement is `just arrow-memory-bench`, the record is
-[`fastpostgres-vs-arrow-memory.log`](fastpostgres-vs-arrow-memory.log), and the
+[`fastpostgres-vs-arrow-memory.log`](../benchmarks/results/fastpostgres-vs-arrow-memory.log), and the
 rival is the same one the read benchmark uses: ADBC's PostgreSQL driver, whose
 results arrive as Arrow record batches, consumed with pyarrow.
 
-![fast-postgres against Arrow under a fixed 512 MiB buffer](../assets/arrow-memory.png)
+![fast-postgres against Arrow under a fixed 512 MiB buffer](assets/arrow-memory.png)
 
 (`just arrow-memory-charts` renders it from the log.)
 

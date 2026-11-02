@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" height="180" alt="FastPostgres">
+  <img src="docs/assets/logo.png" height="180" alt="FastPostgres">
 
   <h1>FastPostgres</h1>
 
@@ -7,8 +7,8 @@
 
   <p>
     <a href="https://www.postgresql.org/"><img src="https://img.shields.io/badge/PostgreSQL%2018-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 18"></a>
-    <a href="pg-extension/src/ring.h"><img src="https://img.shields.io/badge/C%20extension-00599C?style=for-the-badge&logo=c&logoColor=white" alt="C extension"></a>
-    <a href="python-extension"><img src="https://img.shields.io/badge/Python%203-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3"></a>
+    <a href="extension/src/ring.h"><img src="https://img.shields.io/badge/C%20extension-00599C?style=for-the-badge&logo=c&logoColor=white" alt="C extension"></a>
+    <a href="python"><img src="https://img.shields.io/badge/Python%203-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3"></a>
     <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker"></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-3DA639?style=for-the-badge" alt="MIT License"></a>
     <a href="docs/LIMITATIONS.md"><img src="https://img.shields.io/badge/Status-research%20prototype-B00020?style=for-the-badge" alt="Research prototype"></a>
@@ -26,7 +26,7 @@
 
 ---
 
-Every PostgreSQL read crosses a socket, is serialized to text, and is parsed back into typed values in the client. FastPostgres removes that path for read-only `SELECT`s: a background worker runs the query with a portal and publishes every batch into `/dev/shm`, and the client maps the segment and reads it in place. The result tuples go out as the executor laid them out (one `memcpy` per row) or, for the zero-copy column views, as a columnar frame. Both formats, their readers and their writer live in one header, [`pg-extension/fastpostgres_shm.h`](pg-extension/fastpostgres_shm.h).
+Every PostgreSQL read crosses a socket, is serialized to text, and is parsed back into typed values in the client. FastPostgres removes that path for read-only `SELECT`s: a background worker runs the query with a portal and publishes every batch into `/dev/shm`, and the client maps the segment and reads it in place. The result tuples go out as the executor laid them out (one `memcpy` per row) or, for the zero-copy column views, as a columnar frame. Both formats, their readers and their writer live in one header, [`extension/fastpostgres_shm.h`](extension/fastpostgres_shm.h).
 
 Writes, DDL and transactions keep using libpq, so a FastPostgres application is an ordinary PostgreSQL application with one URL changed.
 
@@ -62,7 +62,7 @@ pragmatic question: over a commerce schema with foreign keys and indexes (10k
 customers, 10k products, 1M orders, 3M order items), the same application on both
 drivers, the same app-facing call, per-statement latency and throughput
 ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
-[`log`](docs/fastpostgres-vs-psycopg.log)):
+[`log`](benchmarks/results/fastpostgres-vs-psycopg.log)):
 
 | scenario | FastPostgres | psycopg 3 | |
 |---|---|---|---|
@@ -83,20 +83,20 @@ its background worker runs the plan serially (the ring's 231.3 ms matches the
 same query with `max_parallel_workers_per_gather = 0`, 224 ms, while psycopg's
 backend gets a parallel plan).
 
-![Realistic workloads over a commerce schema](assets/workloads.png)
+![Realistic workloads over a commerce schema](docs/assets/workloads.png)
 
 ### Read path: FastPostgres against ADBC + Arrow
 
 The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose results arrive as Arrow record batches - and each comparison asks both stacks for the same output.
 
-![FastPostgres vs ADBC + Arrow: the same output, Python tuples](assets/tuples-read.png)
+![FastPostgres vs ADBC + Arrow: the same output, Python tuples](docs/assets/tuples-read.png)
 
 | same output: Python tuples | 100K | 1M | 10M |
 |---|---|---|---|
 | FastPostgres (its DBAPI) | 6.42M | 7.19M | 7.25M |
 | ADBC + Arrow, `to_pylist` | 1.28M | 1.27M | 1.27M |
 
-![FastPostgres vs ADBC + Arrow: the same output, columnar, one column summed](assets/zerocopy-read.png)
+![FastPostgres vs ADBC + Arrow: the same output, columnar, one column summed](docs/assets/zerocopy-read.png)
 
 | same output: the columnar form, one column summed in place | 100K | 1M | 10M |
 |---|---|---|---|
@@ -119,7 +119,7 @@ The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the v
 
 ### What each side holds: against Arrow under a fixed buffer
 
-Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), [`log`](docs/fastpostgres-vs-arrow-memory.log)):
+Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), [`log`](benchmarks/results/fastpostgres-vs-arrow-memory.log)):
 
 | 1M / 5M / 10M rows | rows/s | held while it delivers |
 |---|---|---|
@@ -129,16 +129,16 @@ Speed is half of the comparison; memory is the other half. With the ring's trans
 
 A transfer buffer is a window: the ring's is the same 512 MiB whatever the result's size. A table is a working set: at 10M rows ADBC's holds ~476 MiB at once, one size up from the buffer the ring ever spends.
 
-![FastPostgres against Arrow under a fixed 512 MiB buffer](assets/arrow-memory.png)
+![FastPostgres against Arrow under a fixed 512 MiB buffer](docs/assets/arrow-memory.png)
 
 > [!NOTE]
 > Small results are the exception to the ranking: at 1K rows the plain driver read wins and the columnar path's fixed costs dominate. The numbers and the reason are in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert).
 
 ### Result caches: PgCache
 
-A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`docs/PG-CACHE.md`](docs/PG-CACHE.md), [`log`](docs/fastpostgres-vs-pgcache.log)):
+A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`docs/PG-CACHE.md`](docs/PG-CACHE.md), [`log`](benchmarks/results/fastpostgres-vs-pgcache.log)):
 
-![FastPostgres vs PgCache: the full scan and the aggregate](assets/pgcache-read.png)
+![FastPostgres vs PgCache: the full scan and the aggregate](docs/assets/pgcache-read.png)
 
 | 1M rows, the same rows out | FastPostgres | PgCache (hit) |
 |---|---|---|
@@ -147,9 +147,9 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 
 A cached aggregate is 51x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 4.3x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
-Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](docs/fastpostgres-vs-pgcache-memory.log)).
+Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](benchmarks/results/fastpostgres-vs-pgcache-memory.log)).
 
-![FastPostgres vs PgCache under one memory budget](assets/pgcache-memory.png)
+![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 
 ## Quick start
 
@@ -176,7 +176,7 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 
 The full catalog - the scenarios, the method, the log behind every number and the
 caveats - is [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); `just charts <target>`
-renders any of the logs into an image under `assets/`. The harnesses read two
+renders any of the logs into an image under `docs/assets/`. The harnesses read two
 host-side settings: `SHM` for the container's `/dev/shm` size (default `3g`) and
 `SHAPE` for the data shape (`bench`, the friendly one, or `mixed`).
 
@@ -207,7 +207,7 @@ for batch in cur.stream("select id, price from products"):
     total = prices.sum()          # views alias the segment: use, or copy, before the next batch
 ```
 
-Read-only `SELECT`s take the ring; everything else goes over libpq. The `demo/` application is the same SQLAlchemy app run on psycopg 3 and on FastPostgres, to show what the URL change does.
+Read-only `SELECT`s take the ring; everything else goes over libpq. The `examples/` application is the same SQLAlchemy app run on psycopg 3 and on FastPostgres, to show what the URL change does.
 
 ## Configuration
 

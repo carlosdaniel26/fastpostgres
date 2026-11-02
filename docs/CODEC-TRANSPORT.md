@@ -3,10 +3,10 @@
 Two experiments, four cells, one runner, and no PostgreSQL in the loop. The
 question is what the **wire format** costs and what the **transport** costs,
 measured apart so neither can hide behind the other. The contract every cell
-implements is [`benchmark/codec_transport/SPEC.md`](../benchmark/codec_transport/SPEC.md);
+implements is [`benchmarks/internals/codec_transport/SPEC.md`](../benchmarks/internals/codec_transport/SPEC.md);
 the runner is
-[`benchmark/codec_transport/run_matrix.py`](../benchmark/codec_transport/run_matrix.py);
-the measured record is [`codec-transport.log`](codec-transport.log), written by
+[`benchmarks/internals/codec_transport/run_matrix.py`](../benchmarks/internals/codec_transport/run_matrix.py);
+the measured record is [`codec-transport.log`](../benchmarks/results/codec-transport.log), written by
 the runner and committed with the run's `git:` stamp.
 
 Nothing here connects to PostgreSQL. The point of leaving the server out is
@@ -61,7 +61,7 @@ two terms and leaves the overlap to the ring's own benchmarks.
 
 ## Dataset and timed region
 
-Restated from [`SPEC.md`](../benchmark/codec_transport/SPEC.md), because the
+Restated from [`SPEC.md`](../benchmarks/internals/codec_transport/SPEC.md), because the
 whole comparison rests on it: `--rows N` (default 1,000,000) generated in
 memory, deterministic, `g = 1..N`, six columns (`id` int32, `sku`/`name` utf8,
 `price` float64, `stock` int32, `active` bool). Every cell decodes the payload
@@ -180,20 +180,20 @@ fails loudly instead of reporting incomparable cells:
   traceback. Where the unit has a build script (`build_fpg.sh`,
   `build_transport.sh`) the runner runs it first, inside the image.
 
-The report is opened before the first measurement. If `docs/codec-transport.log`
+The report is opened before the first measurement. If `benchmarks/results/codec-transport.log`
 cannot be created — the common case is the image's entrypoint running the
 command as `postgres` against a bind-mounted tree owned by your host user — the
 runner says so on stderr and writes
-`benchmark/codec_transport/build/codec-transport.log` instead (git-ignored)
+`benchmarks/internals/codec_transport/build/codec-transport.log` instead (git-ignored)
 rather than losing a finished run; move it to `docs/` when the directory is
 writable. The recipe below avoids the situation by running as the invoking user.
 
 ## First results (1M rows, 1 MiB chunks)
 
-The committed run, verbatim in [`codec-transport.log`](codec-transport.log);
-charts rendered from it by `just codec-charts` ([`tools/codec_charts.py`](../tools/codec_charts.py)).
+The committed run, verbatim in [`codec-transport.log`](../benchmarks/results/codec-transport.log);
+charts rendered from it by `just codec-charts` ([`benchmarks/charts/codec.py`](../benchmarks/charts/codec.py)).
 
-![format cost](../assets/codec-format.png)
+![format cost](assets/codec-format.png)
 
 **Experiment 1 — format, transport held out**
 
@@ -202,7 +202,7 @@ charts rendered from it by `just codec-charts` ([`tools/codec_charts.py`](../too
 | `fpcolumn` | 47.2 MiB | **206.5M** | **3.1** | **1.7** | **1** | **100 MB** |
 | `arrow-ipc` | 45.7 MiB | 102.7M | 7.8 | 1.9 | 6 | 383 MB |
 
-![transport cost](../assets/transport.png)
+![transport cost](assets/transport.png)
 
 **Experiment 2 — transport, codec held out**
 
@@ -229,7 +229,7 @@ Three readings:
    what happens when both are in the path. Nothing here is measured together with
    the PostgreSQL worker; that is the caveat in the threats section.
 
-![footprint of each approach](../assets/codec-footprint.png)
+![footprint of each approach](assets/codec-footprint.png)
 
 **What the Arrow cell is not measuring: Arrow in memory.** Both cells here
 serialize, because that is the question a frame that crosses a process boundary
@@ -273,7 +273,7 @@ story in memory rather than time: dataset, Arrow buffers, IPC stream and kernel
 temporaries are all alive at once, where the frame is built into the buffer it
 ships.
 
-![who pays on the transport](../assets/codec-who-pays.png)
+![who pays on the transport](assets/codec-who-pays.png)
 
 **Per side, on the transport**
 
@@ -349,10 +349,10 @@ behaviour, so nothing above changes:
   transport-bound; the number says the option exists if that changes.
 
 The full write-up, with the cache counters behind both, is the cache section of
-[`simd/hypotheses.md`](../simd/hypotheses.md); the before/after charts are
+[`docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md); the before/after charts are
 `assets/improve-cache-fix.png` (the NT change: time, RFO requests, L1 misses),
 `assets/improve-codec.png`, `assets/improve-system.png` and
-`assets/improve-transport.png`, rendered by `just ab-charts` from
+`assets/improve-transport.png`, rendered by `just charts ab` from
 `docs/improve-*.log`.
 
 ## Threats to validity
@@ -409,9 +409,9 @@ The full write-up, with the cache counters behind both, is the cache section of
 Wired as `just codec-transport` (the runner itself never touches the justfile).
 
 ```make
-# the codec x transport isolation matrix, sequential: writes docs/codec-transport.log
+# the codec x transport isolation matrix, sequential: writes benchmarks/results/codec-transport.log
 codec-transport *args:
-    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmark/codec_transport/run_matrix.py {{args}}
+    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmarks/internals/codec_transport/run_matrix.py {{args}}
 ```
 
 Why each piece:
@@ -419,7 +419,7 @@ Why each piece:
 - **`--entrypoint python3 --user "$(id -u):$(id -g)"`.** The matrix never talks
   to PostgreSQL, so the image's entrypoint — which boots a throwaway server and
   runs the command as `postgres` — is not needed. Running as the invoking user
-  is also what lets the runner create `docs/codec-transport.log` in the mounted
+  is also what lets the runner create `benchmarks/results/codec-transport.log` in the mounted
   tree: `postgres` (uid 999) cannot write a tree owned by uid 1000, and the
   runner would have to fall back to `build/codec-transport.log`. If the
   entrypoint's `### ENV` block is wanted, keep the default entrypoint and move
@@ -448,18 +448,18 @@ Without `just`, the same thing by hand:
 ```bash
 docker run --rm --shm-size=3g --entrypoint python3 --user "$(id -u):$(id -g)" \
     -v "$PWD":/src -w /src -e BENCH_GIT_REV=$(git describe --always --dirty) \
-    fastpostgres-dev benchmark/codec_transport/run_matrix.py --rows 1000000
+    fastpostgres-dev benchmarks/internals/codec_transport/run_matrix.py --rows 1000000
 ```
 
 ## Reproducing
 
 ```bash
-just codec-transport            # full matrix, log to stdout and docs/codec-transport.log
+just codec-transport            # full matrix, log to stdout and benchmarks/results/codec-transport.log
 just codec-charts               # the four figures, from that log
 just codec-transport --quick    # smoke the runner on 1K rows
 ```
 
-Re-running overwrites [`codec-transport.log`](codec-transport.log); a smoke
+Re-running overwrites [`codec-transport.log`](../benchmarks/results/codec-transport.log); a smoke
 run should be sent elsewhere with `--out`, and the log's first lines say which
 mode produced it. The raw JSON lines at the end of the log carry every field
 each unit reported, so any summary number here can be recomputed from the
