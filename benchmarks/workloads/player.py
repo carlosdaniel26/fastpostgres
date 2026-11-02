@@ -17,40 +17,26 @@ still issue a deterministic, disjoint set of statements.
 """
 import argparse
 import json
-import os
 import random
+import sys
 import time
+from pathlib import Path
 
 import psycopg
 
 from fastpostgres import dbapi
 
-from scenarios import BY_NAME, write_param
-from schema import DATABASE_URL, counts
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # benchmarks/
+
+from lib.harness import mapped_segment_bytes, rss_bytes  # noqa: E402
+from scenarios import BY_NAME, write_param  # noqa: E402
+from schema import DATABASE_URL, counts  # noqa: E402
 
 PLAYERS = ("fastpostgres", "psycopg 3")
 
 
 def now():
     return time.perf_counter()
-
-
-def rss_bytes():
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("VmHWM:"):
-                return int(line.split()[1]) * 1024
-    return 0
-
-
-def mapped_bytes():
-    """Bytes of the ring data segments this process's client has mapped."""
-    stem = f"fp_dbapi_{os.getpid()}_"
-    total = 0
-    for name in os.listdir("/dev/shm"):
-        if name.startswith(stem) and "_seg" in name:
-            total += os.stat(os.path.join("/dev/shm", name)).st_size
-    return total
 
 
 def connect(player):
@@ -183,7 +169,7 @@ def main():
             "player": args.player,
             "kind": scenario.kind,
             "client_index": args.client_index,
-            "mapped_bytes": mapped_bytes(),
+            "mapped_bytes": mapped_segment_bytes(),
             "rss_bytes": rss_bytes(),
         }
     )

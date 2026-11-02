@@ -29,7 +29,7 @@ CXX="${CXX:-g++}"
 # -O3 per SPEC.md: pyarrow ships optimized (SIMD) kernels and the PostgreSQL
 # extension itself builds -O3, so the codec is compiled at the same level.
 # -fno-strict-aliasing backs the may_alias typed reads of the payload.
-flags=(-O3 -std=c++17 -fno-strict-aliasing -Wall -Wextra -I "$root/extension" -I "$root/extension/src")
+flags=(-O3 -std=c++17 -fno-strict-aliasing -Wall -Wextra -I "$root/extension/include")
 
 echo "build_fpg.sh: $CXX ${flags[*]}" >&2
 "$CXX" "${flags[@]}" -o "$build/fpg_bench" "$here/fpg_bench.cpp" "$here/fpg_codec.cpp"

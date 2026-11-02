@@ -37,7 +37,7 @@ if pg_config("--includedir") is None:
         "  (postgresql-libs + postgresql on Arch, libpq-dev on Debian)."
     )
 
-include_dirs = [PG_EXTENSION, os.path.join(PG_EXTENSION, "src")]
+include_dirs = [os.path.join(PG_EXTENSION, "include")]
 library_dirs = []
 for option, target in (("--includedir", include_dirs), ("--libdir", library_dirs)):
     path = pg_config(option)

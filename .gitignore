@@ -20,3 +20,6 @@ codec_chart-*.png
 /improve-*.png
 /*.pdf
 benchmarks/internals/codec_transport/build/
+extension/test/results/
+extension/test/regression.diffs
+extension/test/regression.out

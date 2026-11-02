@@ -3,7 +3,7 @@
 
 #include <Python.h>
 
-#include "ring.h"
+#include "fastpostgres/ring.h"
 
 typedef struct {
     PyObject_HEAD FastpostgresRing *ring;

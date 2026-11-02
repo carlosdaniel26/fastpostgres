@@ -14,7 +14,7 @@
 #include <x86intrin.h>
 
 #include "codec.hpp"
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 #include "shm_map.h"
 #include "types.hpp"
 

@@ -34,10 +34,10 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 
 #include "columnar.h"
-#include "ring.h"
+#include "fastpostgres/ring.h"
 #include "stream.h"
 
 #define FASTPOSTGRES_RING_WAIT_MS 100 /* only so the worker notices SIGTERM */

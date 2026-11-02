@@ -28,7 +28,7 @@
 #include "utils/memutils.h"
 #include "varatt.h"
 
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 
 #include "columnar.h"
 #include "rows.h"

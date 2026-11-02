@@ -15,7 +15,7 @@
 #include "utils/uuid.h"
 #include "varatt.h"
 
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 
 #include "columnar.h"
 #include "shm.h"

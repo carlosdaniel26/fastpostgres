@@ -31,7 +31,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 
 namespace fpg {
 

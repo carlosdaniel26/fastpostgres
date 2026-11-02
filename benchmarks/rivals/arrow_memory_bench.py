@@ -34,11 +34,16 @@ import os
 import statistics
 import sys
 import time
+from pathlib import Path
 
-import adbc_driver_postgresql.dbapi as adbc
-import numpy as np
-import pyarrow.compute as pc
-from fastpostgres import dbapi
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # benchmarks/
+
+import adbc_driver_postgresql.dbapi as adbc  # noqa: E402
+import numpy as np  # noqa: E402
+import pyarrow.compute as pc  # noqa: E402
+from fastpostgres import dbapi  # noqa: E402
+
+from lib.harness import rss_bytes  # noqa: E402
 
 from sqlalchemy_bench import CORE_SQL, SHAPE, SHAPES, setup
 
@@ -54,15 +59,6 @@ BATCH = 100000  # rows per stream() pull, the client's own _SHM_BATCH
 
 def now():
     return time.perf_counter()
-
-
-def vmhwm_kb():
-    """Peak resident set of this process (VmHWM), as the transport benchmark reads it."""
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("VmHWM:"):
-                return int(line.split()[1])
-    return 0
 
 
 def read_ring(conn):
@@ -162,7 +158,7 @@ def ring_evidence(extra):
     return (
         f"seg_bytes={max(sizes) if sizes else 0} segments={len(sizes)} "
         f"pair_bytes={sum(sizes)} ctrl_bytes={CONTROL_RING_BYTES} {carried} "
-        f"rss_bytes={vmhwm_kb() * 1024}"
+        f"rss_bytes={rss_bytes()}"
     )
 
 
@@ -212,7 +208,7 @@ def main(argv):
             print(f"{player_name} " + ring_evidence(extra))
         else:
             print(f"{player_name} " + " ".join(f"{k}={v}" for k, v in extra.items())
-                  + f" rss_bytes={vmhwm_kb() * 1024}")
+                  + f" rss_bytes={rss_bytes()}")
         return
     raise SystemExit(__doc__)
 

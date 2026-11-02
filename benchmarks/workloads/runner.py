@@ -27,20 +27,16 @@ from pathlib import Path
 
 import psycopg
 
-from scenarios import BY_NAME, SCENARIOS
-from schema import DATABASE_URL, counts, reset_reserved_orders, setup
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # benchmarks/
+
+from lib.harness import percentile, same_digest  # noqa: E402
+from scenarios import BY_NAME, SCENARIOS  # noqa: E402
+from schema import DATABASE_URL, counts, reset_reserved_orders, setup  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PLAYER = HERE / "player.py"
 PLAYERS = ("fastpostgres", "psycopg 3")
 DEFAULTS = {"scale": 1.0, "reps": 3, "duration": 10.0, "clients": 4, "seed": 7}
-
-
-def percentile(samples, q):
-    if not samples:
-        return 0.0
-    ordered = sorted(samples)
-    return ordered[min(len(ordered) - 1, int(q * (len(ordered) - 1)))]
 
 
 def server_version():
@@ -135,17 +131,6 @@ def merge(clients):
     }
 
 
-def same_digest(left, right):
-    for a, b in zip(left, right):
-        if isinstance(a, float) or isinstance(b, float):
-            scale = abs(a) + abs(b)
-            if scale and abs(a - b) > 1e-6 * scale:
-                return False
-        elif a != b:
-            return False
-    return True
-
-
 def headline(scenario, result):
     """The scenario's numbers, as (unit, value) pairs: throughput, or ms for a read."""
     seconds = result["work_ms"] / 1000
@@ -211,6 +196,7 @@ def main():
     env_block(n, args)
 
     mismatches = 0
+    records = []
     for scenario in selected:
         print()
         if scenario.kind == "duration":
@@ -238,6 +224,17 @@ def main():
             print_result(scenario, results[player], baseline)
             if baseline is None:
                 baseline = headline(scenario, results[player])[0][1]
+            for index, (unit, value) in enumerate(headline(scenario, results[player])):
+                times = results[player]["writes_ms"] if index else results[player]["reads_ms"]
+                p50, p95, p99 = times
+                records.append({
+                    "scenario": scenario.name, "class": scenario.klass,
+                    "player": player, "unit": unit, "value": round(value, 3),
+                    "p50_ms": round(p50, 3), "p95_ms": round(p95, 3), "p99_ms": round(p99, 3),
+                    "reads": results[player]["reads"], "writes": results[player]["writes"],
+                    "served_by_shm": results[player]["shm_reads"],
+                    "digest": results[player]["digest"], "valid": results[player]["valid"],
+                })
 
         ring = results["fastpostgres"]
         if ring["shm_reads"] < ring["reads"]:
@@ -265,6 +262,13 @@ def main():
 
     print()
     print(f"# the same output across players: {'ok' if mismatches == 0 else 'MISMATCH'}")
+    # the machine-readable record of the same run: the log is for reading, this
+    # block is for the chart and for anything that wants the numbers without
+    # parsing the prose
+    print("### RESULTS")
+    print(json.dumps({"git": os.environ.get("BENCH_GIT_REV", "unknown"),
+                      "scale": args.scale, "scenarios": records}))
+    print("### END RESULTS")
     return 1 if mismatches else 0
 
 

@@ -5,7 +5,7 @@
 #include <Python.h>
 #include <libpq-fe.h>
 
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 
 /* Import decimal/datetime once (call from module init). */
 bool fp_codec_init(void);

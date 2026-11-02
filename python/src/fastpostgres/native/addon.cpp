@@ -16,7 +16,7 @@
 
 #include "codec.hpp"
 #include "connection.hpp"
-#include "fastpostgres_shm.h"
+#include "fastpostgres/fastpostgres_shm.h"
 #include "ring.hpp"
 #include "segment.hpp"
 #include "types.hpp"

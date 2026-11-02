@@ -21,6 +21,7 @@ Usage:
     just charts workloads --out docs/assets/         writes the PNG elsewhere
 """
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -52,6 +53,27 @@ ROW_RE = re.compile(
     r"\s+p50\s+([\d.]+) ms\s+p95\s+([\d.]+) ms\s+p99\s+([\d.]+) ms"
 )
 ENV_KEYS = ("cpu", "postgres", "psycopg", "git")
+
+
+def parse_json(text):
+    """The log's `### RESULTS` block, when the run wrote one.
+
+    Since the harness prints a machine-readable record of the same run, the chart
+    prefers it: the table below it is for reading, the JSON for drawing.
+    """
+    marker = "### RESULTS\n"
+    if marker not in text:
+        return None
+    block = text.split(marker, 1)[1].split("### END RESULTS", 1)[0]
+    try:
+        payload = json.loads(block)
+    except ValueError:
+        return None
+    data = {}
+    for record in payload.get("scenarios", []):
+        data.setdefault(record["scenario"], {}).setdefault(record["player"], {})[
+            record["unit"]] = (float(record["value"]), float(record["p95_ms"]))
+    return data
 
 
 def parse(text):
@@ -140,7 +162,13 @@ def main():
 
     if not args.log.exists():
         sys.exit(f"{args.log}: no log -- run `just bench > {DEFAULT_LOG.relative_to(ROOT)}` first")
-    data, env, status = parse(args.log.read_text())
+    text = args.log.read_text()
+    data = parse_json(text)
+    env, status = {}, "ok"
+    if data is None:
+        data, env, status = parse(text)
+    else:
+        _, env, status = parse(text)
     if not data:
         sys.exit(f"{args.log}: no scenario blocks found -- was this written by `just bench`?")
 

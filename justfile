@@ -67,9 +67,9 @@ _run_profile *args:
     just _image_profile
     docker run --rm --shm-size={{shm}} -e FASTPOSTGRES_OBJ_ARENA={{env("OBJ_ARENA", "")}} -e MCA_CPU={{env("MCA_CPU", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-profile {{args}}
 
-# the Python client's test suite
+# both test suites: the extension's SQL surface (pg_regress) and the client's
 test:
-    just _run python3 -m unittest discover -s tests -v
+    just _run tests.sh
 
 # the workload suite: realistic scenarios, app-facing API on both sides (docs/BENCHMARKS.md)
 bench *args:
@@ -141,6 +141,14 @@ cache-stat *args:
 codec-transport *args:
     just _image
     docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmarks/internals/codec_transport/run_matrix.py {{args}}
+
+# the release version lives in three places; this proves they agree
+check-version:
+    @v=$(grep ^version python/pyproject.toml | head -1 | sed "s/[^0-9.]//g"); \
+     test -n "$v"; \
+     grep -q "default_version = .$v." extension/fastpostgres.control; \
+     test -f extension/sql/fastpostgres--$v.sql; \
+     echo "version $v: pyproject.toml, fastpostgres.control and sql/ agree"
 
 # drop the built images
 clean:

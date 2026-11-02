@@ -24,7 +24,7 @@ COPY extension /src/extension
 COPY python /src/python
 COPY benchmarks /src/benchmarks
 COPY examples /src/examples
-COPY docker/entrypoint.sh benchmarks/jobs/benchmarks.sh examples/run.sh \
+COPY docker/entrypoint.sh docker/tests.sh benchmarks/jobs/benchmarks.sh examples/run.sh \
      benchmarks/jobs/decode-cycles.sh benchmarks/jobs/decode-ir.sh benchmarks/jobs/decode-mca.sh \
      benchmarks/jobs/loop-asm.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py
@@ -34,6 +34,10 @@ RUN make clean && make && make install
 
 WORKDIR /src/python
 RUN python3 setup.py build_ext --inplace
+
+# The tests run as postgres (the entrypoint's user): pg_regress writes results/
+# under the extension's test tree, and the client suite imports the package.
+RUN mkdir -p /src/extension/test/results && chown -R postgres:postgres /src/extension /src/python
 
 ENV PYTHONPATH=/src/python/src
 ENV DATABASE_URL="host=/tmp dbname=postgres user=postgres"

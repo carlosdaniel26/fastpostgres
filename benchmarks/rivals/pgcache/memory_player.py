@@ -28,25 +28,17 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))  # rivals/: sqlalchemy_bench
-sys.path.insert(0, str(HERE))  # this directory: player
+sys.path.insert(0, str(HERE.parents[1]))  # benchmarks/: lib
+sys.path.insert(0, str(HERE.parent))      # rivals/: sqlalchemy_bench
+sys.path.insert(0, str(HERE))             # this directory: player
 
+from lib.harness import rss_bytes  # noqa: E402
 from player import PLAYERS, WORKLOADS, do_read, do_setup, scrape  # noqa: E402
 from sqlalchemy_bench import SHAPE, SHAPES  # noqa: E402
 
 # FASTPOSTGRES_RING_BYTES: the control channel's own segment, fixed and not part
 # of the transfer buffer a budget is spent on.
 CONTROL_RING_BYTES = 8 << 20
-
-
-def vmhwm_kb():
-    """This process's peak resident set (VmHWM), the same reading
-    benchmarks/internals/codec_transport reports as rss_kb, so RSS means one thing here."""
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("VmHWM:"):
-                return int(line.split()[1])
-    return 0
 
 
 def ring_evidence(shm_reads, reps):
@@ -68,7 +60,7 @@ def ring_evidence(shm_reads, reps):
     return (
         f"seg_bytes={max(sizes) if sizes else 0} segments={len(sizes)} "
         f"pair_bytes={sum(sizes)} ctrl_bytes={CONTROL_RING_BYTES} "
-        f"shm_reads={shm_reads}/{reps} rss_bytes={vmhwm_kb() * 1024}"
+        f"shm_reads={shm_reads}/{reps} rss_bytes={rss_bytes()}"
     )
 
 
