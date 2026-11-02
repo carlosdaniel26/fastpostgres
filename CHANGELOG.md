@@ -19,8 +19,8 @@ are released together.
   pinned, and both sides poll this segment's counters before falling back to the
   semaphores when idle). The payload is untouched: it is the data segment, and no
   doorbell carries bytes. Measured in isolation (`just internals transport`):
-  **162k hops/s at p50 6.38 us for shm, 1.76M hops/s at p50 0.521 us for
-  regipc**, at 6.2 us against 1.15 us of CPU per hop - the regipc side spends
+  **163.6k hops/s at p50 6.36 us for shm, 1.74M hops/s at p50 0.521 us for
+  regipc**, at 6.24 us against 1.14 us of CPU per hop - the regipc side spends
   that CPU spinning, which is the trade the technique makes.
 - `fastpostgres_ring_start(text, text)` names the engine; the one-argument form
   stays shm. The ring (magic `FPRING04`) records which engine made it, and a

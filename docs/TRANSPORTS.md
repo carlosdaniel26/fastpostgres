@@ -49,7 +49,7 @@ The costs are stated where they are paid:
 - **two syscalls per request** (the call and the wake hint) — the call removes the
   *scheduler handoff*, not the syscall;
 - **CPU while it spins.** Under load neither side's budget expires, so both
-  processes spin for the whole run: ~2 cores at full tilt for 1.76 M hops/s. The
+  processes spin for the whole run: ~2 cores at full tilt for 1.74 M hops/s. The
   semaphore engine hands the core back and uses ~1.
 - **a module on the host.** Without `/dev/regipc` the client raises rather than
   falling back (`_client.Ring` reports the errno; the DBAPI's ring creation
@@ -76,13 +76,13 @@ differs. Record: [`transport-shm-vs-regipc.log`](../benchmarks/results/transport
 
 | | hops/s | p50 | p99 | µs of CPU per hop | at 100k rows/batch |
 |---|---|---|---|---|---|
-| shm | 161.8 k | 6.38 µs | 9.84 µs | 6.22 | 16.2 G rows/s |
-| regipc | 1.76 M | 0.521 µs | 0.551 µs | 1.14 | 175 G rows/s |
+| shm | 163.6 k | 6.362 µs | 10.019 µs | 6.24 | 16.36 G rows/s |
+| regipc | 1.74 M | 0.521 µs | 0.612 µs | 1.14 | 174.32 G rows/s |
 
-**10.8x the hops and 12.2x less wall time per hop, for 5.5x less CPU per hop** —
+**10.6x the hops and 12.2x less wall time per hop, for 5.5x less CPU per hop** —
 with the caveat the table cannot show and the chart does: the regipc cell spends
 its CPU *spinning* (both processes, ~2 cores for the duration), while the shm
-cell spends it *sleeping*. At 100k rows per batch that is 175 G rows/s of
+cell spends it *sleeping*. At 100k rows per batch that is 174.3 G rows/s of
 *directory* work, not rows delivered — the payload is the data segment's job, and
 [`fastpostgres-vs-psycopg.log`](../benchmarks/results/fastpostgres-vs-psycopg.log)
 is where delivered rows are measured.
