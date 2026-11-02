@@ -5,10 +5,19 @@
  * WHAT IT IS. The ABI 2 call reads x0..x8 out of the caller's syscall frame and
  * runs the callee's work in ring 0 against the callee's pinned page; the callee
  * process never runs. This module keeps that contract (same ioctl numbers, same
- * leaf magic/counter discipline, same single-caller assumption) and adds one
- * command, REGIPC_IOC_CALL_V: the same bookkeeping, and then the caller's live
- * vector state is saved into its own task's fpstate by kernel_fpu_begin() and
- * `width` bytes of that image are copied into the callee's pinned buffer.
+ * leaf magic/counter discipline, same single-caller assumption) and adds two
+ * commands:
+ *
+ *   REGIPC_IOC_CALL_V (6): the same bookkeeping, and then the caller's live
+ *   vector state is saved into its own task's fpstate by kernel_fpu_begin() and
+ *   `width` bytes of that image are copied into the callee's pinned buffer.
+ *
+ *   REGIPC_IOC_CALL_B (8): the same bookkeeping, and then `length` bytes from a
+ *   caller-supplied buffer (carrier w[1]) are copied into the callee's arena
+ *   page with copy_from_user(). No FPU state is touched at all; the payload is
+ *   whatever the caller wrote in ordinary C. The copy runs first and the leaf
+ *   counter is published with a release store, so a callee that sees the
+ *   counter move sees the copied bytes complete.
  *
  * WHY kernel_fpu_begin() WORKS FOR THIS. On entry from userspace the FPU state
  * is usually live in the registers, not in memory. kernel_fpu_begin_mask()
@@ -73,6 +82,32 @@
  * format, so the measurement program never has to guess.
  */
 #define REGIPC_IOC_VINFO	_IOR(REGIPC_IOC_MAGIC, 7, struct regipc_vec_info)
+
+/*
+ * CALL_B: the same call, but the payload never enters the register file. The
+ * nine carriers are a descriptor instead:
+ *
+ *   w[0] flags      reserved, must be 0
+ *   w[1] user_ptr   the caller's source buffer
+ *   w[2] length     bytes to copy: 0..PAGE_SIZE
+ *   w[3] seq        caller's sequence number (carried, folded by the leaf)
+ *   w[4] dst_off    destination offset inside the callee's arena page
+ *   w[5..8]         reserved, must be 0
+ *
+ * length and dst_off must satisfy length + dst_off <= PAGE_SIZE (the arena is
+ * exactly one page, page 1 of the callee's registration). The validation
+ * happens before anything is touched; a failed copy_from_user() returns -EFAULT
+ * and does not move the leaf counter, so the callee never observes a published
+ * call whose payload is incomplete.
+ */
+#define REGIPC_IOC_CALL_B	_IO(REGIPC_IOC_MAGIC, 8)
+
+#define REGIPC_BULK_W_FLAGS	0
+#define REGIPC_BULK_W_PTR	1
+#define REGIPC_BULK_W_LEN	2
+#define REGIPC_BULK_W_SEQ	3
+#define REGIPC_BULK_W_DST	4
+#define REGIPC_BULK_W_RESERVED	5
 
 /* The callee's registration: page 0 leaf struct, page 1 vector arena. */
 #define REGIPC_VEC_PAGES	2
@@ -199,21 +234,25 @@ static u64 leaf_fnv(u64 hash, u32 value)
  * The callee's work, executed in ring 0 against its own leaf page. It touches
  * only the pinned page, never sleeps and never calls out, so it cannot fault.
  * x0..x8 land in the struct; the call counter comes back as the return value.
- * This is the ABI 2 leaf, unchanged.
+ * This is the ABI 2 leaf, with one ordering guarantee: the counter is published
+ * with a release store after the values and checksum, and for CALL_B after the
+ * payload copy, so a callee that sees the counter move sees that call's data.
  */
 static long run_leaf(void *buf, const struct regipc_carriers *args)
 {
 	struct regipc_leaf_result *r = buf;
+	u32 calls;
 
 	if (READ_ONCE(r->magic) != REGIPC_LEAF_MAGIC)
 		return -EINVAL;
 
-	r->calls++;
 	for (int i = 0; i < REGIPC_CARRIERS; i++) {
 		r->values[i] = args->w[i];
 		r->checksum = leaf_fnv(r->checksum, (u32)args->w[i]);
 	}
-	return (long)r->calls;
+	calls = READ_ONCE(r->calls) + 1;
+	smp_store_release(&r->calls, calls);
+	return (long)calls;
 }
 
 /*
@@ -449,6 +488,57 @@ static long do_call(bool vector)
 	return ret;
 }
 
+/*
+ * CALL_B: copy the caller's payload into the callee's arena, then publish.
+ *
+ * copy_from_user() is legal here and must not be called under a spinlock: the
+ * ioctl handler runs in the caller's own process context (current is the
+ * caller) at process level, with no registry_lock held, so a copy may fault,
+ * sleep and be rescheduled. The copy happens before run_leaf(), whose release
+ * store of `calls` is the publication point - the callee sees payload complete
+ * when the counter moves. A failed copy returns -EFAULT and no leaf state is
+ * touched at all.
+ */
+static long do_call_bulk(void)
+{
+	struct regipc_carriers args;
+	struct regipc_ctx *me = current_ctx();
+	struct regipc_ctx *callee;
+	size_t length, dst_off;
+	long ret;
+
+	if (!me)
+		return -ENODEV;
+
+	callee = me->peer;
+	if (!callee || !callee->pages[0] || !callee->pages[1])
+		return -ENOLINK;
+
+	regs_to_carriers(task_pt_regs(current), &args);
+
+	/* The descriptor is validated before a single byte is touched. */
+	if (args.w[REGIPC_BULK_W_FLAGS] != 0)
+		return -EINVAL;
+	for (int i = REGIPC_BULK_W_RESERVED; i < REGIPC_CARRIERS; i++)
+		if (args.w[i] != 0)
+			return -EINVAL;
+
+	length = (size_t)args.w[REGIPC_BULK_W_LEN];
+	dst_off = (size_t)args.w[REGIPC_BULK_W_DST];
+	if (length > PAGE_SIZE || dst_off > PAGE_SIZE - length)
+		return -EINVAL;
+
+	/* Dest is the callee's pinned arena page, the same page CALL_V fills. */
+	if (length &&
+	    copy_from_user(page_address(callee->pages[1]) + dst_off,
+			   (void __user *)(uintptr_t)args.w[REGIPC_BULK_W_PTR], length))
+		return -EFAULT;
+
+	ret = run_leaf(page_address(callee->pages[0]) + callee->offset, &args);
+	me->calls++;
+	return ret;
+}
+
 static long do_stats(unsigned long arg)
 {
 	struct regipc_ctx *me = current_ctx();
@@ -558,6 +648,8 @@ static long regipcvec_ioctl(struct file *filp, unsigned int cmd, unsigned long a
 		return do_call(true);
 	case REGIPC_IOC_VINFO:
 		return do_vinfo(arg);
+	case REGIPC_IOC_CALL_B:
+		return do_call_bulk();
 	default:
 		return -ENOTTY;
 	}
@@ -595,7 +687,7 @@ static int __init regipcvec_init(void)
 	if (ret)
 		return ret;
 
-	pr_info(REGIPC_DRV_NAME ": loaded, abi %u + CALL_V, width %u, leaf page + %lu-byte arena, mode %04o\n",
+	pr_info(REGIPC_DRV_NAME ": loaded, abi %u + CALL_V + CALL_B, width %u, leaf page + %lu-byte arena, mode %04o\n",
 		REGIPC_ABI_VERSION, vec_width, (unsigned long)PAGE_SIZE * (REGIPC_VEC_PAGES - 1), regipcvec_mode);
 	return 0;
 }

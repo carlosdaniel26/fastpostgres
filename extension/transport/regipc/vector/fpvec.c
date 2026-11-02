@@ -11,26 +11,32 @@
  * callee's pinned arena; at width 0 it saves/restores and copies nothing, which
  * is the point that isolates the FP cost from the per-byte copy cost.
  *
+ * bulk mode (REGIPC_IOC_CALL_B) is the cheaper design the measurements point
+ * at: the carriers are a descriptor {flags, user_ptr, length, seq, dst_off},
+ * the module's handler (running in the caller's context, not under a lock) does
+ * copy_from_user() of that buffer into the callee's arena page, and no FPU
+ * state is touched. `--cold` makes the source a >L3 buffer walked with a cache-
+ * line-avoiding stride, so the measured copy is an honest one for a payload the
+ * caller did not just leave in cache.
+ *
  * TWO PROCESSES, NO THREADS. The parent is the producer: it registers as the
  * caller, pairs with the child and times the calls. The child is the callee: it
  * registers the two-page region (page 0 the ABI 2 leaf struct, page 1 the 4 KB
- * vector arena), polls leaf.calls until the stream starts, waits for the stop
- * message, folds what it received and reports. The child costs no wall time in
- * the loop itself - the whole point of the technique is that the callee process
- * never runs during a call.
+ * arena), polls leaf.calls until the stream starts, waits for the stop message,
+ * folds what it received and reports. The child costs no wall time in the loop
+ * itself - the whole point of the technique is that the callee process never
+ * runs during a call.
  *
  * WHAT IS VERIFIED. Three independent chains:
  *   - the leaf: leaf.calls must equal warmup + calls exactly (every call once,
  *     in order) and leaf.checksum must equal the caller's fold over the same
  *     x0..x8 (the module's own FNV-1a over the low 32 bits of each carrier);
- *   - the vector arena: the parent builds a plan of the register bytes that
- *     should lie in the copied prefix (XMM low halves at 160+16i in the legacy
- *     region, then the YMM-high/ZMM-high/Hi16-ZMM components of AVX-512 at
- *     their layout offsets, found from CPUID and the image format the module
- *     reports), folds what it sent from the blob it loaded, folds what is in
- *     the shared arena, and the child folds the same runs from its own mapping;
- *     all three must agree. Bytes past the real image (width > image) must be
- *     the module's zero fill, and are folded as zeros.
+ *   - the payload: vec mode folds the register bytes in the copied prefix (the
+ *     XMM low halves at 160+16i, then the AVX-512 components at the layout
+ *     offsets CPUID and the module's VINFO give, zero fill past the real image);
+ *     bulk mode folds the `length` bytes the caller sent. The caller's expected
+ *     fold, the parent's read of the arena and the callee's own fold must all
+ *     agree, in both modes;
  *   - the child exit: it must leave a report of its own and exit 0.
  *
  * THE OUTPUT. One single-line JSON object per run on stdout (one run = one
@@ -49,6 +55,7 @@
  * Usage:
  *   fpvec --mode plain  --reps 3 [--count N] [--warmup N] [--device PATH]
  *   fpvec --mode vec --width N --reps 3 [--count N] [--warmup N]
+ *   fpvec --mode bulk --width N [--cold] --reps 3 [--count N] [--warmup N]
  *   fpvec --mode xsave  --reps 3
  *   fpvec --selftest
  */
@@ -85,6 +92,18 @@
 #define REGIPC_VEC_DEVICE "/dev/regipcvec"
 #define REGIPC_IOC_CALL_V _IO('c', 6)
 #define REGIPC_IOC_VINFO  _IOR('c', 7, struct regipc_vec_info)
+#define REGIPC_IOC_CALL_B _IO('c', 8)
+
+/*
+ * CALL_B's carrier block, kept in sync with regipcvec.c: w[0] flags,
+ * w[1] source pointer, w[2] length, w[3] sequence number, w[4] destination
+ * offset inside the callee's arena page; w[5..8] reserved and zero.
+ */
+#define BULK_W_FLAGS 0
+#define BULK_W_PTR   1
+#define BULK_W_LEN   2
+#define BULK_W_SEQ   3
+#define BULK_W_DST   4
 
 enum regipc_vec_format
 {
@@ -131,6 +150,18 @@ struct regipc_vec_info
  * checksum is a fixed, checkable chain. w[0] doubles as the ioctl's arg word. */
 #define CARRIER_W(i) (0x0000000056ec0000ull + (uint64_t)(i) * 0x01010101ull)
 
+/*
+ * bulk mode's cold source: one mapping larger than L3 (32 MiB on this box) that
+ * is filled with a repeating 64-byte period and walked with a 64 KiB stride -
+ * sixteen times a cache line - so each call reads addresses that have long been
+ * evicted, and every slice has the same bytes (same fold) whatever its offset.
+ * The walk advances by the stride and wraps; the mapping is a whole number of
+ * strides, so no slice ever crosses the end.
+ */
+#define BULK_COLD_BYTES  (256u << 20)
+#define BULK_COLD_STRIDE (64u << 10)
+#define BULK_PERIOD      64u
+
 /* ------------------------------------------------------------------- basics */
 
 typedef enum Mode
@@ -138,13 +169,14 @@ typedef enum Mode
     MODE_NONE,
     MODE_PLAIN,
     MODE_VEC,
+    MODE_BULK,
     MODE_XSAVE,
 } Mode;
 
 typedef struct Options
 {
     Mode     mode;
-    uint64_t width; /* vec only: must match the module parameter */
+    uint64_t width; /* vec/bulk: must match the module parameter (vec) / payload bytes (bulk) */
     uint64_t count;
     uint64_t warmup;
     unsigned reps;
@@ -153,6 +185,7 @@ typedef struct Options
     int      cpu_callee;
     bool     json;
     bool     selftest;
+    bool     cold; /* bulk only: read the payload from a >L3 source */
 } Options;
 
 typedef struct Result
@@ -180,12 +213,17 @@ typedef struct Result
     uint64_t vec_runs;
     uint64_t vec_bad;
     uint64_t child_vec_match;
+    uint64_t child_seq_match;
+    uint64_t limits_ok;         /* bulk: the module rejected len>page, dst+len>page, flags!=0 */
     uint64_t child_poll_iters;
     uint64_t child_cpu_us;
     uint32_t fpstate_size;
     uint32_t real_bytes;
     uint32_t format;
     uint32_t vec_flags;
+    uint64_t cold_bytes;        /* bulk: source mapping size, 0 when hot */
+    uint64_t cold_stride;       /* bulk: address advance per call, 0 when hot */
+    uint32_t page_bytes;        /* the arena's limit, from sysconf(_SC_PAGESIZE) */
     bool     child_exit_ok;
     bool     verified;
 } Result;
@@ -242,8 +280,59 @@ mode_name(Mode m)
     {
     case MODE_PLAIN: return "plain";
     case MODE_VEC: return "vec";
+    case MODE_BULK: return "bulk";
     case MODE_XSAVE: return "xsave";
     default: return "none";
+    }
+}
+
+static uint64_t
+mix64(uint64_t x)
+{
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+/* The CALL_B carriers: flags, source pointer, length, sequence number, dst
+ * offset, then four reserved zeros. Seqs change per rep so the callee's check
+ * of leaf->values[BULK_W_SEQ] identifies the carrier set that was last used. */
+static void
+bulk_carriers(struct regipc_carriers *c, const uint8_t *src, uint64_t len, uint64_t seq, uint64_t dst)
+{
+    memset(c, 0, sizeof *c);
+    c->w[BULK_W_FLAGS] = 0;
+    c->w[BULK_W_PTR]   = (uint64_t)(uintptr_t)src;
+    c->w[BULK_W_LEN]   = len;
+    c->w[BULK_W_SEQ]   = seq;
+    c->w[BULK_W_DST]   = dst;
+}
+
+/*
+ * bulk mode's source. Hot: one small buffer, the same address every call, hot
+ * in L1 after the warm-up. Cold: the >L3 period-filled mapping above, advanced
+ * by BULK_COLD_STRIDE per call - the address handed to the handler is different
+ * every call, so the copy reads from a cache line that has not been touched for
+ * thousands of calls. Every slice holds identical bytes, so one expected fold
+ * covers every call whatever the offset.
+ */
+static void
+bulk_fill(uint8_t *p, size_t bytes)
+{
+    uint8_t period[BULK_PERIOD];
+
+    for (size_t j = 0; j < BULK_PERIOD / 8; j++)
+    {
+        uint64_t v = mix64(0x62756c6b5f706572ull ^ (uint64_t)j);
+
+        memcpy(period + 8 * j, &v, 8);
+    }
+    for (size_t off = 0; off < bytes; off += BULK_PERIOD)
+    {
+        size_t n = bytes - off < BULK_PERIOD ? bytes - off : BULK_PERIOD;
+
+        memcpy(p + off, period, n);
     }
 }
 
@@ -512,15 +601,6 @@ carriers_fold(const uint64_t *w)
     return h;
 }
 
-static uint64_t
-mix64(uint64_t x)
-{
-    x += 0x9e3779b97f4a7c15ull;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
-    return x ^ (x >> 31);
-}
-
 /* The blob the stub loads: each register gets 64 bytes no other register has,
  * so a run of 16 bytes already identifies its register. */
 static void
@@ -780,11 +860,14 @@ struct stop_msg
 {
     uint64_t expected_vec;
     uint64_t expected_gpr;
+    uint64_t expected_seq;
     uint64_t expected_calls;
     uint32_t width;
     uint32_t real_bytes;
     uint32_t format;
-    uint32_t vec; /* 0 = plain, 1 = vec: whether the vector fold means anything */
+    uint32_t vec;  /* 0 = plain, 1 = vec: whether the vector fold means anything */
+    uint32_t bulk; /* 1 = bulk: fold `width` payload bytes at dst_off */
+    uint32_t dst_off;
 };
 
 struct child_report
@@ -798,6 +881,7 @@ struct child_report
     uint64_t leaf_checksum;
     uint64_t poll_iters;
     uint64_t cpu_us;
+    uint64_t seq_match;
     uint32_t vec_match;
     uint32_t gpr_match;
     uint32_t calls_match;
@@ -910,12 +994,14 @@ child_main(const Options *o, uint8_t *region, int ready_fd, int stop_fd, int res
 
     getrusage(RUSAGE_SELF, &ru0);
 
-    /* Poll leaf.calls until the first call lands. Bounded: a run that never
-     * calls is a failure, not a hang. */
+    /* Poll leaf.calls until the first call lands. Acquire: the module publishes
+     * the counter with a release store after the call's data is in the leaf and,
+     * for bulk calls, after the payload copy. Bounded: a run that never calls is
+     * a failure, not a hang. */
     t0 = now_ns();
     for (;;)
     {
-        if (__atomic_load_n(&leaf->calls, __ATOMIC_RELAXED) != 0) break;
+        if (__atomic_load_n(&leaf->calls, __ATOMIC_ACQUIRE) != 0) break;
         poll_iters++;
         if (now_ns() - t0 > 10000000000ull) /* 10 s */
         {
@@ -942,7 +1028,16 @@ child_main(const Options *o, uint8_t *region, int ready_fd, int stop_fd, int res
         return 5;
     }
 
-    if (msg.vec)
+    if (msg.bulk)
+    {
+        /* The copy path: the caller sent `width` plain bytes at dst_off; fold
+         * exactly those bytes out of the shared arena. */
+        crep.vec_runs     = msg.width ? 1u : 0u;
+        crep.vec_received = fold_bytes(FNV_SEED, region + ARENA_OFFSET + msg.dst_off, msg.width);
+        crep.vec_match    = crep.vec_received == msg.expected_vec;
+        crep.vec_bad      = crep.vec_match ? 0 : 1;
+    }
+    else if (msg.vec)
     {
         plan_build(&plan, msg.width, msg.real_bytes, msg.format, vi.xfeatures);
         crep.vec_runs     = (uint64_t)plan.n;
@@ -961,8 +1056,9 @@ child_main(const Options *o, uint8_t *region, int ready_fd, int stop_fd, int res
         for (int i = 0; i < REGIPC_CARRIERS; i++) w[i] = leaf->values[i];
         crep.gpr_fold = carriers_fold(w);
     }
+    crep.seq_match     = leaf->values[BULK_W_SEQ] == msg.expected_seq;
     crep.gpr_match     = crep.gpr_fold == msg.expected_gpr;
-    crep.leaf_calls    = __atomic_load_n(&leaf->calls, __ATOMIC_RELAXED);
+    crep.leaf_calls    = __atomic_load_n(&leaf->calls, __ATOMIC_ACQUIRE);
     crep.leaf_checksum = leaf->checksum;
     crep.calls_match   = crep.leaf_calls == msg.expected_calls;
 
@@ -995,6 +1091,13 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
     uint64_t             *lat = NULL;
     uint64_t              expected_vec;
     uint64_t              expected_gpr;
+    uint64_t              seq      = 0; /* bulk: the per-rep sequence carrier */
+    uint64_t              page     = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t              *bulk_map = NULL; /* bulk: base of the source */
+    size_t                bulk_bytes  = 0;
+    size_t                bulk_stride = 0; /* 0 = hot: the same address every call */
+    size_t                bulk_off    = 0;
+    size_t                bulk_last_off = 0;
     uint64_t              t_first = 0;
     uint64_t              t_last  = 0;
     uint64_t              n       = 0;
@@ -1118,6 +1221,41 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
     /* One CPUID probe, once: it must never sit inside the timed loop. */
     avx512 = cpu_has_avx512();
 
+    /*
+     * The bulk source. Hot: one buffer of exactly `width` bytes, the same
+     * address on every call. Cold: the >L3 period-filled mapping, walked by
+     * BULK_COLD_STRIDE per call so every call reads a long-evicted address.
+     * (BULK_COLD_STRIDE is a multiple of the 64-byte period and divides the
+     * mapping, so a `width`-byte slice never straddles either boundary.)
+     */
+    if (o->mode == MODE_BULK)
+    {
+        seq = CARRIER_W(BULK_W_SEQ) + (uint64_t)repno;
+        if (o->cold)
+        {
+            bulk_bytes  = BULK_COLD_BYTES;
+            bulk_stride = BULK_COLD_STRIDE;
+            bulk_map    = mmap(NULL, bulk_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (bulk_map == MAP_FAILED)
+            {
+                bulk_map = NULL;
+                say(err, errsz, "mmap(%zu cold source): %s", bulk_bytes, strerror(errno));
+                goto out;
+            }
+        }
+        else
+        {
+            bulk_bytes  = o->width ? (size_t)o->width : 1u;
+            bulk_map    = malloc(bulk_bytes);
+            if (bulk_map == NULL)
+            {
+                say(err, errsz, "malloc(%zu source): %s", bulk_bytes, strerror(errno));
+                goto out;
+            }
+        }
+        bulk_fill(bulk_map, bulk_bytes);
+    }
+
     lat = malloc((size_t)o->count * sizeof *lat);
     if (lat == NULL)
     {
@@ -1134,6 +1272,18 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
 
         if (o->mode == MODE_VEC)
             r = avx512 ? vec_handoff_avx512(fd, vec_blob) : vec_handoff_sse(fd, vec_blob);
+        else if (o->mode == MODE_BULK)
+        {
+            struct regipc_carriers c;
+
+            bulk_carriers(&c, bulk_map + bulk_off, o->width, seq, 0);
+            r = regipc_handoff(fd, REGIPC_IOC_CALL_B, &c);
+            if (bulk_stride)
+            {
+                bulk_off += bulk_stride;
+                if (bulk_off >= bulk_bytes) bulk_off = 0;
+            }
+        }
         else
         {
             struct regipc_carriers c = {.w = {CARRIER_W(0), CARRIER_W(1), CARRIER_W(2), CARRIER_W(3), CARRIER_W(4),
@@ -1157,6 +1307,13 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
         t0 = now_ns();
         if (o->mode == MODE_VEC)
             r = avx512 ? vec_handoff_avx512(fd, vec_blob) : vec_handoff_sse(fd, vec_blob);
+        else if (o->mode == MODE_BULK)
+        {
+            struct regipc_carriers c;
+
+            bulk_carriers(&c, bulk_map + bulk_off, o->width, seq, 0);
+            r = regipc_handoff(fd, REGIPC_IOC_CALL_B, &c);
+        }
         else
         {
             struct regipc_carriers c = {.w = {CARRIER_W(0), CARRIER_W(1), CARRIER_W(2), CARRIER_W(3), CARRIER_W(4),
@@ -1172,12 +1329,25 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
         if (n == 0) t_first = t0;
         t_last  = t1;
         lat[n++] = t1 - t0;
+        if (o->mode == MODE_BULK)
+        {
+            /* Bookkeeping is after the timestamp: whichever slice the last call
+             * used is what the expected fold must describe, and it must not sit
+             * in the measured window. */
+            bulk_last_off = bulk_off;
+            if (bulk_stride)
+            {
+                bulk_off += bulk_stride;
+                if (bulk_off >= bulk_bytes) bulk_off = 0;
+            }
+        }
     }
     getrusage(RUSAGE_SELF, &ru1);
 
     out->producer_cpu_us = rusage_us(&ru1) - rusage_us(&ru0);
 
-    /* The three folds this run compares. */
+    /* The three folds this run compares: what the caller sent, what the parent
+     * reads out of the shared arena, what the callee read there. */
     expected_gpr = carriers_fold((const uint64_t[]){CARRIER_W(0), CARRIER_W(1), CARRIER_W(2), CARRIER_W(3),
                                                     CARRIER_W(4), CARRIER_W(5), CARRIER_W(6), CARRIER_W(7),
                                                     CARRIER_W(8)});
@@ -1196,18 +1366,70 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
         out->format            = vi.format;
         out->vec_flags         = vi.flags;
     }
+    else if (o->mode == MODE_BULK)
+    {
+        struct regipc_carriers last;
+
+        bulk_carriers(&last, bulk_map + bulk_last_off, o->width, seq, 0);
+        expected_gpr = carriers_fold((const uint64_t *)last.w);
+        expected_vec = fold_bytes(FNV_SEED, bulk_map + bulk_last_off, o->width);
+        out->received_checksum = fold_bytes(FNV_SEED, region + ARENA_OFFSET, o->width);
+        out->vec_runs          = o->width ? 1u : 0u;
+        out->real_bytes        = (uint32_t)o->width;
+        out->cold_bytes        = o->cold ? bulk_bytes : 0;
+        out->cold_stride       = bulk_stride;
+        out->page_bytes        = (uint32_t)page;
+    }
+
+    /*
+     * The arena is one page. Prove the module rejects what does not fit:
+     * length > page, dst_off + length > page, flags != 0. All three are refused
+     * before the leaf runs, so the counter still matches warmup + n.
+     */
+    out->limits_ok = 1;
+    if (o->mode == MODE_BULK)
+    {
+        struct
+        {
+            uint64_t len;
+            uint64_t dst;
+            uint64_t flags;
+        } probes[] = {
+            {page + 1u, 0, 0}, /* length > PAGE_SIZE */
+            {page, 1, 0},      /* length + dst_off > PAGE_SIZE */
+            {64, 0, 1},        /* flags nonzero */
+        };
+
+        for (size_t i = 0; i < sizeof probes / sizeof probes[0]; i++)
+        {
+            struct regipc_carriers c;
+            long                  r;
+
+            bulk_carriers(&c, region, probes[i].len, seq, probes[i].dst);
+            c.w[BULK_W_FLAGS] = probes[i].flags;
+            r = regipc_handoff(fd, REGIPC_IOC_CALL_B, &c);
+            if (r != -EINVAL) out->limits_ok = 0;
+        }
+    }
 
     /* Let the callee fold and leave. */
     memset(&msg, 0, sizeof msg);
     msg.expected_vec   = expected_vec;
     msg.expected_gpr   = expected_gpr;
+    msg.expected_seq   = o->mode == MODE_BULK ? seq : CARRIER_W(BULK_W_SEQ);
     msg.expected_calls = o->warmup + n;
     msg.vec            = o->mode == MODE_VEC ? 1u : 0u;
+    msg.bulk           = o->mode == MODE_BULK ? 1u : 0u;
     if (o->mode == MODE_VEC)
     {
         msg.width      = (uint32_t)o->width;
         msg.real_bytes = vi.real_bytes;
         msg.format     = vi.format;
+    }
+    else if (o->mode == MODE_BULK)
+    {
+        msg.width   = (uint32_t)o->width;
+        msg.dst_off = 0;
     }
     write_full(stop[1], &msg, sizeof msg);
     close(stop[1]);
@@ -1237,10 +1459,11 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
     out->child_gpr_checksum = crep.gpr_fold;
     out->child_gpr_match   = crep.gpr_match;
     out->child_vec_match   = crep.vec_match;
+    out->child_seq_match   = crep.seq_match;
     out->vec_bad           = crep.vec_bad;
     out->child_poll_iters  = crep.poll_iters;
     out->child_cpu_us      = crep.cpu_us;
-    out->leaf_calls        = __atomic_load_n(&leaf->calls, __ATOMIC_RELAXED);
+    out->leaf_calls        = __atomic_load_n(&leaf->calls, __ATOMIC_ACQUIRE);
     out->leaf_checksum     = leaf->checksum;
 
     out->calls  = n;
@@ -1250,7 +1473,8 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
         out->wall_ns          = t_last - t_first;
         out->calls_per_second = (n * 1000000000ull + out->wall_ns / 2) / out->wall_ns;
     }
-    out->bytes_per_call = o->mode == MODE_VEC ? o->width : (uint64_t)REGIPC_CARRIERS * sizeof(uint64_t);
+    out->bytes_per_call = (o->mode == MODE_VEC || o->mode == MODE_BULK) ? o->width
+                                                                       : (uint64_t)REGIPC_CARRIERS * sizeof(uint64_t);
     if (out->wall_ns > 0)
         out->gbps_milli = (n * out->bytes_per_call * 1000ull) / out->wall_ns;
 
@@ -1263,7 +1487,7 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
             if (lat[i] > 10 * out->ns_p50) out->gaps++;
     }
 
-    if (o->mode == MODE_VEC)
+    if (o->mode == MODE_VEC || o->mode == MODE_BULK)
     {
         out->checksum = expected_vec;
         out->gpr_checksum = expected_gpr;
@@ -1277,15 +1501,19 @@ run_one(const Options *o, unsigned repno, Result *out, char *err, size_t errsz)
     /* The gate is the data, not the two fold definitions: the module folds the
      * nine carriers its own way, so comparing the leaf's fold with the caller's
      * tests the two implementations against each other. What a run proves is on
-     * the child's side - it received what the caller sent, and the leaf counters
-     * agree - and that is what verified now says. The folds are still reported,
-     * and expected_gpr/expected_vec name what the caller itself computed. */
+     * the child's side - it received what the caller sent, the leaf counters
+     * agree, and in bulk mode the module also refused payloads that do not fit
+     * the one-page arena. The folds are still reported, and
+     * expected_gpr/expected_vec name what the caller itself computed. */
     (void)expected_gpr;
     (void)expected_vec;
     out->verified = out->child_exit_ok && errors == 0 && n == o->count && out->leaf_calls == o->warmup + n &&
-                    crep.gpr_match && crep.calls_match && crep.leaf_calls == out->leaf_calls &&
+                    crep.gpr_match && crep.calls_match && crep.seq_match && crep.leaf_calls == out->leaf_calls &&
                     crep.leaf_checksum == out->leaf_checksum &&
-                    (o->mode != MODE_VEC || (crep.vec_match && out->received_checksum == out->child_checksum));
+                    ((o->mode != MODE_VEC && o->mode != MODE_BULK) ||
+                     (o->mode == MODE_VEC && crep.vec_match && out->received_checksum == out->child_checksum) ||
+                     (o->mode == MODE_BULK && crep.vec_match && out->received_checksum == out->child_checksum &&
+                      out->limits_ok));
 
     rc = 0;
 
@@ -1310,6 +1538,11 @@ out:
         close(fd);
     }
     if (region != MAP_FAILED) munmap(region, REGION_BYTES);
+    if (bulk_map != NULL)
+    {
+        if (o->cold) munmap(bulk_map, bulk_bytes);
+        else free(bulk_map);
+    }
     if (shmfd >= 0) close(shmfd);
     shm_unlink(name);
     free(lat);
@@ -1322,16 +1555,20 @@ static void
 print_json(const Options *o, unsigned rep, const Result *r)
 {
     printf("{\"mode\":\"%s\",\"width\":%llu,\"real_bytes\":%u,\"fpstate_size\":%u,\"format\":%u,"
+           "\"cold\":%s,\"cold_bytes\":%llu,\"cold_stride\":%llu,\"page_bytes\":%u,"
            "\"rep\":%u,\"reps\":%u,\"calls\":%llu,\"warmup\":%llu,\"errors\":%llu,\"bytes_per_call\":%llu,"
            "\"seconds\":%llu.%09llu,\"calls_per_second\":%llu,\"gb_per_second\":%llu.%03llu,"
            "\"us_per_call_p50\":%llu.%03llu,\"us_per_call_p99\":%llu.%03llu,\"gaps\":%llu,"
            "\"producer_cpu_s\":%llu.%06llu,\"consumer_cpu_s\":%llu.%06llu,\"child_cpu_us\":%llu,"
            "\"checksum\":%llu,\"received_checksum\":%llu,\"child_checksum\":%llu,"
            "\"leaf_calls\":%llu,\"leaf_checksum\":%llu,\"gpr_checksum\":%llu,\"child_gpr_checksum\":%llu,"
-           "\"vec_runs\":%llu,\"vec_bad\":%llu,\"child_vec_match\":%s,\"child_gpr_match\":%s,"
-           "\"child_poll_iters\":%llu,\"child_exit_ok\":%s,\"verified\":%s}\n",
-           mode_name(o->mode), (unsigned long long)(o->mode == MODE_VEC ? o->width : 0), r->real_bytes,
-           r->fpstate_size, r->format, rep, o->reps,
+           "\"vec_runs\":%llu,\"vec_bad\":%llu,\"child_vec_match\":%s,\"child_gpr_match\":%s,\"child_seq_match\":%s,"
+           "\"limits_ok\":%s,\"child_poll_iters\":%llu,\"child_exit_ok\":%s,\"verified\":%s}\n",
+           mode_name(o->mode), (unsigned long long)((o->mode == MODE_VEC || o->mode == MODE_BULK) ? o->width : 0),
+           r->real_bytes, r->fpstate_size, r->format,
+           o->cold ? "true" : "false", (unsigned long long)r->cold_bytes, (unsigned long long)r->cold_stride,
+           r->page_bytes ? r->page_bytes : (uint32_t)sysconf(_SC_PAGESIZE),
+           rep, o->reps,
            (unsigned long long)r->calls, (unsigned long long)r->warmup, (unsigned long long)r->errors,
            (unsigned long long)r->bytes_per_call, (unsigned long long)(r->wall_ns / 1000000000ull),
            (unsigned long long)(r->wall_ns % 1000000000ull), (unsigned long long)r->calls_per_second,
@@ -1346,7 +1583,9 @@ print_json(const Options *o, unsigned rep, const Result *r)
            (unsigned long long)r->leaf_calls, (unsigned long long)r->leaf_checksum,
            (unsigned long long)r->gpr_checksum, (unsigned long long)r->child_gpr_checksum,
            (unsigned long long)r->vec_runs, (unsigned long long)r->vec_bad, r->child_vec_match ? "true" : "false",
-           r->child_gpr_match ? "true" : "false", (unsigned long long)r->child_poll_iters,
+           r->child_gpr_match ? "true" : "false", r->child_seq_match ? "true" : "false",
+           (o->mode == MODE_BULK ? r->limits_ok : 1) ? "true" : "false",
+           (unsigned long long)r->child_poll_iters,
            r->child_exit_ok ? "true" : "false", r->verified ? "true" : "false");
     fflush(stdout);
 }
@@ -1354,8 +1593,9 @@ print_json(const Options *o, unsigned rep, const Result *r)
 static void
 print_human(const Options *o, unsigned rep, const Result *r)
 {
-    fprintf(stderr, "%s rep=%u/%u width=%llu calls=%llu p50=%llu.%03lluus p99=%llu.%03lluus calls/s=%llu GB/s=%llu.%03llu verified=%s\n",
-            mode_name(o->mode), rep, o->reps, (unsigned long long)o->width, (unsigned long long)r->calls,
+    fprintf(stderr, "%s%s rep=%u/%u width=%llu calls=%llu p50=%llu.%03lluus p99=%llu.%03lluus calls/s=%llu GB/s=%llu.%03llu verified=%s\n",
+            mode_name(o->mode), o->cold ? " (cold)" : "", rep, o->reps, (unsigned long long)o->width,
+            (unsigned long long)r->calls,
             (unsigned long long)(r->ns_p50 / 1000ull), (unsigned long long)(r->ns_p50 % 1000ull),
             (unsigned long long)(r->ns_p99 / 1000ull), (unsigned long long)(r->ns_p99 % 1000ull),
             (unsigned long long)r->calls_per_second, (unsigned long long)(r->gbps_milli / 1000ull),
@@ -1425,6 +1665,7 @@ selftest(const Options *o)
 {
     Options oplain = *o;
     Options ovec   = *o;
+    Options obulk  = *o;
     Result  r;
     char    err[256];
     int     failed = 0;
@@ -1437,6 +1678,12 @@ selftest(const Options *o)
     ovec.count   = 64;
     ovec.warmup  = 8;
     ovec.reps    = 1;
+    obulk.mode   = MODE_BULK;
+    obulk.width  = 4096; /* the largest length the one-page arena accepts */
+    obulk.count  = 64;
+    obulk.warmup = 8;
+    obulk.reps   = 1;
+    obulk.cold   = false;
 
     if (run_one(&oplain, 1, &r, err, sizeof err) != 0 || !r.verified)
     {
@@ -1462,6 +1709,18 @@ selftest(const Options *o)
                (unsigned long long)r.vec_runs, (unsigned long long)(r.ns_p50 / 1000ull),
                (unsigned long long)(r.ns_p50 % 1000ull), (unsigned long long)r.checksum);
     }
+
+    if (run_one(&obulk, 1, &r, err, sizeof err) != 0 || !r.verified)
+    {
+        printf("FAIL bulk (width %llu): %s\n", (unsigned long long)obulk.width, err[0] ? err : "unverified");
+        failed = 1;
+    }
+    else
+    {
+        printf("PASS bulk: %llu-byte payload, %llu.%03llu us p50, page limit %u B enforced, checksum %llu\n",
+               (unsigned long long)obulk.width, (unsigned long long)(r.ns_p50 / 1000ull),
+               (unsigned long long)(r.ns_p50 % 1000ull), r.page_bytes, (unsigned long long)r.checksum);
+    }
     fflush(stdout);
     return failed ? 1 : 0;
 }
@@ -1472,14 +1731,19 @@ static void
 usage(void)
 {
     fprintf(stderr,
-            "usage: fpvec --mode plain|vec|xsave [options]\n"
+            "usage: fpvec --mode plain|vec|bulk|xsave [options]\n"
             "       fpvec --selftest [--width N] [--device PATH]\n"
             "\n"
             "  --mode plain   72 B GPR call through /dev/regipcvec (REGIPC_IOC_CALL)\n"
             "  --mode vec     the vector call (REGIPC_IOC_CALL_V); --width must match the\n"
             "                 module parameter the module was loaded with\n"
+            "  --mode bulk    the copy call (REGIPC_IOC_CALL_B): --width plain payload bytes\n"
+            "                 from a caller buffer, copied by the module into the arena\n"
             "  --mode xsave   the no-root userspace proxy: xsave+xrstor of the AVX-512 state\n"
-            "  --width N      vector bytes per call: 0, 256, 1024 or 4096 (default 1024)\n"
+            "  --width N      vec: vector bytes per call (0, 256, 1024 or 4096); bulk: payload\n"
+            "                 bytes per call (0..4096, the arena is one page); default 1024\n"
+            "  --cold         bulk only: read the payload from a >L3 mapping walked with a\n"
+            "                 64 KiB stride, instead of a cache-hot buffer\n"
             "  --count N      measured calls per rep (default 200000)\n"
             "  --warmup N     warm-up calls (default 1000)\n"
             "  --reps R       reps, one JSON line each (default 1)\n"
@@ -1531,6 +1795,7 @@ main(int argc, char **argv)
         {
             if (strcmp(v, "plain") == 0) o.mode = MODE_PLAIN;
             else if (strcmp(v, "vec") == 0) o.mode = MODE_VEC;
+            else if (strcmp(v, "bulk") == 0) o.mode = MODE_BULK;
             else if (strcmp(v, "xsave") == 0) o.mode = MODE_XSAVE;
             else
             {
@@ -1541,9 +1806,10 @@ main(int argc, char **argv)
         }
         else if (strcmp(a, "--width") == 0 && v != NULL)
         {
-            if (parse_u64(v, &o.width) != 0 || (o.width != 0 && o.width != 256 && o.width != 1024 && o.width != 4096))
+            if (parse_u64(v, &o.width) != 0 || o.width > 4096)
             {
-                fprintf(stderr, "fpvec: --width must be 0, 256, 1024 or 4096\n");
+                fprintf(stderr, "fpvec: --width must be 0..4096 (vec: only the module's "
+                                "0/256/1024/4096 points; bulk: up to one page)\n");
                 return 2;
             }
             i++;
@@ -1589,6 +1855,8 @@ main(int argc, char **argv)
         }
         else if (strcmp(a, "--json") == 0)
             o.json = true;
+        else if (strcmp(a, "--cold") == 0)
+            o.cold = true;
         else if (strcmp(a, "--selftest") == 0)
             o.selftest = true;
         else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0)
@@ -1607,6 +1875,11 @@ main(int argc, char **argv)
     if (o.mode == MODE_NONE)
     {
         usage();
+        return 2;
+    }
+    if (o.cold && o.mode != MODE_BULK)
+    {
+        fprintf(stderr, "fpvec: --cold is a bulk-mode option\n");
         return 2;
     }
     if (o.mode == MODE_XSAVE) return run_xsave(&o);

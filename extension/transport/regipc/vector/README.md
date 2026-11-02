@@ -6,13 +6,16 @@ separately named module (`regipcvec`, its own `/dev/regipcvec`) implements
 and `fpvec.c` measures what that costs. The loaded ABI 2 `/dev/regipc` is left
 untouched. Nothing here is committed.
 
-*Status: both halves build clean. The module run is **pending** because this
-machine has no cached `sudo` credential (`sudo -n` fails with "a password is
-required"); per the experimental rules nothing was prompted and nothing was
-worked around. The userspace proxy — the FP save/restore floor — **was**
-measured, and it already answers most of the question; its numbers and the
-projections built on them are below, with the exact two commands to finish the
-module table by hand.*
+*Status: all three code paths build clean (plain, vec, bulk). The module run is
+**pending** because this machine has no cached `sudo` credential (`sudo -n`
+fails with "a password is required"); per the experimental rules nothing was
+prompted and nothing was worked around. The userspace proxy — the FP
+save/restore floor — **was** measured, and it already answers most of the
+question; its numbers and the projections built on them are below, with the
+exact two commands to finish the module table by hand. The copy path
+(`CALL_B`, pointer + length through `copy_from_user`) is built and wired into
+the same sweep; its session is pending on this machine for the same reason —
+its section carries the two commands and the decision rule it will settle.*
 
 ---
 
@@ -20,9 +23,11 @@ module table by hand.*
 
 | file | what it is |
 |---|---|
-| `regipcvec.c` | the module: ioctls 1..5 are the ABI 2 contract unchanged (`REGISTER`, `PAIR`, `CALL`, `STATS`, `QUIT`), plus `REGIPC_IOC_CALL_V = _IO('c', 6)` and `REGIPC_IOC_VINFO = _IOR('c', 7, ...)`. `CALL_V` runs the same leaf bookkeeping as `CALL`, then `kernel_fpu_begin()` saves the caller's live vector state into its task's fpstate and `width` bytes of it are copied into the callee's pinned buffer, then `kernel_fpu_end()`. |
-| `Makefile` | kbuild (`KDIR ?= /lib/modules/$(uname -r)/build`) + the userspace program + `load`/`unload`/`sweep`/`plain`/`xsave`/`selftest` targets. `load`/`unload` use `sudo -n` and fail with the hand commands; they never prompt. |
-| `fpvec.c` | the two-process measurement program: parent = producer/caller, forked child = callee (no threads). Modes `--mode plain`, `--mode vec --width N`, `--mode xsave`, `--selftest`. One JSON object per run on stdout. |
+| `regipcvec.c` | the module: ioctls 1..5 are the ABI 2 contract unchanged (`REGISTER`, `PAIR`, `CALL`, `STATS`, `QUIT`), plus `REGIPC_IOC_CALL_V = _IO('c', 6)`, `REGIPC_IOC_VINFO = _IOR('c', 7, ...)` and `REGIPC_IOC_CALL_B = _IO('c', 8)`. `CALL_V` runs the same leaf bookkeeping as `CALL`, then `kernel_fpu_begin()` saves the caller's live vector state into its task's fpstate and `width` bytes of it are copied into the callee's pinned buffer, then `kernel_fpu_end()`. `CALL_B` runs the same bookkeeping, then `copy_from_user()`s a caller-supplied buffer into the same arena page; no FPU state is touched. Both publish the leaf counter with a release store after their bytes are in place. |
+| `Makefile` | kbuild (`KDIR ?= /lib/modules/$(uname -r)/build`) + the userspace program + `load`/`unload`/`sweep`/`bulk`/`bulk-sweep`/`plain`/`xsave`/`selftest` targets. `load`/`unload`/`sweep`/`bulk-sweep` use `sudo -n` and fail with the hand commands; they never prompt. |
+| `fpvec.c` | the two-process measurement program: parent = producer/caller, forked child = callee (no threads). Modes `--mode plain`, `--mode vec --width N`, `--mode bulk --width N [--cold]`, `--mode xsave`, `--selftest`. One JSON object per run on stdout. |
+| `chart.py` | the figure: p50 per call, calls/s and GB/s for the vector channel and the copy channel (hot and cold), all from the jsonl records. |
+| `table.py` | prints the two README tables from `sweep-bulk.jsonl` — medians of the per-run fields, nothing typed by hand. |
 | `README.md` | this file. |
 
 ### The two design points worth knowing
@@ -90,7 +95,9 @@ Nothing below needed root:
 
 `--selftest` fails with `FAIL plain: /dev/regipcvec: No such file or directory
 (is the regipcvec module loaded?)` until the module is loaded — the selftest is
-meaningless without the device and was not run.
+meaningless without the device and was not run. (The copy-path session is at the
+bottom of this file: `sudo insmod ... width=1024 mode=0666` then
+`make -C ... bulk-sweep`, which writes `sweep-bulk.jsonl`.)
 
 ## Measured now: the userspace proxy (the floor of the FP cost)
 
@@ -292,4 +299,203 @@ What the numbers point at instead: the caller can `xsave` its own state into a
 shared page in ~52 ns and issue a payload-free call, avoiding the kernel's 130 ns
 entirely - which is the architecture fastpostgres already has (the segment moves
 the bytes at memcpy speed, the call moves the notification at 0.5 µs).
+
+---
+
+# The copy path (`CALL_B`): pointer + length instead of the register file
+
+## The hypothesis this section tests
+
+The vector path widens the register file: measured, it pays **+130 ns of FP
+save/restore per call** (2456 B of real AVX-512 state, 3.3 GB/s of real state /
+5.5 GB/s of arena at the widest point). The hypothesis:
+
+> Instead of widening the register file, the caller passes a **pointer and a
+> length** in the carriers and the ioctl handler does `copy_from_user()` of that
+> buffer straight into the callee's pinned page. No FP save/restore (so no
+> 130 ns tax), no asm stub needed to hold values in XMM, any length up to the
+> page, and the caller writes ordinary C. **Estimated ~4-5 GB/s at 4 KB, which
+> would beat the vector path.**
+
+## What was built
+
+`REGIPC_IOC_CALL_B = _IO('c', 8)`: the ABI 2 leaf bookkeeping unchanged, then a
+copy. The nine carriers are a descriptor:
+
+| carrier | field | meaning |
+|---|---|---|
+| w[0] | `flags` | reserved, must be 0 (nonzero → `-EINVAL`) |
+| w[1] | `user_ptr` | the caller's source buffer (plain C memory) |
+| w[2] | `length` | bytes to copy, 0..`PAGE_SIZE` |
+| w[3] | `seq` | caller's sequence number (carried in the leaf's `values[3]`) |
+| w[4] | `dst_off` | destination offset inside the callee's arena page |
+| w[5..8] | reserved | must be 0, else `-EINVAL` |
+
+`length + dst_off <= PAGE_SIZE` (the arena is exactly one page, so **the biggest
+length the module accepts is 4096 B**; 4097 is refused before anything is
+touched, and `fpvec` probes that on every bulk run — the `limits_ok` field).
+`access_ok` is implicit in `copy_from_user()`; a failed copy returns `-EFAULT`,
+and because the copy happens **before** the leaf runs, a failed copy does not
+move the leaf counter at all — the callee never observes a published call whose
+payload is incomplete. Ordering is copy first, then a **release store** of the
+leaf counter (the leaf's `values`/`checksum` are written before it too). The
+handler runs in the caller's own process context at process level, with no
+spinlock held, so the copy may fault and sleep, which an ioctl may do.
+
+No FPU: `CALL_B` never calls `kernel_fpu_begin()`. The caller side is the same
+`regipc_handoff()` the plain ABI 2 call uses — no vector register touches, no
+`-mgeneral-regs-only` stub, no `zmm` clobbers.
+
+`fpvec --mode bulk --width N [--cold]` sends an N-byte buffer through it with
+the same JSON record as the other modes plus
+`cold`/`cold_bytes`/`cold_stride`/`page_bytes`/`child_seq_match`/`limits_ok`.
+The verification chains are the vector ones: the caller's expected fold, the
+parent's fold of the shared arena, and the **callee's own fold of what it
+received** must all agree; the leaf counter, its checksum and `values[3]` (the
+`seq`) are checked too. `--cold` allocates a **256 MiB** mapping (8× this
+machine's 32 MiB L3), fills it with a repeating 64-byte period and walks it with
+a **64 KiB stride**, so every call reads addresses that have long been evicted;
+every slice holds the same bytes, so one expected fold covers every call — and
+because a failed copy returns `-EFAULT` without publishing (never a partial
+one) and the leaf counter must equal `warmup + calls` exactly, a verified run
+means every call copied and the last one is byte-checked through the arena.
+
+## Exact commands
+
+Build (done, clean — module with `W=1`, no warnings):
+
+```sh
+make -C extension/transport/regipc/vector            # module + fpvec
+make -C extension/transport/regipc/vector module W=1
+```
+
+The session (this machine: `sudo -n` is **not** cached, so nothing below was
+run and the two tables are pending):
+
+```sh
+sudo insmod /home/carlos/Projects/fastpostgres/extension/transport/regipc/vector/regipcvec.ko width=1024 mode=0666
+make -C /home/carlos/Projects/fastpostgres/extension/transport/regipc/vector bulk-sweep
+```
+
+`bulk-sweep` is one session, one file: the bulk table first (256/1024/4096 B,
+hot then cold, 3 reps each — `CALL_B`'s length is per call, so a single module
+load serves all of it), then the vector points (0/256/1024/4096) reloaded per
+width **with the same binary**, so the two tables are comparable. It traps an
+`rmmod` on exit and writes every raw JSON line to `sweep-bulk.jsonl`. It uses
+`sudo -n` throughout and never prompts; `make bulk` runs just the copy table
+against an already-loaded module without using privileges. The module is the
+variant's own `/dev/regipcvec`; the loaded ABI 2 `/dev/regipc` is never touched.
+
+After the session, the two tables are one command away — medians of the
+per-run fields, nothing typed:
+
+```sh
+python3 extension/transport/regipc/vector/table.py   # prints both markdown tables from sweep-bulk.jsonl
+python3 extension/transport/regipc/vector/chart.py   # the figure, also from sweep-bulk.jsonl
+```
+
+## Status: the numbers are pending on this machine
+
+The build is complete and the sweep is wired, but `sudo -n` is not cached here
+("a password is required"), and per the experimental rules nothing was prompted
+and nothing was worked around. The two tables below are the ones `bulk-sweep`
+fills; their raw lines will live in **`sweep-bulk.jsonl`** beside `sweep.jsonl`
+(which is where the vector table further up came from). Table 2 is a
+same-session re-run of the vector points — the table further up is from an
+earlier session and is *not* the comparison basis.
+
+### Table 1 — the copy channel, from `sweep-bulk.jsonl` (mode `bulk`)
+
+| length | p50 hot | p50 cold | calls/s hot | calls/s cold | GB/s hot | GB/s cold | verified |
+|---|---|---|---|---|---|---|---|
+| 256 B | pending | pending | pending | pending | pending | pending | pending |
+| 1024 B | pending | pending | pending | pending | pending | pending | pending |
+| 4096 B (the largest the one-page arena accepts) | pending | pending | pending | pending | pending | pending | pending |
+
+### Table 2 — the vector channel re-run in the same session, from `sweep-bulk.jsonl` (mode `vec`)
+
+| width | real bytes | p50 | p99 | calls/s | arena GB/s | verified |
+|---|---|---|---|---|---|---|
+| 0 (FP tax only) | 0 | pending | pending | pending | - | pending |
+| 256 | 256 | pending | pending | pending | pending | pending |
+| 1024 | 1024 | pending | pending | pending | pending | pending |
+| 4096 | 2456 | pending | pending | pending | pending | pending |
+
+### The chart
+
+`chart.py` was **extended into one figure** (not a second chart): it now draws
+three panels — p50 per call, calls/s, GB/s — with the vector channel and the
+copy channel (hot and cold) grouped on the same width axis, so the comparison
+is read left to right at each width instead of flipping between figures. The
+GB/s panel also keeps the vector channel's *real AVX-512 bytes* series (arena
+rate scaled by `real_bytes/width`, all from the record), because that is the
+number the copy path has to beat. Everything is a median of the per-run JSON
+fields from `sweep-bulk.jsonl` (default: `sweep-bulk.jsonl` if it exists, else
+`sweep.jsonl`); no number is typed into the code. `make chart` writes
+`regipc-copy-vs-vector.png` **inside this experiment's directory** (the target
+deliberately does not write into `docs/`).
+
+## How the two tables answer the hypothesis
+
+- **Per-call cost.** At equal width, `vec p50 − bulk p50` is the FP tax the
+  copy path removes. The vector fit puts that intercept at +130 ns **whatever
+  the width** (it is paid even at width 0, where it carries nothing); the copy
+  path's intercept is the plain call plus `copy_from_user` entry work, and its
+  slope is the copy itself. The userspace `memcpy` proxy already measured the
+  floor of the byte cost: 2.87 ns at 256 B, 9.55 ns at 1024 B, 35.51 ns at
+  4096 B (hot); `copy_from_user` is the same kernel copy plus fault-safety
+  entry, so the bulk p50 at 4096 should sit near `0.521 µs + copy`, not near
+  the vec 0.711 µs.
+- **Bandwidth.** The copy path's payload is **all real bytes** (no zero fill),
+  so its GB/s at 4096 B is directly comparable to the vector channel's
+  **3.33 GB/s of real AVX-512 state** (5.548 GB/s of arena). **The copy path
+  beats the vector path if Table 1's 4096 B hot GB/s is above 3.33** — and the
+  hypothesis predicts ~4-5 GB/s.
+- **The xsave-vector comparison.** The FP save/restore the vector path pays is
+  measured twice: the module fit (+130 ns/call) and the rootless userspace
+  proxy (`xsave64` 52 ns + `xrstor64` 120 ns = **170 ns** for mask 0x2e7,
+  2440 B). `CALL_B` pays **zero** of it: there is no `kernel_fpu_begin`, no
+  task fpstate, no `x86_task_fpu()` macro whose hard-coded `task_struct` layout
+  is an ABI hazard. Its fixed costs are validation plus the copy.
+- **What the cold column is for.** A caller that just produced a payload owns
+  it in cache, so the hot column is the realistic one; the cold column is the
+  honest upper bound for a large or streaming source (256 MiB walked with a
+  64 KiB stride — every slice from DRAM). If even the cold 4096 B point stays
+  above 3.33 GB/s, the vector design has no bandwidth argument left.
+
+## What it would mean for an ABI v3
+
+If the tables come back as the hypothesis predicts, the shape to standardize is
+**`(user_ptr, length, dst_off)` copy**, not FP state:
+
+- no `kernel_fpu_begin/end` — the 130 ns tax disappears, and with it the
+  dependency on the task fpstate layout (`x86_task_fpu()` is a macro that
+  hard-codes `task_struct`, an ABI hazard a real v3 must not inherit);
+- no asm stub, no `-mgeneral-regs-only` translation unit, no `zmm` clobber
+  constraints — the caller is ordinary C, and the payload can be any buffer the
+  caller already has (a batch page, a wire buffer), not just registers the
+  compiler happened to leave live;
+- any length up to the page, not the 2456 B of real AVX-512 state;
+- ordering and error handling are simple and testable: validate, copy
+  (`-EFAULT` on fault), then publish with a release store.
+
+The FP state design's one advantage is that the payload is already in the
+registers (no source buffer to write), which matters only when the bytes exist
+only in registers — for a database's batches they exist in memory anyway. On
+the evidence available the copy path should beat the vector path's *real-state*
+rate by construction; whether it clears 3.33 GB/s at 4096 B, and what each
+length actually costs, is exactly what the two pending tables will read. Until
+they exist, **the verdict on the copy path is PENDING on this machine**; the
+two commands above produce it.
+
+**Provisional decision rule** (what the measured tables will be read against):
+
+1. bulk p50 at 256/1024/4096 vs vec p50 at the same widths — the difference is
+   the FP tax removed, floor +130 ns;
+2. bulk GB/s at 4096 (hot) vs **3.33 GB/s** (vec real state) and vs
+   **5.55 GB/s** (vec arena) — above which the copy path is the better
+   transport, with no FPU and no asm;
+3. bulk GB/s cold at 4096 vs the same thresholds — whether the win survives a
+   cache-cold source.
+
 
