@@ -128,13 +128,16 @@ bulk-sweep: module fpvec
 		$(SUDO) rmmod regipcvec 2>/dev/null || true; \
 		$(SUDO) insmod $(KO) width=$(WIDTH) mode=$(MODE); \
 		for w in $(BULK_WIDTHS); do \
-			./fpvec --mode bulk --width $$w --reps $(REPS) --count $(COUNT) --warmup $(WARMUP); \
-			./fpvec --mode bulk --width $$w --cold --reps $(REPS) --count $(COUNT) --warmup $(WARMUP); \
+			./fpvec --mode bulk --width $$w --reps $(REPS) --count $(COUNT) --warmup $(WARMUP) \
+				|| echo "sweep: bulk width $$w hot FAILED (see the line above)" >&2; \
+			./fpvec --mode bulk --width $$w --cold --reps $(REPS) --count $(COUNT) --warmup $(WARMUP) \
+				|| echo "sweep: bulk width $$w cold FAILED (see the line above)" >&2; \
 		done; \
 		for w in $(VEC_WIDTHS); do \
 			$(SUDO) rmmod regipcvec 2>/dev/null || true; \
 			$(SUDO) insmod $(KO) width=$$w mode=$(MODE); \
-			./fpvec --mode vec --width $$w --reps $(REPS) --count $(COUNT) --warmup $(WARMUP); \
+			./fpvec --mode vec --width $$w --reps $(REPS) --count $(COUNT) --warmup $(WARMUP) \
+				|| echo "sweep: vec width $$w FAILED (see the line above)" >&2; \
 		done; \
 	} | tee sweep-bulk.jsonl
 
