@@ -8,7 +8,11 @@ results and keeps them fresh from the origin's logical replication stream.
 
 The short answer is that they optimize different stages, so the ranking depends
 on the shape of the result — and on this machine, with this data, one of them
-loses to *not caching at all*.
+loses to *not caching at all*. The same two players, given the **same memory
+budget** instead of their own defaults, are measured in
+[the section below](#the-same-memory-budget-on-both-sides): the ranking holds
+where the cache fits, and below its own footprint the cache stops existing while
+the ring keeps reading.
 
 ![fast-postgres vs PgCache: the full scan against the aggregate](../assets/pgcache-read.png)
 
@@ -112,6 +116,65 @@ The two regimes, in one line each:
 - **The pass-through tax is the hop and the socket.** Views are never cached:
   1.80M rows/s against 5.86M on the ring at 1M rows.
 
+## The same memory budget on both sides
+
+![fast-postgres vs PgCache under one budget: the sweep](../assets/pgcache-memory.png)
+
+(`just pgcache-memory-charts` renders it from the log.)
+
+Everything above runs each side at its own defaults — PgCache with 80% of the
+machine's RAM as its budget, the ring with a fixed 1 GiB per segment — which says
+what the cache does when memory is not the constraint, not what the memory buys.
+So the same two players run again under one budget M, spent as:
+
+| | M is spent as |
+|---|---|
+| `fastpostgres` | the transfer buffer: two alternating data segments of M/2 (`FASTPOSTGRES_SEGMENT_BYTES`), so a stream's shared memory stays within M, plus the fixed 8 MiB control ring |
+| `pgcache` | the cache's own memory: the proxy container is capped at M (`--memory`, with `--memory-swap` equal to it) and PgCache keeps `MEMORY_LIMIT=M` and `MEMO_CACHE_SIZE=M` inside it |
+
+`just pgcache-memory-bench` sweeps M and proves each cell from the two sides' own
+evidence: the segment bytes the worker really mapped and the timed reads that
+really took the ring (a read that fell back to libpq would fail the run), and the
+proxy's `pgcache_cache_memory_*` gauges — the budget it resolved, what it is
+using, what is registered, whether registration is throttled. The record is
+[`fastpostgres-vs-pgcache-memory.log`](fastpostgres-vs-pgcache-memory.log):
+1M rows, the same table and the same output checks as above.
+
+| 1M rows, one read | ring, segments of M/2 | pgcache, capped at M |
+|---|---|---|
+| M = 8 MiB | scan 7.65M rows/s, aggregate 64.170 ms | **does not run**: the container is OOM-killed |
+| M = 64 MiB | scan 6.78M rows/s, aggregate 61.546 ms | **does not run**: the container is OOM-killed |
+| M = 256 MiB | scan 6.74M rows/s, aggregate 61.638 ms | scan 1.85M rows/s, aggregate 27.727 ms — budget 204.8 MiB, using 245.9 MB, registered 0, throttled 1, every rep a miss |
+| M = 1 GiB | scan 6.53M rows/s, aggregate 55.776 ms | scan 1.47M rows/s, aggregate 1.117 ms — budget 819.2 MiB, using 566 MB, registered 2, throttled 0, a hit |
+
+Four things fall out of it:
+
+- **A transfer buffer is a window; a cache budget is a working set.** The ring's
+  numbers move −15% across the whole sweep — 7.65M to 6.53M rows/s on the scan —
+  and that is cross-cell drift, not the buffer: the segment grows 4 MiB → 512 MiB
+  (128×) and every cell lands inside the run's own spread. One batch of this shape
+  is ~6–11 MB, and past a batch the ring is the executor's speed. The cache's
+  numbers move with M instead, because its bytes are results it can keep — once
+  its budget also covers the engine that keeps them.
+- **Below its own footprint, the cache does not exist.** PgCache is a proxy plus
+  an embedded PostgreSQL: at 8 and 64 MiB the container is OOM-killed before it
+  can serve anything. At 256 MiB it runs, but the budget it resolves (204.8 MiB,
+  80% of the cap by its own design) is under what it is already using (245.9 MB),
+  so registration is throttled, nothing registers, the warm phase never settles
+  (111 reads / 121 s on the scan, 228 / 120 s on the aggregate) and every timed
+  rep is a miss. The ring, handed the same bytes, is unchanged.
+- **Where the cache fits, the ranking is the one above.** At 1 GiB the cache
+  reproduces the default-knob run: the scan at 1.47M rows/s against the ring's
+  6.53M — the same 4.3–4.4× — and the aggregate at 1.117 ms against 55.776 ms,
+  ~50×, matching the 1.228/62.533 of the committed log. Budget does not change
+  which side wins which shape; it changes whether the cache can play.
+- **Even starved, the proxy's miss path is not the ring's execution.** At 256 MiB
+  every rep is counted a *miss*, yet the aggregate comes back at 27.727 ms against
+  the ring's 61.638 ms for the same SQL. The log records what the counters said and
+  what the clock said; why a miss beats the ring's worker (the proxy's forward
+  path, the plan the origin picks when it is reached that way) is PgCache's to
+  explain, not this log's.
+
 ## What this does not say
 
 - One host, one container, one PostgreSQL 18, one shape family, one PgCache
@@ -139,6 +202,24 @@ The two regimes, in one line each:
 - The 1M-row numbers are 3 reps; the run is not repeated across boots the way
   `METHODOLOGY.md` characterizes the ADBC comparison, so treat these as one run
   family with the spread printed per row.
+- Of the same-budget run, specifically: the budget M covers the ring's data
+  segments and, on the cache side, the container. It does **not** cover the
+  client's own memory — at 1M rows the reader's object arena held ~1.2 GB of
+  Python objects on both sides (the log's `rss_bytes` says so per cell) — nor the
+  8 MiB control ring the client maps per stream, nor the cache's disk tier, which
+  is where a cached result actually lives here (the memory budget only decides
+  what may be registered). PgCache's own budget resolves to 80% of the cap by its
+  design, so the cache plays with a little less than the ring's M; its per-cell
+  evidence line prints both numbers.
+- The in-process memo (`MEMO_CACHE_SIZE`) is set to M in every cell and held
+  nothing in any of them (`memo_bytes` 0, `memo_hits` 0): the hits measured here
+  are served from the cache database, so the memo never became a factor.
+- The sweep is four budgets, one shape, 1M rows, three reps per cell, one run.
+  The ring's own line drifts ~15% from the first cell to the last (7.65M → 6.53M
+  rows/s on the scan) — the page cache's state differs between the cell before
+  the proxy ever ran and the ones after it populated a 1M-row copy — so read the
+  ranking, not the digits. The cache's floor is bracketed by the ladder, not
+  bisected: it does not run at 64 MiB and does run at 256 MiB.
 
 ## What follows from it
 
@@ -156,4 +237,9 @@ Reproduce with:
 just pgcache-bench            # 100K and 1M, writes nothing; redirect for a log
 just pgcache-bench --quick    # 1K rows, one rep: a smoke run
 just pgcache-bench 100000 1000000 10000000
+
+just pgcache-memory-bench                        # 1M rows at 8 MiB / 64 MiB / 256 MiB / 1 GiB
+just pgcache-memory-bench --quick                # 10K rows, 8 MiB and 256 MiB
+just pgcache-memory-bench --rows=1000000 --budgets="16MiB 512MiB"
+just pgcache-memory-charts                       # the sweep, from the committed log
 ```

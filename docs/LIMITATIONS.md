@@ -131,5 +131,16 @@ still ships every row through the socket and builds every Python object, while
 this path never builds them twice. Method and caveats in
 [`PG-CACHE.md`](PG-CACHE.md).
 
+**"Would equal memory change that?"** It was measured, not argued
+(`just pgcache-memory-bench`, the record in
+[`fastpostgres-vs-pgcache-memory.log`](fastpostgres-vs-pgcache-memory.log)): one
+budget M on both sides, the ring's transfer buffer against the cache's own
+memory. Where the cache fits, the ranking is the same — at 1 GiB, the aggregate
+is 1.117 ms against the ring's 55.776 ms and the scan 1.47M against 6.53M rows/s.
+What the budget bought the ring above ~one batch is nothing (its numbers are flat
+from an 8 MiB budget up, and its segments grow 128× across the sweep), while
+below ~256 MiB the cache's container is OOM-killed before it can serve, and at
+256 MiB its registration is throttled to nothing.
+
 **"Which numbers should I quote?"** The committed logs, not the README:
 `docs/fastpostgres-vs-arrow*.log`.

@@ -6,19 +6,18 @@ because the same number of bytes buys different things:
 
     left   the full scan, rows/s     delivery-bound: the ring is flat, the cache
                                      pays to ship the rows again - until its
-                                     budget stops it registering anything, and
-                                     its line falls to the forward line
+                                     budget stops it registering anything at all
     right  count/sums, ms/read (log) execution-bound: a cache hit does no work,
                                      so the cache is far below the ring wherever
-                                     its budget lets it hold the entry at all
+                                     its budget lets it hold the entry
 
-The budget is the schema of the log: each `# budget M` section runs the ring
-with a segment of M/2 and the cache in a container capped at M. The dashed line
-on the left is the pass-through workload - the same rows through the proxy with
-no cache in front of them - so the cache's own line can be read against what
-forwarding alone costs. Where the log's evidence says the cache's registration
-was throttled, the budget is shaded: on those bytes the cache cannot hold
-anything.
+The budget is the log's own schema: each `# budget M` section runs the ring with
+a transfer segment of M/2 and the cache in a container capped at M. The dashed
+line on the left is the pass-through workload - the same rows through the proxy
+with no cache in front of them - so the cache's line can be read against what
+forwarding alone costs. The shaded budgets are the ones where the cache's own
+evidence says it held nothing (its container was OOM-killed, or nothing was
+registered): on those bytes it is a plain proxy.
 
 Usage:
     just pgcache-memory-charts                        plots the committed log
@@ -35,7 +34,7 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter, NullFormatter
+    import matplotlib.ticker as mticker
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
@@ -47,16 +46,14 @@ ACCENT = "#1f77b4"
 ORANGE = "#e1812c"
 GREY = "#9a9a9a"
 SHADE = "#f0f0f0"
-SERIES = (
-    ("fastpostgres", ACCENT, "fast-postgres (shm ring, M/2 per segment)"),
-    ("pgcache", ORANGE, "psycopg 3 → PgCache (capped at M)"),
-)
 
 BUDGET_RE = re.compile(r"^# budget ([\d.]+) (KiB|MiB|GiB), segment ")
+# the pgcache cell is "-" at a budget the cache cannot run at: the ring's own
+# number is still measured there, and it is the interesting half of a flat line
 ROW_RE = re.compile(
     r"^\s+(large|small|through)\s+"
     r"fastpostgres\s+([\d.]+)(M| ms)\s+"
-    r"pgcache\s+([\d.]+)(M| ms)"
+    r"pgcache\s+(?:-|([\d.]+)(M| ms))"
 )
 RING_RE = re.compile(
     r"^\s+ring\s+seg_bytes=(?P<seg_bytes>\d+) segments=(?P<segments>\d+) "
@@ -77,8 +74,7 @@ ENV_KEYS = ("cpu", "postgres", "pgcache image", "git")
 
 
 def parse_units(value, unit):
-    scale = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}[unit]
-    return int(float(value) * scale)
+    return int(float(value) * {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}[unit])
 
 
 def parse(text):
@@ -96,10 +92,9 @@ def parse(text):
         m = ROW_RE.match(line)
         if m and budget is not None:
             workload = m.group(1)
-            values = {}
-            for i, player in enumerate(("fastpostgres", "pgcache")):
-                value, unit = float(m.group(2 + 2 * i)), m.group(3 + 2 * i)
-                values[player] = value * 1e6 if unit == "M" else value  # rows/s or ms
+            values = {"fastpostgres": float(m.group(2)) * (1e6 if m.group(3) == "M" else 1)}
+            if m.group(4):
+                values["pgcache"] = float(m.group(4)) * (1e6 if m.group(5) == "M" else 1)
             data[budget][workload] = values
             evidence[budget][workload] = {}
             continue
@@ -115,7 +110,7 @@ def parse(text):
     return data, evidence, env
 
 
-def fmt_budget(v, _pos=None):
+def fmt_budget(v):
     if v >= 1024**3:
         return f"{v / 1024**3:g} GiB"
     if v >= 1024**2:
@@ -123,39 +118,53 @@ def fmt_budget(v, _pos=None):
     return f"{v / 1024:g} KiB"
 
 
-def fmt_rows(v, _pos=None):
+def fmt_rows(v):
     if v >= 1e6:
-        return f"{v / 1e6:g}M"
+        return f"{v / 1e6:.2f}M"
     if v >= 1e3:
-        return f"{v / 1e3:g}K"
+        return f"{v / 1e3:.0f}K"
     return f"{v:g}"
 
 
-def series(ax, budgets, data, workload, player, color, label, ls="-", marker="o", width=1.8):
-    xs = [b for b in budgets if workload in data[b]]
+def line(ax, budgets, data, workload, player, color, ls="-", marker="o", width=1.8, labels=True, dy=7):
+    """One player's line over the budgets where that player was measured."""
+    xs = [b for b in budgets if player in data[b].get(workload, {})]
     ys = [data[b][workload][player] for b in xs]
     if not xs:
-        return None
-    (line,) = ax.plot(xs, ys, color=color, linestyle=ls, marker=marker, markersize=4.5,
-                      linewidth=width, label=label, zorder=3)
-    return line
+        return
+    ax.plot(xs, ys, color=color, linestyle=ls, marker=marker, markersize=4.5,
+            linewidth=width, zorder=3)
+    if not labels:
+        return
+    for x, y in zip(xs, ys):
+        ax.annotate(fmt_rows(y) if workload != "small" else f"{y:g}", (x, y),
+                    textcoords="offset points", xytext=(0, dy),
+                    ha="center", va="bottom" if dy > 0 else "top",
+                    fontsize=6.5, color=color, zorder=5)
 
 
-def style(ax, ylabel, log_y=False):
+def style(ax, ticks, ylabel, log_y=False):
     ax.set_xscale("log", base=2)
-    ax.xaxis.set_major_formatter(FuncFormatter(fmt_budget))
-    ax.xaxis.set_minor_formatter(NullFormatter())
+    # tick where the budgets are, not where powers of two are: on a log axis the
+    # default locator's labels collide over a range this narrow
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([fmt_budget(b) for b in ticks], fontsize=8.5)
+    ax.xaxis.set_minor_formatter(mticker.NullFormatter())
     ax.set_xlabel("memory budget on both sides")
     ax.set_ylabel(ylabel)
     if log_y:
         ax.set_yscale("log")
-        ax.yaxis.set_minor_formatter(NullFormatter())
+        # and on a log y axis, 1-2-5 per decade: the measured values sit inside
+        # one decade, where the decade-only locator leaves no labels at all
+        ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=12))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_color("#cccccc")
     ax.tick_params(colors="#666666", length=0)
-    ax.margins(y=0.24, x=0.12)
+    ax.margins(y=0.26, x=0.12)
 
 
 def main():
@@ -174,61 +183,43 @@ def main():
     fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(11.0, 5.0))
 
     # the budgets where the cache held nothing at all: its container was
-    # OOM-killed, or every workload's own gauges reported nothing registered. On
+    # OOM-killed, or every workload in that cell reported nothing registered. On
     # those bytes it is a plain proxy, so its line there is the forward line - or
-    # absent entirely. A *throttled* cache that still holds the query under test
+    # absent entirely. A *throttled* cache that still held the query under test
     # is not shaded: the log's evidence lines carry that distinction.
     def empty(b):
         if evidence.get(b, {}).get("down"):
             return True
-        gauges = [evidence.get(b, {}).get(w, {}).get("cache") for w in data[b]]
+        gauges = [evidence[b].get(w, {}).get("cache") for w in data[b]]
         gauges = [g for g in gauges if g]
         return bool(gauges) and all(g["registered"] == 0 for g in gauges)
 
     empty_budgets = [b for b in budgets if empty(b)]
     for ax in (ax_scan, ax_agg):
         for b in empty_budgets:
-            ax.axvspan(b * 0.72, b * 1.38, color=SHADE, zorder=0)
-        style(ax, "rows/s" if ax is ax_scan else "ms/read", log_y=ax is ax_agg)
+            ax.axvspan(b * 0.78, b * 1.28, color=SHADE, zorder=0)
+        style(ax, budgets, "rows/s" if ax is ax_scan else "ms/read", log_y=ax is ax_agg)
     if empty_budgets:
         ax_scan.annotate(
             "shaded: the cache holds nothing at that budget\n"
             "(its container OOM-killed, or nothing registered)",
-            xy=(empty_budgets[0], 0.06), xycoords=("data", "axes fraction"), fontsize=7,
-            color="#888888", ha="center" if len(empty_budgets) > 1 else "left", zorder=4,
+            xy=(empty_budgets[0], 0.5), xycoords=("data", "axes fraction"), xytext=(6, 0),
+            textcoords="offset points", fontsize=7, va="center",
+            color="#888888", ha="left", zorder=4,
         )
 
-    ax_scan.yaxis.set_major_formatter(FuncFormatter(fmt_rows))
-    series(ax_scan, budgets, data, "large", "fastpostgres", ACCENT, None)
-    series(ax_scan, budgets, data, "large", "pgcache", ORANGE, None)
-    series(ax_scan, budgets, data, "through", "pgcache", GREY, None,
-           ls="--", marker="s", width=1.2)
+    ax_scan.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
+    line(ax_scan, budgets, data, "large", "fastpostgres", ACCENT)
+    # the cache's numbers sit just under the pass-through line on the scan panel:
+    # label them below the marker so the two do not have to share a line of text
+    line(ax_scan, budgets, data, "large", "pgcache", ORANGE, dy=-11)
+    line(ax_scan, budgets, data, "through", "pgcache", GREY, ls="--", marker="s", width=1.2,
+         labels=False)
     ax_scan.set_title("the full scan: n rows out, delivery-bound", fontsize=9.5)
 
-    ax_agg.yaxis.set_major_formatter(FuncFormatter(lambda v, _p=None: f"{v:g}"))
-    # a log axis whose data sits inside one decade gets no major ticks at all,
-    # so pin the ticks to the values actually measured
-    agg_values = sorted({data[b]["small"][p] for b in budgets if "small" in data[b]
-                         for p in ("fastpostgres", "pgcache")})
-    if agg_values:
-        ax_agg.set_yticks(agg_values)
-        ax_agg.set_yticklabels([f"{v:g}" for v in agg_values])
-    series(ax_agg, budgets, data, "small", "fastpostgres", ACCENT, None)
-    series(ax_agg, budgets, data, "small", "pgcache", ORANGE, None)
+    line(ax_agg, budgets, data, "small", "fastpostgres", ACCENT)
+    line(ax_agg, budgets, data, "small", "pgcache", ORANGE)
     ax_agg.set_title("count + two sums: one row out, execution-bound", fontsize=9.5)
-
-    # label the last point of each line: the number, and for the cache its
-    # resolved budget against the one it was asked for
-    for ax, workload, unit in ((ax_scan, "large", "M"), (ax_agg, "small", "ms")):
-        for player, color in (("fastpostgres", ACCENT), ("pgcache", ORANGE)):
-            xs = [b for b in budgets if workload in data[b]]
-            if not xs:
-                continue
-            last = xs[-1]
-            value = data[last][workload][player]
-            text = f"{value / 1e6:.2f}M rows/s" if unit == "M" else f"{value:.3f} ms"
-            ax.annotate(text, (last, value), textcoords="offset points", xytext=(4, 6),
-                        fontsize=7, color=color)
 
     handles = [
         plt.Line2D([], [], color=ACCENT, marker="o", markersize=4.5,
@@ -236,7 +227,7 @@ def main():
         plt.Line2D([], [], color=ORANGE, marker="o", markersize=4.5,
                    label="psycopg 3 → PgCache (capped at M)"),
         plt.Line2D([], [], color=GREY, linestyle="--", marker="s", markersize=4,
-                   label="the cache's pass-through row (no cache in front)"),
+                   label="the cache's pass-through row (left panel: no cache in front)"),
     ]
     fig.suptitle("the same memory budget on both sides: what each buys with the bytes",
                  fontsize=12.5, y=0.975)
@@ -252,14 +243,15 @@ def main():
     plt.close(fig)
     print(f"wrote {path}")
     for b in budgets:
-        cache = evidence.get(b, {}).get("large", {}).get("cache", {})
         ring = evidence.get(b, {}).get("large", {}).get("ring", {})
+        cache = evidence.get(b, {}).get("large", {}).get("cache", {})
         print(f"  budget {fmt_budget(b)}: ring seg {ring.get('seg_bytes', 0) / 1048576:g} MiB "
               f"x{ring.get('segments', 0)}, shm_reads {ring.get('shm_reads', 0)}/"
               f"{ring.get('shm_reps', 0)}; cache budget "
               f"{cache.get('budget_bytes', 0) / 1048576:g} MiB, memo "
               f"{cache.get('memo_bytes', 0) / 1048576:g} MiB, registered "
-              f"{cache.get('registered', 0)}, throttled {cache.get('throttled', 0)}")
+              f"{cache.get('registered', 0)}, throttled {cache.get('throttled', 0)}"
+              f"{', did not run' if evidence.get(b, {}).get('down') else ''}")
 
 
 if __name__ == "__main__":

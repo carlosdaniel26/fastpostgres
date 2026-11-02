@@ -88,6 +88,20 @@ other way round: 4.3× slower than the ring, and a hit costs what its cold fill
 costs, because a hit still ships every row through the socket and rebuilds every
 Python object.
 
+Given the **same memory budget** on both sides — the ring's transfer buffer and
+the cache's own memory, one M — the ranking holds where the cache fits at all:
+at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M and the
+aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB
+budget up (a transfer buffer is a window, one batch wide), while the cache's
+container is OOM-killed below ~256 MiB and its registration is throttled to
+nothing at 256 MiB. `just pgcache-memory-bench` sweeps it and proves each cell
+from both sides' own evidence — segment bytes and `shm_reads` for the ring, the
+proxy's memory gauges for the cache
+([section](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides),
+[log](docs/fastpostgres-vs-pgcache-memory.log)).
+
+![fast-postgres vs PgCache under one memory budget](assets/pgcache-memory.png)
+
 ## Usage
 
 Any SQLAlchemy app, unchanged apart from the URL:
