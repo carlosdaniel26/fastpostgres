@@ -14,7 +14,7 @@ ring budget: 512 MiB (one data segment, stream() pulls from it; +8 MiB control r
 shape: bench
 sizes: 1000000 5000000 10000000
 reps: 3
-git: 3c27d3d
+git: df55282
 ### END ENV
 
 # 1000000 rows, 3 timed rep(s) per player, one process each
@@ -23,12 +23,12 @@ objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
   player          rows/s   vs ring   spread
-  ring             8.38M         -   ±1.7%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=4975010 rss_bytes=151072768
-  arrow-batch      2.33M   +258.8%   ±0.5%
-                arrow-batch batches=4 max_batch_rows=253722 max_batch_bytes=12050789 rss_bytes=173883392
-  arrow-table      2.33M   +260.0%   ±0.4%
-                arrow-table result_bytes=47902794 chunks=4 rss_bytes=198029312
+  ring             9.54M         -   ±1.2%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=4975010 rss_bytes=150327296
+  arrow-batch      2.38M   +301.4%   ±1.0%
+                arrow-batch batches=4 max_batch_rows=253722 max_batch_bytes=12050789 rss_bytes=176365568
+  arrow-table      2.32M   +310.4%   ±0.5%
+                arrow-table result_bytes=47902794 chunks=4 rss_bytes=201875456
   sum           250000250000.000000 (ok)
 
 # 5000000 rows, 3 timed rep(s) per player, one process each
@@ -37,12 +37,12 @@ objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
   player          rows/s   vs ring   spread
-  ring             8.65M         -   ±0.8%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175008 rss_bytes=149250048
-  arrow-batch      2.38M   +262.8%   ±1.0%
-                arrow-batch batches=21 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=179564544
-  arrow-table      2.25M   +283.6%   ±0.5%
-                arrow-table result_bytes=248402802 chunks=21 rss_bytes=410238976
+  ring             8.90M         -   ±0.2%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175008 rss_bytes=149626880
+  arrow-batch      2.38M   +274.7%   ±0.7%
+                arrow-batch batches=21 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=181747712
+  arrow-table      2.32M   +283.5%   ±0.9%
+                arrow-table result_bytes=248402802 chunks=21 rss_bytes=409321472
   sum           6250001250000.000000 (ok)
 
 # 10000000 rows, 3 timed rep(s) per player, one process each
@@ -51,12 +51,12 @@ objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
 objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
   player          rows/s   vs ring   spread
-  ring             8.52M         -   ±1.0%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175010 rss_bytes=149770240
-  arrow-batch      2.38M   +257.9%   ±0.2%
-                arrow-batch batches=41 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=178233344
-  arrow-table      2.27M   +275.0%   ±0.9%
-                arrow-table result_bytes=499027814 chunks=41 rss_bytes=680280064
+  ring             8.82M         -   ±1.1%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175010 rss_bytes=149880832
+  arrow-batch      2.38M   +270.7%   ±0.6%
+                arrow-batch batches=41 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=180338688
+  arrow-table      2.32M   +280.3%   ±0.4%
+                arrow-table result_bytes=499027814 chunks=41 rss_bytes=671170560
   sum           25000002500000.000000 (ok)
 
 # the same sum across players: ok

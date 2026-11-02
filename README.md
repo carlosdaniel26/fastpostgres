@@ -47,7 +47,7 @@ with the ring's transfer buffer fixed at 512 MiB, the ring's segment is 512 MiB
 at 1M rows and at 10M, ~4.9 MiB of it in flight per 100k-row batch and a flat
 ~143 MiB RSS — while ADBC's record-batch reader holds one 11.6 MiB batch at a
 time, and its Arrow table path holds the whole result, 475.9 MiB at 10M rows
-(649 MiB of RSS), in buffers. The ring is 3.6–3.8× faster there too, the same
+(640 MiB of RSS), in buffers. The ring is 3.7–4.0× faster there too, the same
 ranking as above.
 
 ![fast-postgres against Arrow under a fixed 512 MiB buffer](assets/arrow-memory.png)
