@@ -24,3 +24,4 @@ extension/test/results/
 extension/test/regression.diffs
 extension/test/regression.out
 site/
+.ruff_cache/
