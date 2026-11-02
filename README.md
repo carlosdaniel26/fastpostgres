@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo-speed.png" width="600" alt="FastPostgres">
+  <img src="assets/logo.png" width="600" alt="FastPostgres">
 
   <h1>FastPostgres</h1>
 
