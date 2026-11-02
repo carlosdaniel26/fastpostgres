@@ -9,6 +9,7 @@ and the formal bits.
 
 | path | what it is |
 |---|---|
+| `extension/transport/` | the two doorbell engines (`engine_shm.c`, `engine_regipc.c`), the vendored regipc ABI and module |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
 | `benchmarks/` | the harnesses (`workloads/`, `rivals/`, `internals/`), the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
@@ -23,6 +24,7 @@ and the formal bits.
 |---|---|
 | run or read about the benchmarks | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | see every committed measurement | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| choose or change the transport | [`docs/TRANSPORTS.md`](docs/TRANSPORTS.md) |
 | understand the wire format and the two frames | [`extension/include/fastpostgres/fastpostgres_shm.h`](extension/include/fastpostgres/fastpostgres_shm.h) |
 | reproduce a measurement, or read the statistics | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |

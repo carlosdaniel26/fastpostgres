@@ -32,6 +32,7 @@ nav:
   - Why it wins: WHY-IT-WINS.md
   - Against a result cache: PG-CACHE.md
   - Against Arrow, in memory: ARROW-MEMORY.md
+  - The two transports: TRANSPORTS.md
   - Codec x transport: CODEC-TRANSPORT.md
   - Decode notes: DECODE-NOTES.md
 

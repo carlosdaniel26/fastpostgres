@@ -15,6 +15,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 | `fastpostgres-vs-pgcache-memory.log` | the same comparison under one memory budget on both sides | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
 | `codec-transport.log` | the codec x transport matrix: format cost and transport cost, separated | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
 | `cache-stat.log` | the host PMU's counters: decodes per row, transports per KiB | [`DECODE-NOTES.md`](DECODE-NOTES.md) |
+| `transport-shm-vs-regipc.log` | the ring's two doorbells, one hop at a time, on the host | [`TRANSPORTS.md`](TRANSPORTS.md) |
 | `ab/*.log` | the before/after pairs the `improve-*` charts are drawn from | [`DECODE-NOTES.md`](DECODE-NOTES.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
 
 ## Housing rules

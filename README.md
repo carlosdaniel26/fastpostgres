@@ -172,7 +172,7 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 |---|---|---|
 | workloads | `just bench [scenario...]` | does swapping the driver help an application: lookups, pages, scans, joins, aggregates, concurrency, read/write mixes |
 | rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
-| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat]` | what the row decode and the transport cost at the instruction, cache and port level |
+| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|transport]` | what the row decode and the transport cost at the instruction, cache and port level; `transport` is the two doorbells, isolated |
 
 The full catalog - the scenarios, the method, the log behind every number and the
 caveats - is [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); `just charts <target>`

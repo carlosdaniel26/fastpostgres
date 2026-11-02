@@ -126,10 +126,13 @@ costs - and their results live in the lab notebook rather than in this catalog.
 | `decode-mca` | the decode loop's ports and latency, modeled offline (llvm-mca; profile image) | [`../docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md) |
 | `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](../benchmarks/results/codec-transport.log) |
 | `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](../benchmarks/results/cache-stat.log) |
+| `transport` | the ring's two doorbells, isolated: the semaphores against the regipc kernel call, one hop at a time (host, `/dev/regipc`) | [`TRANSPORTS.md`](TRANSPORTS.md), [`transport-shm-vs-regipc.log`](../benchmarks/results/transport-shm-vs-regipc.log) |
 
 ## Charts: `just charts [target]`
 
 `workloads` · `arrow` · `arrow-memory` · `cache` · `cache-budget` · `codec` ·
+`transport` - the two doorbells: hops/s, µs per hop, µs of CPU per hop.
+
 `ab` - one figure per log, into `docs/assets/` by default.
 
 ## Old names, and where they went
