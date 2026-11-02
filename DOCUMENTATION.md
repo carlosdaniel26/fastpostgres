@@ -43,13 +43,6 @@ how this can be used:
 - **One stream per ring.** The pool is sized on first use - one stream per ~1.2 hardware threads, divided by the SMT width (6 on this machine), clamped by the server's free `max_worker_processes` - and when it is exhausted the read falls back to libpq.
 - **The object arena is never returned to the OS.** A tuple read builds Python objects into it; a 10M-row read is what the benchmark's one-rep rule is about.
 
-## Citing
-
-If you use this in academic work, cite it via [`CITATION.cff`](CITATION.cff);
-GitHub renders a "Cite this repository" button from it. The measurement protocol
-and its threats to validity live in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md),
-and the decode's lab notebook is [`simd/hypotheses.md`](simd/hypotheses.md).
-
 ## Contributing
 
 Issues and pull requests are welcome. `just test` runs the client test suite, and

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" width="600" alt="FastPostgres">
+  <img src="assets/logo.png" height="180" alt="FastPostgres">
 
   <h1>FastPostgres</h1>
 
@@ -191,4 +191,4 @@ On the server side, `max_worker_processes` bounds how many rings (background wor
 
 ## Documentation
 
-Project layout, the documentation index, the known limitations, citing, contributing, and the license are in [`DOCUMENTATION.md`](DOCUMENTATION.md).
+Project layout, the documentation index, the known limitations, contributing, and the license are in [`DOCUMENTATION.md`](DOCUMENTATION.md).
