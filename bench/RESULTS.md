@@ -18,6 +18,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 | `cache-stat.log` | the host PMU's counters: decodes per row, transports per KiB | [`NOTES.md`](NOTES.md) |
 | `transport-shm-vs-regipc.log` | the ring's two doorbells, one hop at a time, on the host | [`TRANSPORTS.md`](../docs/TRANSPORTS.md) |
 | `ab/*.log` | the before/after pairs the `improve-*` charts are drawn from | [`NOTES.md`](NOTES.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
+| `adoption-magicstack-pgbench.log` | a published suite's own seven queries and protocol, with our cell in its roster: MagicStack/pgbench, vendored at a pin | [`ADOPTION.md`](ADOPTION.md) |
 
 ## Housing rules
 

@@ -21,9 +21,9 @@ millisecond, JSON on stdout).
   module-level list of implementations and then calls its own `main()`, because
   the suite is vendored rather than edited.
 - The record: `just adoption magicstack-pgbench`, committed as
-  `../results/adoption-magicstack-pgbench.log`; the write-up, with what the cells
-  found and where the ring loses on their terms, is
-  [`../ADOPTION.md`](../ADOPTION.md).
+  [`../results/adoption-magicstack-pgbench.log`](../results/adoption-magicstack-pgbench.log);
+  the write-up, with what the cells found and where the ring loses on their
+  terms, is [`../ADOPTION.md`](../ADOPTION.md).
 
 ## How to run it
 

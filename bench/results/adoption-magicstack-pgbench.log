@@ -1,0 +1,444 @@
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: ce6ff50
+shm: 3.0G
+### END ENV
+### ADOPTION
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+cores: 16
+postgres: 18.6
+suite: MagicStack/pgbench at f415bd5cad063b2dd4c830cabae02a23aa060af7, vendored verbatim
+cells: python-aiopg python-asyncpg python-psycopg3-async fastpostgres-dbapi
+warmup: 3s; duration: 10s per cell; concurrency: 10
+git: ce6ff50
+python: 3.13.5
+asyncpg: 0.32.0
+aiopg: 1.4.0
+psycopg2-binary: 2.9.13
+psycopg: 3.2.6
+py-postgresql: 1.3.1
+uvloop: 0.23.0
+distro: 1.9.0
+# The suite's own protocol is the measurement: each cell runs in a process of
+# its own, at this concurrency, for this duration, and reports queries, rows
+# and a latency histogram in hundredths of a millisecond. Its 'rows' column is
+# the output check this class can make: the same query must return the same row
+# count in every cell the suite supports.
+# A cell the driver cannot run (COPY) exits 3, the suite's own contract; the
+# record shows the cell missing instead of a number that hides it.
+### END ADOPTION
+
+Running python-aiopg benchmarks...
+==================================
+
+1-pg_type.json, concurrency 10
+------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/1-pg_type.json
+7091 queries in 10.01 seconds
+Latency: min 3.26ms; max 25.13ms; mean 14.11ms; std: 2.337ms (16.56%)
+Latency distribution: 25% under 12.51ms; 50% under 13.247ms; 75% under 14.326ms; 90% under 19.034ms; 99% under 21.162ms; 99.99% under 25.126ms
+Queries/sec: 708.18
+Rows/sec: 438366.08
+
+2-generate_series.json, concurrency 10
+--------------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/2-generate_series.json
+18129 queries in 10.0 seconds
+Latency: min 1.19ms; max 18.75ms; mean 5.516ms; std: 1.588ms (28.79%)
+Latency distribution: 25% under 4.875ms; 50% under 4.914ms; 75% under 5.055ms; 90% under 9.72ms; 99% under 10.249ms; 99.99% under 18.684ms
+Queries/sec: 1812.01
+Rows/sec: 1812005.24
+
+3-large_object.json, concurrency 10
+-----------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/3-large_object.json
+38064 queries in 10.0 seconds
+Latency: min 1.84ms; max 16.15ms; mean 2.626ms; std: 0.3ms (11.41%)
+Latency distribution: 25% under 2.496ms; 50% under 2.545ms; 75% under 2.675ms; 90% under 2.879ms; 99% under 3.423ms; 99.99% under 16.105ms
+Queries/sec: 3805.67
+Rows/sec: 380567.14
+
+4-arrays.json, concurrency 10
+-----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/4-arrays.json
+26133 queries in 10.0 seconds
+Latency: min 1.57ms; max 15.69ms; mean 3.826ms; std: 0.987ms (25.79%)
+Latency distribution: 25% under 3.347ms; 50% under 3.39ms; 75% under 3.77ms; 90% under 6.234ms; 99% under 6.884ms; 99.99% under 13.158ms
+Queries/sec: 2612.46
+Rows/sec: 261245.94
+
+5-copyfrom.json, concurrency 10
+-------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/5-copyfrom.json
+1090 queries in 10.02 seconds
+Latency: min 24.06ms; max 203.95ms; mean 91.556ms; std: 25.033ms (27.34%)
+Latency distribution: 25% under 75.24ms; 50% under 89.14ms; 75% under 105.46ms; 90% under 125.81ms; 99% under 156.632ms; 99.99% under 203.958ms
+Queries/sec: 108.77
+Rows/sec: 1087727.89
+
+6-batch.json, concurrency 10
+----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/6-batch.json
+1884 queries in 10.03 seconds
+Latency: min 36.13ms; max 118.01ms; mean 53.137ms; std: 6.167ms (11.61%)
+Latency distribution: 25% under 49.667ms; 50% under 51.701ms; 75% under 55.005ms; 90% under 59.772ms; 99% under 78.063ms; 99.99% under 118.016ms
+Queries/sec: 187.81
+Rows/sec: 187806.14
+
+7-oneplusone.json, concurrency 10
+---------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg /src/bench/adoption/magicstack-pgbench/queries/7-oneplusone.json
+495264 queries in 10.0 seconds
+Latency: min 0.03ms; max 9.95ms; mean 0.201ms; std: 0.104ms (51.61%)
+Latency distribution: 25% under 0.161ms; 50% under 0.168ms; 75% under 0.185ms; 90% under 0.33ms; 99% under 0.552ms; 99.99% under 1.332ms
+Queries/sec: 49526.02
+Rows/sec: 49526.02
+
+Geometric mean results
+----------------------
+
+14426.51 queries in 10.01 seconds
+Latency: min 2.25ms; max 31.171ms; mean 6.926ms; std: 1.507ms (21.74%)
+Latency distribution: 25% under 6.078ms; 50% under 6.39ms; 75% under 6.951ms; 90% under 9.727ms; 99% under 11.935ms; 99.99% under 22.786ms
+Queries/sec: 1441.09
+Rows/sec: 360998.85
+
+Running python-aiopg-tuples benchmarks...
+=========================================
+
+1-pg_type.json, concurrency 10
+------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/1-pg_type.json
+35255 queries in 10.0 seconds
+Latency: min 2.15ms; max 7.65ms; mean 2.836ms; std: 0.422ms (14.88%)
+Latency distribution: 25% under 2.477ms; 50% under 2.711ms; 75% under 3.111ms; 90% under 3.37ms; 99% under 4.19ms; 99.99% under 7.249ms
+Queries/sec: 3524.8
+Rows/sec: 2181852.92
+
+2-generate_series.json, concurrency 10
+--------------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/2-generate_series.json
+103819 queries in 10.0 seconds
+Latency: min 0.54ms; max 10.38ms; mean 0.962ms; std: 0.355ms (36.86%)
+Latency distribution: 25% under 0.737ms; 50% under 0.752ms; 75% under 1.378ms; 90% under 1.498ms; 99% under 1.851ms; 99.99% under 2.832ms
+Queries/sec: 10381.25
+Rows/sec: 10381245.72
+
+3-large_object.json, concurrency 10
+-----------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/3-large_object.json
+51245 queries in 10.0 seconds
+Latency: min 1.39ms; max 9.6ms; mean 1.95ms; std: 0.192ms (9.85%)
+Latency distribution: 25% under 1.885ms; 50% under 1.9ms; 75% under 1.948ms; 90% under 2.054ms; 99% under 2.471ms; 99.99% under 9.569ms
+Queries/sec: 5123.76
+Rows/sec: 512375.83
+
+4-arrays.json, concurrency 10
+-----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/4-arrays.json
+31378 queries in 10.0 seconds
+Latency: min 1.14ms; max 8.31ms; mean 3.186ms; std: 0.684ms (21.48%)
+Latency distribution: 25% under 2.781ms; 50% under 2.846ms; 75% under 3.289ms; 90% under 4.421ms; 99% under 5.373ms; 99.99% under 7.367ms
+Queries/sec: 3136.96
+Rows/sec: 313695.88
+
+5-copyfrom.json, concurrency 10
+-------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/5-copyfrom.json
+1102 queries in 10.03 seconds
+Latency: min 24.86ms; max 183.34ms; mean 90.595ms; std: 23.766ms (26.23%)
+Latency distribution: 25% under 74.24ms; 50% under 89.44ms; 75% under 104.705ms; 90% under 121.606ms; 99% under 157.8ms; 99.99% under 183.348ms
+Queries/sec: 109.92
+Rows/sec: 1099175.03
+
+6-batch.json, concurrency 10
+----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/6-batch.json
+1964 queries in 10.03 seconds
+Latency: min 35.32ms; max 135.54ms; mean 51.009ms; std: 6.598ms (12.94%)
+Latency distribution: 25% under 48.453ms; 50% under 50.166ms; 75% under 52.066ms; 90% under 54.821ms; 99% under 64.647ms; 99.99% under 135.546ms
+Queries/sec: 195.74
+Rows/sec: 195739.45
+
+7-oneplusone.json, concurrency 10
+---------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 aiopg-tuples /src/bench/adoption/magicstack-pgbench/queries/7-oneplusone.json
+599378 queries in 10.0 seconds
+Latency: min 0.03ms; max 9.71ms; mean 0.166ms; std: 0.089ms (53.35%)
+Latency distribution: 25% under 0.133ms; 50% under 0.141ms; 75% under 0.158ms; 90% under 0.27ms; 99% under 0.461ms; 99.99% under 1.033ms
+Queries/sec: 59937.47
+Rows/sec: 59937.47
+
+Geometric mean results
+----------------------
+
+25812.4 queries in 10.01 seconds
+Latency: min 1.741ms; max 20.513ms; mean 3.87ms; std: 0.831ms (21.47%)
+Latency distribution: 25% under 3.334ms; 50% under 3.541ms; 75% under 4.216ms; 90% under 5.039ms; 99% under 6.489ms; 99.99% under 12.062ms
+Queries/sec: 2578.81
+Rows/sec: 645997.53
+
+Running python-asyncpg benchmarks...
+====================================
+
+1-pg_type.json, concurrency 10
+------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/1-pg_type.json
+39012 queries in 10.0 seconds
+Latency: min 0.93ms; max 13.69ms; mean 2.562ms; std: 1.049ms (40.96%)
+Latency distribution: 25% under 1.862ms; 50% under 2.411ms; 75% under 3.129ms; 90% under 3.668ms; 99% under 4.669ms; 99.99% under 13.436ms
+Queries/sec: 3900.63
+Rows/sec: 2414488.54
+
+2-generate_series.json, concurrency 10
+--------------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/2-generate_series.json
+63047 queries in 10.0 seconds
+Latency: min 0.76ms; max 13.81ms; mean 1.585ms; std: 0.938ms (59.18%)
+Latency distribution: 25% under 1.138ms; 50% under 1.198ms; 75% under 2.154ms; 90% under 2.352ms; 99% under 3.475ms; 99.99% under 13.264ms
+Queries/sec: 6304.22
+Rows/sec: 6304219.3
+
+3-large_object.json, concurrency 10
+-----------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/3-large_object.json
+220699 queries in 10.0 seconds
+Latency: min 0.22ms; max 2.77ms; mean 0.452ms; std: 0.153ms (33.83%)
+Latency distribution: 25% under 0.357ms; 50% under 0.406ms; 75% under 0.441ms; 90% under 0.719ms; 99% under 0.924ms; 99.99% under 1.719ms
+Queries/sec: 22069.03
+Rows/sec: 2206903.25
+
+4-arrays.json, concurrency 10
+-----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/4-arrays.json
+59550 queries in 10.0 seconds
+Latency: min 0.67ms; max 4.24ms; mean 1.678ms; std: 0.27ms (16.07%)
+Latency distribution: 25% under 1.59ms; 50% under 1.653ms; 75% under 1.785ms; 90% under 1.969ms; 99% under 2.459ms; 99.99% under 3.551ms
+Queries/sec: 5954.14
+Rows/sec: 595413.71
+
+5-copyfrom.json, concurrency 10
+-------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/5-copyfrom.json
+2580 queries in 10.01 seconds
+Latency: min 8.11ms; max 331.63ms; mean 38.711ms; std: 38.876ms (100.43%)
+Latency distribution: 25% under 16.163ms; 50% under 29.49ms; 75% under 34.6ms; 90% under 83.04ms; 99% under 211.114ms; 99.99% under 331.635ms
+Queries/sec: 257.81
+Rows/sec: 2578131.57
+
+6-batch.json, concurrency 10
+----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/6-batch.json
+8951 queries in 10.01 seconds
+Latency: min 6.21ms; max 83.81ms; mean 11.165ms; std: 3.105ms (27.81%)
+Latency distribution: 25% under 9.892ms; 50% under 10.879ms; 75% under 12.199ms; 90% under 13.338ms; 99% under 17.37ms; 99.99% under 83.802ms
+Queries/sec: 894.55
+Rows/sec: 894551.49
+
+7-oneplusone.json, concurrency 10
+---------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 asyncpg /src/bench/adoption/magicstack-pgbench/queries/7-oneplusone.json
+824165 queries in 10.0 seconds
+Latency: min 0.05ms; max 1.21ms; mean 0.12ms; std: 0.039ms (32.72%)
+Latency distribution: 25% under 0.099ms; 50% under 0.106ms; 75% under 0.117ms; 90% under 0.203ms; 99% under 0.242ms; 99.99% under 0.558ms
+Queries/sec: 82416.15
+Rows/sec: 82416.15
+
+Geometric mean results
+----------------------
+
+48322.57 queries in 10.0 seconds
+Latency: min 0.826ms; max 13.327ms; mean 2.064ms; std: 0.79ms (38.28%)
+Latency distribution: 25% under 1.523ms; 50% under 1.819ms; 75% under 2.216ms; 90% under 3.099ms; 99% under 4.415ms; 99.99% under 10.776ms
+Queries/sec: 4831.04
+Rows/sec: 1210192.55
+
+Running python-psycopg3-async benchmarks...
+===========================================
+
+1-pg_type.json, concurrency 10
+------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/1-pg_type.json
+16871 queries in 10.0 seconds
+Latency: min 2.89ms; max 9.91ms; mean 5.927ms; std: 0.269ms (4.54%)
+Latency distribution: 25% under 5.813ms; 50% under 5.858ms; 75% under 5.957ms; 90% under 6.078ms; 99% under 7.206ms; 99.99% under 9.856ms
+Queries/sec: 1686.28
+Rows/sec: 1043804.54
+
+2-generate_series.json, concurrency 10
+--------------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/2-generate_series.json
+32991 queries in 10.0 seconds
+Latency: min 1.12ms; max 5.69ms; mean 3.03ms; std: 0.181ms (5.96%)
+Latency distribution: 25% under 2.958ms; 50% under 2.982ms; 75% under 3.042ms; 90% under 3.149ms; 99% under 3.598ms; 99.99% under 5.643ms
+Queries/sec: 3298.3
+Rows/sec: 3298302.12
+
+3-large_object.json, concurrency 10
+-----------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/3-large_object.json
+28273 queries in 10.0 seconds
+Latency: min 2.03ms; max 5.99ms; mean 3.536ms; std: 0.21ms (5.95%)
+Latency distribution: 25% under 3.429ms; 50% under 3.475ms; 75% under 3.568ms; 90% under 3.72ms; 99% under 4.357ms; 99.99% under 5.973ms
+Queries/sec: 2826.76
+Rows/sec: 282676.07
+
+4-arrays.json, concurrency 10
+-----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/4-arrays.json
+25775 queries in 10.0 seconds
+Latency: min 1.41ms; max 13.66ms; mean 3.879ms; std: 0.397ms (10.24%)
+Latency distribution: 25% under 3.724ms; 50% under 3.781ms; 75% under 3.916ms; 90% under 4.145ms; 99% under 4.9ms; 99.99% under 13.638ms
+Queries/sec: 2576.63
+Rows/sec: 257663.32
+
+5-copyfrom.json, concurrency 10
+-------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/5-copyfrom.json
+1124 queries in 10.02 seconds
+Latency: min 21.93ms; max 149.28ms; mean 88.741ms; std: 20.878ms (23.53%)
+Latency distribution: 25% under 77.93ms; 50% under 88.045ms; 75% under 100.21ms; 90% under 117.822ms; 99% under 141.505ms; 99.99% under 149.288ms
+Queries/sec: 112.21
+Rows/sec: 1122061.85
+
+6-batch.json, concurrency 10
+----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/6-batch.json
+290 queries in 10.31 seconds
+Latency: min 342.95ms; max 412.02ms; mean 355.365ms; std: 13.383ms (3.77%)
+Latency distribution: 25% under 348.32ms; 50% under 349.807ms; 75% under 360.38ms; 90% under 371.21ms; 99% under 411.952ms; 99.99% under 412.029ms
+Queries/sec: 28.14
+Rows/sec: 28137.36
+
+7-oneplusone.json, concurrency 10
+---------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_python --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 psycopg3-async /src/bench/adoption/magicstack-pgbench/queries/7-oneplusone.json
+290027 queries in 10.0 seconds
+Latency: min 0.14ms; max 1.06ms; mean 0.344ms; std: 0.037ms (10.65%)
+Latency distribution: 25% under 0.327ms; 50% under 0.335ms; 75% under 0.347ms; 90% under 0.373ms; 99% under 0.522ms; 99.99% under 0.889ms
+Queries/sec: 29002.3
+Rows/sec: 29002.3
+
+Geometric mean results
+----------------------
+
+12116.78 queries in 10.05 seconds
+Latency: min 3.714ms; max 16.262ms; mean 8.282ms; std: 0.636ms (7.67%)
+Latency distribution: 25% under 7.917ms; 50% under 8.14ms; 75% under 8.487ms; 90% under 9.008ms; 99% under 10.773ms; 99.99% under 15.818ms
+Queries/sec: 1205.97
+Rows/sec: 302092.92
+
+Running fastpostgres-dbapi benchmarks...
+========================================
+
+1-pg_type.json, concurrency 10
+------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/1-pg_type.json
+41011 queries in 10.0 seconds
+Latency: min 0.57ms; max 27.54ms; mean 2.435ms; std: 1.592ms (65.37%)
+Latency distribution: 25% under 1.327ms; 50% under 1.922ms; 75% under 3.24ms; 90% under 4.325ms; 99% under 6.716ms; 99.99% under 26.818ms
+Queries/sec: 4100.34
+Rows/sec: 2538108.92
+
+2-generate_series.json, concurrency 10
+--------------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/2-generate_series.json
+118076 queries in 10.0 seconds
+Latency: min 0.19ms; max 10.31ms; mean 0.844ms; std: 0.484ms (57.37%)
+Latency distribution: 25% under 0.494ms; 50% under 0.641ms; 75% under 1.161ms; 90% under 1.542ms; 99% under 2.185ms; 99.99% under 8.984ms
+Queries/sec: 11806.04
+Rows/sec: 11806037.8
+
+3-large_object.json, concurrency 10
+-----------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/3-large_object.json
+79980 queries in 10.0 seconds
+Latency: min 0.12ms; max 6.24ms; mean 1.248ms; std: 0.672ms (53.89%)
+Latency distribution: 25% under 0.755ms; 50% under 0.897ms; 75% under 1.855ms; 90% under 2.234ms; 99% under 2.929ms; 99.99% under 4.57ms
+Queries/sec: 7997.05
+Rows/sec: 799704.72
+
+4-arrays.json, concurrency 10
+-----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/4-arrays.json
+173601 queries in 10.0 seconds
+Latency: min 0.28ms; max 4.5ms; mean 0.574ms; std: 0.183ms (31.86%)
+Latency distribution: 25% under 0.471ms; 50% under 0.542ms; 75% under 0.642ms; 90% under 0.755ms; 99% under 1.252ms; 99.99% under 3.166ms
+Queries/sec: 17358.5
+Rows/sec: 1735849.78
+
+5-copyfrom.json, concurrency 10
+-------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/5-copyfrom.json
+6-batch.json, concurrency 10
+----------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/6-batch.json
+60 queries in 11.06 seconds
+Latency: min 1789.01ms; max 1896.69ms; mean 1842.6ms; std: 38.488ms (2.09%)
+Latency distribution: 25% under 1806.98ms; 50% under 1839.91ms; 75% under 1886.05ms; 90% under 1895.84ms; 99% under 1896.688ms; 99.99% under 1896.7ms
+Queries/sec: 5.43
+Rows/sec: 5426.25
+
+7-oneplusone.json, concurrency 10
+---------------------------------
+
+/src/bench/adoption/magicstack-pgbench/pgbench_fastpostgres --warmup-time=3 --duration=10 --timeout=2 --pghost=127.0.0.1 --pgport=5432 --pguser=postgres --output-format=json --concurrency=10 dbapi /src/bench/adoption/magicstack-pgbench/queries/7-oneplusone.json
+427201 queries in 10.0 seconds
+Latency: min 0.02ms; max 4.21ms; mean 0.232ms; std: 0.192ms (82.8%)
+Latency distribution: 25% under 0.112ms; 50% under 0.149ms; 75% under 0.347ms; 90% under 0.53ms; 99% under 0.785ms; 99.99% under 2.136ms
+Queries/sec: 42717.69
+Rows/sec: 42717.69
+
+Geometric mean results
+----------------------
+
+34625.54 queries in 10.17 seconds
+Latency: min 0.712ms; max 19.982ms; mean 2.927ms; std: 0.942ms (32.2%)
+Latency distribution: 25% under 1.901ms; 50% under 2.34ms; 75% under 3.783ms; 90% under 4.737ms; 99% under 6.566ms; 99.99% under 15.547ms
+Queries/sec: 3405.09
+Rows/sec: 461346.57
+

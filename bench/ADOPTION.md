@@ -38,6 +38,49 @@ The rivals in the cell set are the suite's own Python roster: `asyncpg`,
 `aiopg`, and `psycopg3`'s async path. Its Go and Node cells need toolchains the
 dev image does not carry, so no class here names them.
 
+## What the first record shows
+
+One run, this machine, the dev image, 10 connections, a 10-second window per cell
+after a 3-second warmup; queries/s, their protocol. Best cell in bold.
+
+| query, concurrency 10 | aiopg | aiopg-tuples | psycopg3-async | asyncpg | fastpostgres |
+|---|---|---|---|---|---|
+| `1-pg_type` (a type-table read) | 708 | 3,525 | 1,686 | 3,901 | **4,100** |
+| `2-generate_series` (1,000 rows) | 1,812 | 10,381 | 3,298 | 6,304 | **11,806** |
+| `3-large_object` (100 x 1 KB bytea) | 3,806 | 5,124 | 2,827 | **22,069** | 7,997 |
+| `4-arrays` (100 x `int[]`) | 2,612 | 3,137 | 2,577 | 5,954 | **17,359** |
+| `5-copyfrom` | 109 | 110 | 112 | **258** | not supported |
+| `6-batch` (1,000-row `INSERT`) | 188 | 196 | 28 | **895** | 5.4 |
+| `7-oneplusone` (`SELECT 1+1`) | 49,526 | 59,937 | 29,002 | **82,416** | 42,718 |
+| geometric mean | 1,441 | 2,579 | 1,206 | **4,831** | 3,405 |
+
+**The ring wins the reads with structure in them.** `4-arrays` is 2.9x asyncpg
+(int[] takes the columnar frame, and 100 rows of 100 arrays land as typed
+buffers), `2-generate_series` 1.87x, and `1-pg_type` is a wash at +5%. These are
+the shapes where delivery is the work.
+
+**It loses two cells badly, and the losses are informative.** `7-oneplusone` is
+42.7k against 82.4k: one row per statement, ten statements in flight per
+connection, every one of them opening and closing a stream - the same trade the
+workload suite's `lookup` cell measures, here against asyncpg's prepared
+pipeline. `6-batch` is 5.4 queries/s against asyncpg's 895: that cell is not the
+ring at all, it is the client's DML path (libpq, one row at a time), and a
+1000-row `executemany` taking 1.9 seconds says the client has no batch insert
+path worth the name. The same cell is also psycopg3-async's worst (28 queries/s),
+so it is a driver feature this suite prices rather than an artefact.
+
+**`3-large_object` is the interesting loss**: 100 rows of 1 KB `bytea` per
+statement, and the ring is 2.8x behind asyncpg (8.0k against 22.1k). The ring's
+per-statement cost is paid per *statement*, not per row, and this query is 100 KB
+of payload under the same fixed overhead - the ratio between the small-statement
+regime and the bulk one, on the suite's own query.
+
+**So the geometric mean puts the ring second of five** (3,405 against asyncpg's
+4,831, and ahead of aiopg-tuples' 2,579), and the ranking is not the point: six
+of the seven queries are ones this project would not have chosen, one of them
+cannot run at all, and the two it loses worst are where the work is, not where
+the transport is.
+
 ## What this class can and cannot say
 
 - **It can say what their queries find**, including where the ring loses - a
@@ -62,5 +105,6 @@ just adoption magicstack-pgbench            # the Python roster + our cell
 just adoption magicstack-pgbench --quick    # warmup 1s, duration 3s
 ```
 
-The record is committed as `results/adoption-magicstack-pgbench.log` and indexed
-in [`RESULTS.md`](RESULTS.md).
+The record is committed as
+[`results/adoption-magicstack-pgbench.log`](results/adoption-magicstack-pgbench.log)
+and indexed in [`RESULTS.md`](RESULTS.md).
