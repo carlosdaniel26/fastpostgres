@@ -117,7 +117,7 @@ ring per process, 64 MiB data segments, a 100,000-row batch ask:
 
 **At the scan's batch size the doorbell does not change the delivered rate at
 all: 2.49 M rows/s either way (−0.4%, inside the run-to-run spread). A 1M-row
-read is 13 handoffs; 13 × 6 µs is 0.002% of a 400 ms read.** What it does change
+read is 13 handoffs; 13 × 6 µs is 0.02% of a 400 ms read.** What it does change
 is the small read, where the handoff *is* a measurable fraction of a statement:
 **+68% statements per second on the primary-key lookups** (p50 0.110 ms → 0.064 ms)
 and +20% on the 100-row pages, and the record shows what that costs — the client
