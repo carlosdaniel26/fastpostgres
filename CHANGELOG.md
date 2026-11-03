@@ -7,6 +7,36 @@ are released together.
 
 ## [Unreleased]
 
+### Added
+
+- **A fourth measurement class: `just adoption`.** A published third-party suite,
+  vendored verbatim at a pinned commit and run on its own protocol, with
+  FastPostgres added to its roster as one more cell: MagicStack/pgbench, whose
+  seven queries include the ones this project would not have chosen. The first
+  record is `bench/results/adoption-magicstack-pgbench.log` and the write-up,
+  with the losses and every adaptation the suite needed, is `bench/ADOPTION.md`.
+
+### Changed
+
+- **The claim's tree is one directory.** `benchmarks/` is `bench/`, and the
+  arguments the measurements are for - `METHODOLOGY.md`, `RESULTS.md`,
+  `WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md` and the
+  notebook (formerly `DECODE-NOTES.md`, now `NOTES.md`) - moved in beside the
+  records they cite; `docs/BENCHMARKS.md` became `bench/README.md`. What stays in
+  `docs/` is the manual: the two transports, the limitations, and the figures.
+- Each rival has a directory of its own (`bench/rivals/adbc-arrow/`,
+  `bench/rivals/pgcache/`, and the workload suite's README for psycopg), and the
+  fixture the comparisons had been sharing by importing each other moved to
+  `bench/lib/dataset.py`.
+- The mkdocs site, its recipe and the committed `site/` output are removed; the
+  documents are read in the repository.
+
+### Fixed
+
+- The codec x transport runner's default report path wrote to `docs/`, where
+  nothing read it; it now writes `bench/results/codec-transport.log`, as its own
+  docstring, the justfile comment and the chart always said.
+
 ## [1.1.0] - 2026-11-02
 
 ### Added

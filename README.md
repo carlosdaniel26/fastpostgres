@@ -16,10 +16,11 @@
 
   <p>
     <a href="#measured-results"><strong>Results</strong></a> ·
+    <a href="#where-it-loses"><strong>Where it loses</strong></a> ·
     <a href="#quick-start"><strong>Quick Start</strong></a> ·
+    <a href="bench/README.md"><strong>Benchmarks</strong></a> ·
     <a href="DOCUMENTATION.md"><strong>Documentation</strong></a> ·
     <a href="bench/METHODOLOGY.md"><strong>Methodology</strong></a> ·
-    <a href="bench/WHY-IT-WINS.md"><strong>Design notes</strong></a> ·
     <a href="docs/LIMITATIONS.md"><strong>Limitations</strong></a>
   </p>
 </div>
@@ -35,11 +36,12 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 ## Why FastPostgres
 
-- **Nothing is parsed on the client.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one.
+- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks are asked for the same Python tuples, that is 5.0-5.7x ADBC + Arrow, at 100K, 1M and 10M rows.
 - **The executor's own tuples.** The row frame carries PostgreSQL's tuples as they lie, one `memcpy` per row, so every type the server can store can be sent; types whose storage is not the wire bytes take the columnar frame instead.
-- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place.
+- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 3.6-3.8x Arrow's `pyarrow.compute` over its own table, on the same column.
 - **One wire format, defined once.** Reader and writer share the same header, and the benchmark generator includes it too, so the format cannot drift between them.
-- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. The two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
+- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 51x, and the ring beats a cached large result 4.3x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
+- **One URL.** No new query language, no annotation, no client rewrite: the same SQLAlchemy application, on a driver whose reads take a different road.
 
 ## How it works
 
@@ -53,16 +55,11 @@ The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)
 
 ## Measured results
 
-All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md).
+All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md).
 
 ### Realistic workloads: FastPostgres against psycopg 3
 
-The comparison above is one statement over one table. The workload suite asks the
-pragmatic question: over a commerce schema with foreign keys and indexes (10k
-customers, 10k products, 1M orders, 3M order items), the same application on both
-drivers, the same app-facing call, per-statement latency and throughput
-([`bench/README.md`](bench/README.md),
-[`log`](bench/results/fastpostgres-vs-psycopg.log)):
+The workload suite asks the pragmatic question: over a commerce schema with foreign keys and indexes (10k customers, 10k products, 1M orders, 3M order items), the same application on both drivers, the same app-facing call, per-statement latency and throughput ([`bench/README.md`](bench/README.md), [`log`](bench/results/fastpostgres-vs-psycopg.log)):
 
 | scenario | FastPostgres | psycopg 3 | |
 |---|---|---|---|
@@ -84,6 +81,22 @@ same query with `max_parallel_workers_per_gather = 0`, 224 ms, while psycopg's
 backend gets a parallel plan).
 
 ![Realistic workloads over a commerce schema](docs/assets/workloads.png)
+
+### Where it loses
+
+Read this before the ratios above: the losses are as measured as the wins, and
+they are what decides whether this belongs in an application.
+
+| where | the number | why |
+|---|---|---|
+| a point read | 8.2K statements/s against psycopg's 38.6K (4.7x slower) | opening a stream is two semaphore round trips; psycopg pays one socket round trip |
+| a page of 100, at p95 | 1.03 ms against 0.23 | the same trade, and it hurts most at the tail |
+| an aggregate | 231.3 ms against 85.2 | the worker's plan is serial and the backend's gets a `Gather` |
+| 1K rows, the columnar path | the plain driver read wins | the columnar path's fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
+| through SQLAlchemy CORE | -72-83% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
+| `SELECT 1+1`, 10 connections, a published suite | 42.7K queries/s against asyncpg's 82.4K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
+| a 1000-row batched `INSERT` | 5.4/s against asyncpg's 895 | the client's libpq DML path, one row at a time; the ring is not involved |
+| `COPY` | not supported | writes are libpq, and the client has no COPY call there |
 
 ### Read path: FastPostgres against ADBC + Arrow
 
@@ -131,9 +144,6 @@ A transfer buffer is a window: the ring's is the same 512 MiB whatever the resul
 
 ![FastPostgres against Arrow under a fixed 512 MiB buffer](docs/assets/arrow-memory.png)
 
-> [!NOTE]
-> Small results are the exception to the ranking: at 1K rows the plain driver read wins and the columnar path's fixed costs dominate. The numbers and the reason are in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert).
-
 ### Result caches: PgCache
 
 A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`bench/PG-CACHE.md`](bench/PG-CACHE.md), [`log`](bench/results/fastpostgres-vs-pgcache.log)):
@@ -151,6 +161,18 @@ Given the **same memory budget on both sides** - the ring's transfer buffer and 
 
 ![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 
+### A published suite's own terms
+
+The fourth class runs somebody else's benchmark, on its own protocol, with
+FastPostgres added to its roster as one more cell: MagicStack's pgbench, the
+PostgreSQL driver toolbench behind asyncpg's documentation, vendored at a pinned
+commit. Seven queries over which the ring wins the reads with structure in them
+(`int[]` 2.9x asyncpg, `generate_series` 1.87x), loses the one-row statement
+(42.7K against 82.4K) and the batched `INSERT` (5.4 against 895, and that cell is
+the client's libpq path), and cannot run `COPY` at all. The full table, the
+method and every adaptation the suite needed are in
+[`bench/ADOPTION.md`](bench/ADOPTION.md).
+
 ## Quick start
 
 Requirements: a Linux host with `/dev/shm`, Docker and [`just`](https://github.com/casey/just). Everything runs in the dev image, which builds the extension, the client and the benchmark harnesses.
@@ -159,8 +181,10 @@ Requirements: a Linux host with `/dev/shm`, Docker and [`just`](https://github.c
 git clone https://github.com/carlosdaniel26/fastpostgres.git
 cd fastpostgres
 
-just test          # the Python client's test suite
-just bench         # FastPostgres vs ADBC + Arrow, 100K / 1M / 10M rows
+just test          # the extension's SQL surface and the client's test suite
+just bench         # the workload suite: seven scenarios against psycopg 3
+just rivals adbc   # FastPostgres vs ADBC + Arrow, 100K / 1M / 10M rows
+just adoption magicstack-pgbench   # somebody else's suite, our cell in its roster
 just demo 5000     # the same app on psycopg 3 and on FastPostgres
 ```
 
@@ -171,8 +195,9 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 | class | command | what it answers |
 |---|---|---|
 | workloads | `just bench [scenario...]` | does swapping the driver help an application: lookups, pages, scans, joins, aggregates, concurrency, read/write mixes |
-| rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
-| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|transport]` | what the row decode and the transport cost at the instruction, cache and port level; `transport` is the two doorbells, isolated |
+| rivals | `just rivals [adbc\|arrow-transport\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
+| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|transport\|transport-e2e]` | what the row decode and the transport cost at the instruction, cache and port level |
+| adoption | `just adoption [magicstack-pgbench]` | what a published third-party suite's own queries and protocol find, with our cell in its roster |
 
 The full catalog - the scenarios, the method, the log behind every number and the
 caveats - is [`bench/README.md`](bench/README.md); `just charts <target>`
@@ -217,8 +242,33 @@ Read-only `SELECT`s take the ring; everything else goes over libpq. The `example
 | `FASTPOSTGRES_SEGMENT_BYTES` | 1 GiB | capacity of each data segment, in bytes; clamped to 64 KiB - 1 GiB. A stream alternates two of them |
 | `FASTPOSTGRES_OBJ_ARENA` | half the cgroup limit, at most 8 GiB | arena for the Python objects a tuple read builds; `0` uses the normal constructors |
 
-On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once.
+On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once. The second ring engine is a knob of its own: [`FASTPOSTGRES_TRANSPORT` and what each engine costs](docs/TRANSPORTS.md).
+
+## Status
+
+- **A research prototype.** Linux, same host, single writer's discretion: see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for the list, including the ones that shape how it can be used at all.
+- **Tested**: the extension's SQL surface under `pg_regress`, and 34 client tests covering the wire types, the ring pool, fork safety, the libpq fallbacks and the unknown-transport refusal; CI runs both, plus ruff, shellcheck, the markdown link check and the release-version check, and a weekly workload smoke.
+- **Not here yet**: an async client, COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
+
+## How this was built
+
+FastPostgres is built with an AI coding assistant, from a human design: the
+transport - a background worker publishing batches into shared memory, the two
+frames, the ring, the engine choice - is the design, and the implementation, the
+harnesses, the charts and most of this documentation were written in pairing
+sessions with it. The commit history and the notebook
+([`bench/NOTES.md`](bench/NOTES.md)) are the record of how the numbers moved,
+including the hypotheses that were falsified.
+
+That is also why the measurement discipline here is what it is. Every number
+quoted on this page is a line in a committed log, produced by a command you can
+run, stamped with the commit it came from; two of the four classes measure
+somebody else's protocol or somebody else's stack, on purpose, so that not all
+of the evidence is ours.
 
 ## Documentation
 
-Project layout, the documentation index, the known limitations, contributing, and the license are in [`DOCUMENTATION.md`](DOCUMENTATION.md).
+Project layout, the documentation index, the known limitations, contributing,
+and the license are in [`DOCUMENTATION.md`](DOCUMENTATION.md); the claim's own
+tree - the classes, the records, the arguments they back - starts at
+[`bench/README.md`](bench/README.md).
