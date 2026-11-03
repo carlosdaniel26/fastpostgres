@@ -20,7 +20,7 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 
-#include "../include/regipc.h"
+#include "fastpostgres/regipc.h"
 
 #define REGIPC_DRV_NAME     "regipc"
 #define REGIPC_MAX_CONTEXTS 16
