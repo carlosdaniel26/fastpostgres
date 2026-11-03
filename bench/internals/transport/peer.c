@@ -14,9 +14,11 @@
  * WHERE THE CODE COMES FROM. Both sides drive the product's own engines
  * (extension/transport/engine_shm.c, engine_regipc.c) through the ops table in
  * extension/transport/transport.h; this file only creates the control segment
- * the product creates (FPRING04, memset, sem_init, the regipc block at offset
+ * the product creates (FPRING05, memset, sem_init, the regipc block at offset
  * 4096), spawns the worker role, posts hops and reports. No engine logic is
- * reimplemented here.
+ * reimplemented here. The hops' doorbell costs come back in the ring's own
+ * tally (ring.h: FastpostgresRingTally), which the engines bump: handoffs,
+ * semaphore posts, falls back to the semaphore, and spin microseconds per side.
  *
  * THE STOP. The client's stop follows the Python client's Ring_stop: op = STOP
  * through the engine's post_request. On regipc that is a real call carrying the
@@ -76,8 +78,8 @@
 /* ------------------------------------------------------------------- layout */
 
 /* The worker's report lives in the control segment on its own page, after the
- * ring struct (sizeof(FastpostgresRing) is 4484) and the regipc block
- * (4096..4216), neither of which this may touch. */
+ * ring struct (sizeof(FastpostgresRing) is 4560, the tally included) and the
+ * regipc block (4096..4216), neither of which this may touch. */
 #define BENCH_REPORT_OFFSET 8192u
 #define BENCH_REPORT_MAGIC  0xbe1175c0ffee5eedull /* the worker wrote the whole report */
 
@@ -174,6 +176,14 @@ typedef struct BenchResult {
     uint64_t leaf_calls;      /* regipc: the module's calls counter */
     uint64_t req_seq_final;   /* the ring's counters after the stop */
     uint64_t resp_seq_final;
+    uint64_t client_handoffs; /* the ring's tally, per side: what the doorbell cost each */
+    uint64_t client_posts;
+    uint64_t client_sleeps;
+    uint64_t client_spin_us;
+    uint64_t worker_handoffs;
+    uint64_t worker_posts;
+    uint64_t worker_sleeps;
+    uint64_t worker_spin_us;
     double   seconds;
     double   hops_per_second;
     double   rows_per_second;
@@ -347,8 +357,9 @@ bench_worker_main(const BenchOptions *o)
     }
     ip = fastpostgres_ring_regipc(r);
 
-    /* worker.c's order: init, then ready. For regipc worker_init already
-     * published the pid and the block's ready; this is the ring's flag. */
+    /* worker.c's order: init, then the pid, then ready. For regipc worker_init
+     * already published the block's pid and ready; this is the ring's pair. */
+    __atomic_store_n(&r->tally.worker_pid, (uint32_t)getpid(), __ATOMIC_RELEASE);
     __atomic_store_n(&r->worker_ready, 1u, __ATOMIC_RELEASE);
 
     rep = (BenchReport *)((char *)r + BENCH_REPORT_OFFSET);
@@ -737,6 +748,19 @@ bench_run_one(const FastpostgresTransport *t, const BenchOptions *o, unsigned re
     out->req_seq_final  = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
     out->resp_seq_final = __atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE);
 
+    /* The ring's own tally, read now that the worker has exited: what the
+     * doorbell cost either side over the hops. The client's row counts the
+     * stop's request as a handoff and the worker answers no stop, so the two
+     * rows differ by exactly that one. */
+    out->client_handoffs = __atomic_load_n(&r->tally.client.handoffs, __ATOMIC_ACQUIRE);
+    out->client_posts    = __atomic_load_n(&r->tally.client.posts, __ATOMIC_ACQUIRE);
+    out->client_sleeps   = __atomic_load_n(&r->tally.client.sleeps, __ATOMIC_ACQUIRE);
+    out->client_spin_us  = __atomic_load_n(&r->tally.client.spin_us, __ATOMIC_ACQUIRE);
+    out->worker_handoffs = __atomic_load_n(&r->tally.worker.handoffs, __ATOMIC_ACQUIRE);
+    out->worker_posts    = __atomic_load_n(&r->tally.worker.posts, __ATOMIC_ACQUIRE);
+    out->worker_sleeps   = __atomic_load_n(&r->tally.worker.sleeps, __ATOMIC_ACQUIRE);
+    out->worker_spin_us  = __atomic_load_n(&r->tally.worker.spin_us, __ATOMIC_ACQUIRE);
+
     /* Everything the run reports, and the gates behind `verified`. */
     if (out->hops_completed > 0)
     {
@@ -812,6 +836,13 @@ bench_print_json(const FastpostgresTransport *t, const BenchOptions *o, unsigned
            (unsigned long long)res->anomalies, bench_bool(res->stop_seen), bench_bool(res->checksum_match),
            bench_bool(res->child_exit_ok), (unsigned long long)res->req_seq_final,
            (unsigned long long)res->resp_seq_final, res->teardown_ms);
+    /* The ring's tally: the events each side counted, the spin in microseconds. */
+    printf(",\"client_handoffs\":%llu,\"client_posts\":%llu,\"client_sleeps\":%llu,\"client_spin_us\":%llu"
+           ",\"worker_handoffs\":%llu,\"worker_posts\":%llu,\"worker_sleeps\":%llu,\"worker_spin_us\":%llu",
+           (unsigned long long)res->client_handoffs, (unsigned long long)res->client_posts,
+           (unsigned long long)res->client_sleeps, (unsigned long long)res->client_spin_us,
+           (unsigned long long)res->worker_handoffs, (unsigned long long)res->worker_posts,
+           (unsigned long long)res->worker_sleeps, (unsigned long long)res->worker_spin_us);
     if (t->id == FASTPOSTGRES_TRANSPORT_REGIPC)
         printf(",\"leaf_calls\":%llu,\"leaf_checksum\":%llu,\"leaf_checksum_match\":%s",
                (unsigned long long)res->leaf_calls, (unsigned long long)res->leaf_checksum,

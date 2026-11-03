@@ -21,6 +21,12 @@
  * Nothing here uses PostgreSQL. The extension, the host test and the Python
  * client all compile this file, and the ring's leaf mirror is held to the
  * module's layout by the asserts below.
+ *
+ * Both sides count what the policy costs them in the ring's tally: the calls,
+ * the posts, the falls back to the semaphore, and the microseconds spent
+ * polling. The spin is measured off the clock read the poll budget already
+ * makes (regipc_expired), so the handoff path gains neither a syscall nor a
+ * clock read for it.
  */
 #include <sys/syscall.h> /* __NR_ioctl, consumed by the vendored handoff asm */
 
@@ -85,12 +91,16 @@ regipc_deadline(struct timespec *ts, int timeout_ms)
     }
 }
 
-/* A CLOCK_MONOTONIC instant `usec` microseconds from now. The poll budgets are
- * intervals, and a clock the system may step must not stretch them. */
+/* A CLOCK_MONOTONIC instant `usec` microseconds from now, and the instant it was
+ * read from. The poll budgets are intervals, and a clock the system may step
+ * must not stretch them; the poll loops time their spin off this one read — the
+ * read their budget needs anyway — so counting the spin adds no clock to the
+ * hot path. */
 static void
-regipc_after_us(struct timespec *ts, long usec)
+regipc_after_us(struct timespec *ts, long usec, struct timespec *now)
 {
     clock_gettime(CLOCK_MONOTONIC, ts);
+    if (now != NULL) *now = *ts;
     ts->tv_nsec += usec * 1000L;
     while (ts->tv_nsec >= 1000000000L)
     {
@@ -99,13 +109,23 @@ regipc_after_us(struct timespec *ts, long usec)
     }
 }
 
+/* Has the poll budget been spent? The clock it had to read is handed back, so a
+ * loop can measure its spin without reading a second one. */
 static int
-regipc_expired(const struct timespec *end)
+regipc_expired(const struct timespec *end, struct timespec *now)
 {
-    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, now);
+    return now->tv_sec > end->tv_sec || (now->tv_sec == end->tv_sec && now->tv_nsec >= end->tv_nsec);
+}
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return now.tv_sec > end->tv_sec || (now.tv_sec == end->tv_sec && now.tv_nsec >= end->tv_nsec);
+/* Microseconds between two instants of the same CLOCK_MONOTONIC. */
+static uint64_t
+regipc_between_us(const struct timespec *from, const struct timespec *to)
+{
+    long sec  = (long)(to->tv_sec - from->tv_sec);
+    long nsec = (long)(to->tv_nsec - from->tv_nsec);
+
+    return (uint64_t)(sec * 1000000L + nsec / 1000L);
 }
 
 static long
@@ -266,9 +286,12 @@ regipc_post_request(FastpostgresRing *r, void *vctx, uint64_t seq, int timeout_m
         return -1;
     }
 
-    /* The second syscall's only job is to wake a worker that is asleep on the
-     * semaphore after its spin expired. A failed post costs latency, not the
-     * request: the leaf already holds it and the worker polls on timeout. */
+    /* The handoff and its wake hint, counted where they are made: the call
+     * delivered the request, and the post is the second syscall whose only job
+     * is to wake a worker that is asleep on the semaphore after its spin
+     * expired. A failed post costs latency, not the request: the leaf already
+     * holds it and the worker polls on timeout. */
+    fastpostgres_ring_tally(&r->tally.client, 1, 1, 0, 0);
     (void)sem_post(&r->req_ready);
     return 1;
 }
@@ -279,23 +302,36 @@ regipc_wait_response(FastpostgresRing *r, void *vctx, uint64_t seq, int timeout_
     FastpostgresRegipcCtx *ctx = vctx;
     struct timespec        deadline;
     struct timespec        spin_end;
+    struct timespec        spin_start; /* when the poll budget was taken */
+    struct timespec        spin_last;  /* the poll's most recent clock read */
+    int                    answered = 0;
     int                    rc;
 
     regipc_deadline(&deadline, timeout_ms);
-    regipc_after_us(&spin_end, (long)ctx->spin_us);
+    regipc_after_us(&spin_end, (long)ctx->spin_us, &spin_start);
+    spin_last = spin_start;
 
     /* Poll first: the answer may already be in the segment, and a load costs
      * a fraction of a syscall. The semaphore is deliberately not consumed
      * when the spin wins — its count is a hint, the sequence is the truth. */
-    while (!regipc_expired(&spin_end))
+    while (!regipc_expired(&spin_end, &spin_last))
     {
-        if (__atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE) >= seq) return 1;
+        if (__atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE) >= seq)
+        {
+            answered = 1;
+            break;
+        }
         regipc_pause();
     }
+    fastpostgres_ring_tally(&r->tally.client, 0, 0, 0, regipc_between_us(&spin_start, &spin_last));
+    if (answered != 0) return 1;
 
     for (;;)
     {
         if (__atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE) >= seq) return 1;
+        /* The idle path, counted where it is entered: one fallback to the
+         * semaphore per wake, and the spin above is what it costs. */
+        fastpostgres_ring_tally(&r->tally.client, 0, 0, 1, 0);
         rc = sem_timedwait(&r->resp_ready, &deadline);
         if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
         /* Woken by the count but not by the sequence: a stale post from an
@@ -382,20 +418,26 @@ regipc_wait_request(FastpostgresRing *r, void *vctx, uint64_t *seq, int timeout_
     FastpostgresRingRegipc *ip  = fastpostgres_ring_regipc(r);
     struct timespec         deadline;
     struct timespec         spin_end;
+    struct timespec         spin_start; /* when the poll budget was taken */
+    struct timespec         spin_last;  /* the poll's most recent clock read */
     uint32_t                calls;
 
     regipc_deadline(&deadline, timeout_ms);
-    regipc_after_us(&spin_end, (long)ctx->spin_us);
+    regipc_after_us(&spin_end, (long)ctx->spin_us, &spin_start);
+    spin_last = spin_start;
 
     /* Poll first: the module wrote the leaf from the caller's own syscall, so
      * when this worker is on CPU the request may already be waiting and no
      * wake is needed. */
     calls = __atomic_load_n(&ip->leaf.calls, __ATOMIC_ACQUIRE);
-    while ((uint64_t)calls == ctx->handled && !regipc_expired(&spin_end))
+    while ((uint64_t)calls == ctx->handled && !regipc_expired(&spin_end, &spin_last))
     {
         regipc_pause();
         calls = __atomic_load_n(&ip->leaf.calls, __ATOMIC_ACQUIRE);
     }
+    /* Zero when the request was already there: the loop short-circuits before
+     * it consults the budget, so there is no read to measure. */
+    fastpostgres_ring_tally(&r->tally.worker, 0, 0, 0, regipc_between_us(&spin_start, &spin_last));
     if ((uint64_t)calls == ctx->handled)
     {
         /* The idle path: the client posts the semaphore right after its call,
@@ -404,7 +446,10 @@ regipc_wait_request(FastpostgresRing *r, void *vctx, uint64_t *seq, int timeout_
          * re-run the last op against a stale arg. */
         for (;;)
         {
-            int rc = sem_timedwait(&r->req_ready, &deadline);
+            int rc;
+
+            fastpostgres_ring_tally(&r->tally.worker, 0, 0, 1, 0);
+            rc = sem_timedwait(&r->req_ready, &deadline);
 
             if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
             calls = __atomic_load_n(&ip->leaf.calls, __ATOMIC_ACQUIRE);
@@ -438,6 +483,7 @@ regipc_post_response(FastpostgresRing *r, void *vctx, uint64_t seq)
      * that already went to sleep after its spin. */
     __atomic_store_n(&ip->resp_seq, seq, __ATOMIC_RELEASE);
     __atomic_store_n(&r->resp_seq, seq, __ATOMIC_RELEASE);
+    fastpostgres_ring_tally(&r->tally.worker, 1, 1, 0, 0); /* the answer, and its wake hint */
     if (sem_post(&r->resp_ready) != 0) return -1;
     return 1;
 }

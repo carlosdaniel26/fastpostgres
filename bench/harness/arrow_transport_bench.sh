@@ -366,8 +366,8 @@ def main():
     if len(rings) != 1:
         problems.append(f"expected one ring for pid {os.getpid()}, found {[r['path'] for r in rings]}")
     for ring in rings:
-        if ring["magic"] != "FPRING04" or ring["version"] != 4:
-            problems.append(f"{ring['path']}: magic {ring['magic']!r} version {ring['version']}, not FPRING04 v4")
+        if ring["magic"] != "FPRING05" or ring["version"] != 5:
+            problems.append(f"{ring['path']}: magic {ring['magic']!r} version {ring['version']}, not FPRING05 v5")
         if ring["transport"] != TRANSPORT_ID[engine]:
             problems.append(f"{ring['path']}: transport {ring['transport']}, "
                             f"{engine} is {TRANSPORT_ID[engine]}")
@@ -600,10 +600,10 @@ def cell_evidence(engine, size):
     if not evidence["rings"]:
         problem("no control ring was left in /dev/shm: the engine did not serve the reads")
     for ring in evidence["rings"]:
-        if ring.get("magic") != "FPRING04" or ring.get("version") != 4:
+        if ring.get("magic") != "FPRING05" or ring.get("version") != 5:
             evidence["rings_ok"] = False
             problem(f"{ring.get('path')}: magic {ring.get('magic')!r} version {ring.get('version')}, "
-                    "not FPRING04 v4")
+                    "not FPRING05 v5")
         elif ring.get("transport") != want:
             evidence["rings_ok"] = False
             problem(f"{ring.get('path')}: transport {ring.get('transport')}, {engine} is {want}")

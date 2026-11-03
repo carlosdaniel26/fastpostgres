@@ -21,6 +21,11 @@
  * The payload never travels through either doorbell: it is the data segment,
  * published by fastpostgres_shm_publish() and read in place. A transport is a
  * notification mechanism, not a data path.
+ *
+ * Both sides also keep a tally here (FastpostgresRingTally): the handoffs, the
+ * semaphore posts, the falls back to the semaphore and the microseconds spent
+ * polling. A reader takes the two rows before and after a run; that diff is
+ * what a change of wait policy would have to move.
  */
 #ifndef FASTPOSTGRES_RING_H
 #define FASTPOSTGRES_RING_H
@@ -30,11 +35,17 @@
 #include <string.h>
 
 #define FASTPOSTGRES_RING_MAGIC                                                                              \
-    "FPRING04" /* 04: the ring carries its transport and the regipc leaf; an old segment is re-made */
-#define FASTPOSTGRES_RING_VERSION 4u
+    "FPRING05" /* 05: the ring carries a tally per side; an old segment is re-made rather than misread */
+#define FASTPOSTGRES_RING_VERSION 5u
 #define FASTPOSTGRES_RING_BYTES   (8u << 20) /* 8 MiB control segment */
 #define FASTPOSTGRES_RING_ARG     4096
 #define FASTPOSTGRES_RING_ERR     256
+
+/* Where the two tally rows sit in the segment (below). Appended after `arg`, so
+ * every offset the readers already parse - the header, `batch`, the regipc
+ * leaf's page - is unchanged; the assert in transport.c holds this literal to
+ * the struct, and bench/ names it in its own reader. */
+#define FASTPOSTGRES_RING_TALLY_OFFSET 4488u
 
 /* The regipc state sits on its own page: the module pins pages, and a 88-byte
  * leaf straddling two of them would be rejected by pin_user_pages(). */
@@ -74,9 +85,32 @@ typedef struct FastpostgresRingRegipc
     uint32_t             pad;
 } FastpostgresRingRegipc;
 
+/* One side's handoff tally: the client's row counts what it posted, the
+ * worker's what it answered. Only that side writes its own row, so the record
+ * is two snapshots of this segment around a run — no shared counter, no lock.
+ * The events are counted, never timed by an extra clock: `spin_us` comes from
+ * the poll loops' own clock reads (see engine_regipc.c). */
+typedef struct FastpostgresRingSide
+{
+    uint64_t handoffs; /* client: requests posted; worker: requests answered */
+    uint64_t posts;    /* semaphore posts made: the wake hint sent to the other side */
+    uint64_t sleeps;   /* fallbacks to the semaphore: the wait a policy change would remove */
+    uint64_t spin_us;  /* microseconds spent polling a counter before that fallback */
+} FastpostgresRingSide;
+
+/* What a change of wait policy has to move: both rows, and the pid whose CPU
+ * /proc/<pid>/stat holds (the worker's; the client's is the reader's own). */
+typedef struct FastpostgresRingTally
+{
+    FastpostgresRingSide client;
+    FastpostgresRingSide worker;
+    uint32_t             worker_pid; /* the callee, published before worker_ready */
+    uint32_t             pad;
+} FastpostgresRingTally;
+
 typedef struct FastpostgresRing
 {
-    char     magic[8];     /* "FPRING04" */
+    char     magic[8];     /* "FPRING05" */
     uint32_t version;
     uint32_t worker_ready; /* release-store once the worker has mapped it */
     uint32_t client_pid;   /* owning client: the worker exits once it is gone */
@@ -92,7 +126,20 @@ typedef struct FastpostgresRing
     uint32_t batch;
     char     error[FASTPOSTGRES_RING_ERR];
     char     arg[FASTPOSTGRES_RING_ARG]; /* "<seg>\0<query|table>\0" */
+    FastpostgresRingTally tally; /* appended: FASTPOSTGRES_RING_TALLY_OFFSET */
 } FastpostgresRing;
+
+/* One side's costs, added to its row where the engine ran the event. Relaxed
+ * adds: the row is a record read as a diff, not a way to agree on an order. */
+static inline void
+fastpostgres_ring_tally(FastpostgresRingSide *side, uint64_t handoffs, uint64_t posts, uint64_t sleeps,
+                        uint64_t spin_us)
+{
+    if (handoffs != 0) __atomic_add_fetch(&side->handoffs, handoffs, __ATOMIC_RELAXED);
+    if (posts != 0) __atomic_add_fetch(&side->posts, posts, __ATOMIC_RELAXED);
+    if (sleeps != 0) __atomic_add_fetch(&side->sleeps, sleeps, __ATOMIC_RELAXED);
+    if (spin_us != 0) __atomic_add_fetch(&side->spin_us, spin_us, __ATOMIC_RELAXED);
+}
 
 /* The regipc block, at a fixed page inside the same segment. */
 static inline FastpostgresRingRegipc *

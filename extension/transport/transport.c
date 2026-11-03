@@ -11,11 +11,17 @@
  */
 #include "transport.h"
 
+#include <stddef.h>
 #include <string.h>
 
 /* The magic is the segment's first eight bytes. The literal is NUL-terminated,
  * so comparing eight of its bytes must be exactly comparing the name. */
 _Static_assert(sizeof(FASTPOSTGRES_RING_MAGIC) - 1 == 8, "the ring magic must be eight bytes");
+
+/* The tally is appended, and bench/ readers name its offset: an offset that
+ * moved silently would make them parse something other than the tally. */
+_Static_assert(offsetof(FastpostgresRing, tally) == FASTPOSTGRES_RING_TALLY_OFFSET,
+               "the tally's offset is what the readers parse");
 
 const FastpostgresTransport *
 fastpostgres_transport_by_name(const char *name)

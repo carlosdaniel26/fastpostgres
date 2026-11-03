@@ -322,6 +322,10 @@ fastpostgres_ring_main(Datum main_arg)
         munmap(r, rsize);
         proc_exit(1);
     }
+    /* The pid first, then ready, both release: a reader that sees ready can
+     * name the process serving this ring from the ring itself, which is how the
+     * hosts outside read this side's CPU (/proc/<pid>/stat). */
+    __atomic_store_n(&r->tally.worker_pid, (uint32_t)getpid(), __ATOMIC_RELEASE);
     __atomic_store_n(&r->worker_ready, 1, __ATOMIC_RELEASE);
 
     for (;;)

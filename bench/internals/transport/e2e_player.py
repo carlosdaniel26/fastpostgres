@@ -20,9 +20,12 @@ time the reads and fold their digest. It prints:
     says what was run;
   * `<i> <ms> <rows> <served_by_shm>`, one line per timed read, so the
     percentiles in the evidence line can be recomputed from the log;
-  * `evidence {json}`, one line: the timings, the client process's CPU, peak
-    RSS, the digest, and the ring's own header read from /dev/shm - `transport`
-    (1 shm, 2 regipc), `data_bytes`, the requests posted, and, for regipc, the
+  * `evidence {json}`, one line: the timings, both processes' CPU (the client's
+    from its own clock, the worker's from /proc/<pid>/stat at the pid the ring
+    names), peak RSS, the digest, and the ring's own header read from /dev/shm -
+    `transport` (1 shm, 2 regipc), `data_bytes`, the requests posted, the two
+    tally rows as this run's delta (handoffs, semaphore posts, falls back to the
+    semaphore, microseconds spent polling, per side), and, for regipc, the
     module's `leaf.calls` counter from the page it wrote in ring 0.
 
 The transport is proven twice, and either check failing makes the cell invalid
@@ -38,7 +41,9 @@ The ring layout read here is extension/include/fastpostgres/ring.h, the ABI the
 client and the worker share: magic[8], version, worker_ready, client_pid,
 transport, data_bytes, req_seq, resp_seq, ...; `batch` at 128; the regipc leaf
 on its own page at 4096, its `calls` at +4 (regipc.h: struct
-regipc_leaf_result { magic; calls; ... }).
+regipc_leaf_result { magic; calls; ... }); and the two sides' tally, appended
+after `arg` (ring.h: FastpostgresRingTally, at FASTPOSTGRES_RING_TALLY_OFFSET):
+eight counters, then the worker's pid.
 """
 import argparse
 import json
@@ -76,15 +81,25 @@ DEFAULT_READS = {"scan": 1, "lookup": 500, "paged": 500}
 # The ring's own header, as the client and the worker lay it out. The batch field
 # is `uint32_t batch` after magic/version/worker_ready/client_pid/transport/
 # data_bytes/req_seq/resp_seq/sem_req/sem_resp/op/status/nrows.
-RING_MAGIC = b"FPRING04"
-RING_VERSION = 4
+RING_MAGIC = b"FPRING05"
+RING_VERSION = 5
 RING_HEADER = "<8sIIIIQQQ"  # 0..47: magic, version, worker_ready, client_pid, transport, data..., ...
 RING_BATCH = 128
 RING_LEAF = 4096
 RING_LEAF_CALLS = RING_LEAF + 4
+# The two sides' tally, appended after `arg` (ring.h: FastpostgresRingTally at
+# FASTPOSTGRES_RING_TALLY_OFFSET): the client's handoffs, posts, sleeps and
+# spin_us, then the worker's four, then the worker's pid and its pad.
+RING_TALLY = 4488
+RING_TALLY_FMT = "<8QII"
+TALLY_FIELDS = ("handoffs", "posts", "sleeps", "spin_us")
 LEAF_MAGIC = 0x4C454146  # "LEAF", extension/include/fastpostgres/regipc.h
 
 TRANSPORT_ID = {"shm": 1, "regipc": 2}
+
+# The resolution of the worker's CPU: /proc/<pid>/stat's utime/stime are in
+# clock ticks (10 ms here), which is why it is reported per run, not per read.
+CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 
 def now():
@@ -98,6 +113,29 @@ def cpu_seconds():
     of a few milliseconds, and times(2)'s 10 ms tick would round that CPU to zero.
     """
     return time.process_time()
+
+
+def worker_cpu_seconds(pid):
+    """The worker process's CPU, in seconds: /proc/<pid>/stat's utime + stime.
+
+    The client's own CPU comes from a precise clock; for the other side, /proc
+    is the only reading there is, and its utime/stime are in clock ticks
+    (CLK_TCK, 10 ms here), so a run's window is quantised to that tick - which
+    is why this is reported per run and not per read. None when the ring names
+    no pid or that process is gone (a worker's own children - a parallel
+    query's - are not in its numbers).
+    """
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    # comm (field 2) is parenthesised and may hold spaces: what follows it is the
+    # state (3) and the rest, so utime (14) is the twelfth of those.
+    fields = stat[stat.rindex(b")") + 2:].split()
+    return (int(fields[11]) + int(fields[12])) / CLK_TCK
 
 
 def ring_files(pid=None):
@@ -115,13 +153,14 @@ def ring_files(pid=None):
 
 
 def read_ring(path):
-    """The ring header at `path`, as a dict (and the regipc leaf when it is one)."""
+    """The ring header at `path`, as a dict (the tallies and the regipc leaf too)."""
     with open(path, "rb") as fh:
         with mmap.mmap(fh.fileno(), 0, prot=mmap.PROT_READ) as view:
             (magic, version, worker_ready, client_pid, transport, data_bytes,
              req_seq, resp_seq) = struct.unpack_from(RING_HEADER, view, 0)
             (batch,) = struct.unpack_from("<I", view, RING_BATCH)
             leaf_magic, leaf_calls = struct.unpack_from("<II", view, RING_LEAF)
+            tally = struct.unpack_from(RING_TALLY_FMT, view, RING_TALLY)
     ring = {
         "path": path,
         "magic": magic.decode("latin-1"),
@@ -135,12 +174,21 @@ def read_ring(path):
         "batch": batch,
         "leaf_magic": leaf_magic,
         "leaf_calls": leaf_calls if leaf_magic == LEAF_MAGIC else None,
+        # the two tally rows: eight counters, then the worker's pid
+        "client": dict(zip(TALLY_FIELDS, tally[:4])),
+        "worker": dict(zip(TALLY_FIELDS, tally[4:8])),
+        "worker_pid": tally[8],
     }
     if ring["magic"] != RING_MAGIC.decode("latin-1"):
         raise SystemExit(f"ring {path}: magic {ring['magic']!r}, not {RING_MAGIC!r}")
     if ring["version"] != RING_VERSION:
         raise SystemExit(f"ring {path}: version {ring['version']}, not {RING_VERSION}")
     return ring
+
+
+def tally_delta(before, after):
+    """One side's tally over the window between two read_ring() snapshots."""
+    return {field: after[field] - before[field] for field in TALLY_FIELDS}
 
 
 def find_ring():
@@ -224,6 +272,10 @@ def measure(conn, scenario, wanted, args):
         shm_before = conn.shm_reads
         rows_total = 0
         ring_before = read_ring(find_ring()["path"])
+        # The worker's pid comes from the ring (it publishes it before ready), and
+        # both CPU readings are taken around the same window as the ring's hashes.
+        worker_pid = ring_before["worker_pid"]
+        worker_cpu_before = worker_cpu_seconds(worker_pid)
         cpu_before = cpu_seconds()
         started = now()
         if scenario.kind == "bulk":
@@ -254,6 +306,9 @@ def measure(conn, scenario, wanted, args):
                 acc_b += y
         work_ms = (now() - started) * 1000
         cpu_s = cpu_seconds() - cpu_before
+        worker_cpu_s = worker_cpu_seconds(worker_pid)
+        if worker_cpu_s is not None and worker_cpu_before is not None:
+            worker_cpu_s -= worker_cpu_before
         reads = args.reads
         shm_reads = conn.shm_reads - shm_before
         for index, ms, rows, on_ring in lines:
@@ -265,6 +320,9 @@ def measure(conn, scenario, wanted, args):
 
     expected = TRANSPORT_ID[dbapi.transport()]
     ring_requests = ring_after["req_seq"] - ring_before["req_seq"]
+    # The tally each side kept over the timed window: what the wait policy cost.
+    client_tally = tally_delta(ring_before["client"], ring_after["client"])
+    worker_tally = tally_delta(ring_before["worker"], ring_after["worker"])
     # Per read the client posts OPEN, one NEXT per payload batch plus the one
     # NEXT that returns 0 (it asks for the next batch before decoding the
     # current, so the end of the stream is found by asking again), and CLOSE.
@@ -285,6 +343,15 @@ def measure(conn, scenario, wanted, args):
     if expected == TRANSPORT_ID["regipc"] and not (leaf_timed and leaf_timed >= reads):
         problems.append(f"the module's leaf counted {leaf_timed} timed calls for {reads} reads: "
                         f"ring 0 did not run")
+    # The client's own tally counts the increments the engine made to req_seq, so
+    # the two must agree: it is the ring's word that the counters are live.
+    if client_tally["handoffs"] != ring_requests:
+        problems.append(f"the client's tally counted {client_tally['handoffs']} handoffs for "
+                        f"{ring_requests} requests")
+    if worker_cpu_s is None:
+        problems.append(f"the worker's CPU could not be measured: the ring named worker_pid {worker_pid}, "
+                        f"and /proc/<pid>/stat did not answer")
+        worker_cpu_s = 0.0
     if not ok:
         problems.append("a read returned the wrong rows")
 
@@ -302,8 +369,23 @@ def measure(conn, scenario, wanted, args):
         "p95_ms": round(percentile(samples, 0.95), 3),
         "p99_ms": round(percentile(samples, 0.99), 3),
         "work_ms": round(work_ms, 3),
+        # Both sides of the handoff: the client's CPU from its own clock, the
+        # worker's from /proc (10 ms ticks, so read per run, not per row).
         "cpu_s": round(cpu_s, 6),
         "cpu_us_per_row": round(cpu_s * 1e6 / rows_total, 6) if rows_total else 0.0,
+        "worker_pid": worker_pid,
+        "worker_cpu_s": round(worker_cpu_s, 6),
+        "worker_cpu_us_per_row": round(worker_cpu_s * 1e6 / rows_total, 6) if rows_total else 0.0,
+        # The ring's tally over this run: the events each side counted and the
+        # microseconds it spent polling. What a change of wait policy could move.
+        "client_handoffs": client_tally["handoffs"],
+        "client_posts": client_tally["posts"],
+        "client_sleeps": client_tally["sleeps"],
+        "client_spin_us": client_tally["spin_us"],
+        "worker_handoffs": worker_tally["handoffs"],
+        "worker_posts": worker_tally["posts"],
+        "worker_sleeps": worker_tally["sleeps"],
+        "worker_spin_us": worker_tally["spin_us"],
         "served_by_shm": shm_reads,
         "pool": dbapi.pool_size(),
         "pool_created": dbapi.pool_created(),

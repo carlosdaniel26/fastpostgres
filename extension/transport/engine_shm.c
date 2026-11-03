@@ -14,6 +14,9 @@
  * an unanswered request is exactly req_seq != resp_seq. That is the same
  * duplicate suppression the worker used to do with a local cursor, moved into
  * the engine so the worker loop is engine-agnostic.
+ *
+ * Neither side polls in this engine, so the ring's tally records it as what it
+ * is: one post and one semaphore wait per handoff, and no spin at all.
  */
 #include "transport.h"
 
@@ -72,8 +75,10 @@ shm_post_request(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
 
     /* The release increment is what the worker's acquire load turns into a
      * request; the doorbell may arrive before or after it, which is why the
-     * worker re-reads the counter and suppresses wakes that advanced nothing. */
+     * worker re-reads the counter and suppresses wakes that advanced nothing.
+     * The handoff and its one post are counted where they are made. */
     (void)__atomic_add_fetch(&r->req_seq, 1, __ATOMIC_RELEASE);
+    fastpostgres_ring_tally(&r->tally.client, 1, 1, 0, 0);
     if (sem_post(&r->req_ready) != 0) return -1;
     return 1;
 }
@@ -87,6 +92,9 @@ shm_wait_response(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
     (void)ctx;
     (void)seq; /* the semaphore is the whole criterion; status/nrows are read under the fence below */
     shm_deadline(&deadline, timeout_ms);
+    /* No poll before it: this wait is the futex sleep a wait policy would aim
+     * at, so it is the client's whole `sleeps` on this engine. */
+    fastpostgres_ring_tally(&r->tally.client, 0, 0, 1, 0);
     rc = sem_timedwait(&r->resp_ready, &deadline);
     if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
     /* Everything the worker wrote before its release post is now visible. */
@@ -140,6 +148,7 @@ shm_wait_request(FastpostgresRing *r, void *ctx, uint64_t *seq, int timeout_ms)
         uint64_t asked;
         uint64_t answered;
 
+        fastpostgres_ring_tally(&r->tally.worker, 0, 0, 1, 0); /* one wait per turn, and a stale wake sleeps again */
         rc = sem_timedwait(&r->req_ready, &deadline);
         if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
 
@@ -165,6 +174,7 @@ shm_post_response(FastpostgresRing *r, void *ctx, uint64_t seq)
     /* Release: the worker's status/nrows/error writes must be visible to the
      * client before the response counter that lets it look at them. */
     __atomic_store_n(&r->resp_seq, seq, __ATOMIC_RELEASE);
+    fastpostgres_ring_tally(&r->tally.worker, 1, 1, 0, 0); /* the answer, and its wake hint */
     if (sem_post(&r->resp_ready) != 0) return -1;
     return 1;
 }

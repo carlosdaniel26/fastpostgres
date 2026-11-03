@@ -23,9 +23,12 @@
 # can measure both engines. The player (bench/internals/transport/
 # e2e_player.py) ensures the scenario's rows exist, warms up, times the reads,
 # folds their digest, and prints one line per read plus an `evidence` line: the
-# timings, the client's CPU, peak RSS, the digest, and the ring's own header —
-# `transport` (1 shm, 2 regipc), `data_bytes`, the requests it posted, and, for
-# regipc, the module's `leaf.calls` from the page ring 0 wrote.
+# timings, both processes' CPU (the client's from its own clock, the worker's
+# from /proc/<pid>/stat at the pid the ring names), peak RSS, the digest, and the
+# ring's own header — `transport` (1 shm, 2 regipc), `data_bytes`, the requests
+# it posted, both sides' tally over the timed window (handoffs, semaphore posts,
+# falls back to the semaphore, microseconds spent polling), and, for regipc, the
+# module's `leaf.calls` from the page ring 0 wrote.
 #
 # A cell is valid only if `conn.shm_reads` advanced by exactly one per timed read
 # (a read the ring did not serve falls back to libpq and does not count) AND the
@@ -266,9 +269,13 @@ echo "# Only the doorbell differs: the shm engine posts a semaphore per handoff 
 echo "# sleeps between them; the regipc engine's client makes an ioctl per request and both"
 echo "# sides poll the ring's counters for up to 100 us before falling back to those same"
 echo "# semaphores. The payload path - the data segment and its publish barriers - is shared."
-echo "# What these numbers do NOT show: the worker's CPU (only the client process's is"
-echo "# measured, and a regipc worker spins too, so the CPU below is one side of the handoff),"
-echo "# the network, and any concurrency: one client, one connection, one ring per process."
+echo "# Both sides' CPU is reported: the client's from its own clock, the worker's from"
+echo "# /proc/<pid>/stat (utime+stime, 10 ms ticks) at the pid the ring names. The ring's tally"
+echo "# says what the doorbell cost either side over the timed window - the handoffs, the"
+echo "# semaphore posts, the falls back to the semaphore, and the microseconds spent polling -"
+echo "# which is exactly what a change of wait policy would have to move."
+echo "# What these numbers do NOT show: the network, and any concurrency: one client, one"
+echo "# connection, one ring per process."
 echo "### END TRANSPORT-E2E"
 echo
 
@@ -325,8 +332,9 @@ container = os.environ["BENCH_CONTAINER"]
 EXPECTED = {"shm": 1, "regipc": 2}
 
 # The header from the container's /dev/shm, read by the harness itself: magic,
-# version, transport id, data_bytes, client_pid, and the regipc leaf's counter.
-# The player already read it; this is the second, independent look.
+# version, transport id, data_bytes, client_pid, the regipc leaf's counter, and
+# both sides' tally with the worker's pid (ring.h: FastpostgresRingTally at
+# 4488). The player already read it; this is the second, independent look.
 PROBE = """
 import mmap, struct, sys
 path = sys.argv[1]
@@ -334,12 +342,16 @@ try:
     with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0, prot=mmap.PROT_READ) as view:
         magic, version, ready, pid, transport, data_bytes = struct.unpack_from("<8sIIIIQ", view, 0)
         leaf_magic, leaf_calls = struct.unpack_from("<II", view, 4096)
+        tally = struct.unpack_from("<8QII", view, 4488)
 except OSError as exc:
     print("magic unreadable version - transport - data_bytes - client_pid - worker_ready - leaf_calls -", exc)
     raise SystemExit(0)
 print("magic", magic.decode("latin-1"), "version", version, "transport", transport,
       "data_bytes", data_bytes, "client_pid", pid, "worker_ready", ready,
-      "leaf_calls", leaf_calls if leaf_magic == 0x4C454146 else "-")
+      "leaf_calls", leaf_calls if leaf_magic == 0x4C454146 else "-",
+      "worker_pid", tally[8],
+      "tally_handoffs", f"{tally[0]}/{tally[4]}", "tally_posts", f"{tally[1]}/{tally[5]}",
+      "tally_sleeps", f"{tally[2]}/{tally[6]}", "tally_spin_us", f"{tally[3]}/{tally[7]}")
 """
 
 
@@ -375,7 +387,7 @@ def harness_ring(path):
     if done.returncode != 0:
         return False, f"{path}: {text}"
     fields = dict(zip(text.split()[0::2], text.split()[1::2]))
-    ok = fields.get("magic") == "FPRING04" and fields.get("version") == "4"
+    ok = fields.get("magic") == "FPRING05" and fields.get("version") == "5"
     return ok, f"{path}: {text}"
 
 
@@ -499,7 +511,19 @@ for scenario in scenarios:
             "ring_data_bytes": evidences[0]["ring_data_bytes"],
             "served_by_shm": evidences[0]["served_by_shm"],
             "leaf_calls": int(median(leaf)) if leaf else None,
+            "cpu_s": round(median([ev["cpu_s"] for ev in evidences]), 6),
             "cpu_us_per_row": round(median([ev["cpu_us_per_row"] for ev in evidences]), 4),
+            # the worker: its CPU from /proc, and the tally both sides kept
+            "worker_cpu_s": round(median([ev["worker_cpu_s"] for ev in evidences]), 6),
+            "worker_cpu_us_per_row": round(median([ev["worker_cpu_us_per_row"] for ev in evidences]), 4),
+            "client_handoffs": int(median([ev["client_handoffs"] for ev in evidences])),
+            "client_posts": int(median([ev["client_posts"] for ev in evidences])),
+            "client_sleeps": int(median([ev["client_sleeps"] for ev in evidences])),
+            "client_spin_us": int(median([ev["client_spin_us"] for ev in evidences])),
+            "worker_handoffs": int(median([ev["worker_handoffs"] for ev in evidences])),
+            "worker_posts": int(median([ev["worker_posts"] for ev in evidences])),
+            "worker_sleeps": int(median([ev["worker_sleeps"] for ev in evidences])),
+            "worker_spin_us": int(median([ev["worker_spin_us"] for ev in evidences])),
             "rss_bytes": max(ev["rss_bytes"] for ev in evidences),
             "mapped_bytes": max(ev["mapped_bytes"] for ev in evidences),
             "work_ms": round(median([ev["work_ms"] for ev in evidences]), 3),
@@ -523,8 +547,16 @@ for scenario in scenarios:
         print(f"  {'':7s} {'batch':>12s} {row['batch']:>7d} rows asked, {row['batch_delivered']:.0f}"
               f" delivered, {row['requests']} ring requests; served_by_shm {row['served_by_shm']}/"
               f"{row['reads']}; ring transport {row['ring_transport']}, data_bytes"
-              f" {row['ring_data_bytes']}; leaf_calls {leaf_note}; cpu {row['cpu_us_per_row']:.3f}"
-              f" us/row; rss {row['rss_bytes'] / (1 << 20):.1f} MiB; digest {row['digest']}")
+              f" {row['ring_data_bytes']}; leaf_calls {leaf_note}; rss {row['rss_bytes'] / (1 << 20):.1f}"
+              f" MiB; digest {row['digest']}")
+        # The wait policy, per side: what each handoff cost the two processes.
+        print(f"  {'':7s} {'wait':>12s} handoffs {row['client_handoffs']} posted / {row['worker_handoffs']}"
+              f" answered; semaphore posts {row['client_posts']} client / {row['worker_posts']} worker;"
+              f" sleeps {row['client_sleeps']} / {row['worker_sleeps']};"
+              f" spin {row['client_spin_us']} / {row['worker_spin_us']} us")
+        print(f"  {'':7s} {'cpu':>12s} {row['cpu_us_per_row']:.3f} us/row client ({row['cpu_s']:.6f} s),"
+              f" {row['worker_cpu_us_per_row']:.3f} us/row worker ({row['worker_cpu_s']:.6f} s);"
+              f" /proc utime+stime, 10 ms ticks, per run")
 
     by_engine = {row["engine"]: row for row in records if row["scenario"] == scenario}
     if len(by_engine) == 2 and all(row["value"] for row in by_engine.values()):
