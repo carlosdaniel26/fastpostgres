@@ -10,7 +10,7 @@ EXTENSION = fastpostgres
 MODULE_big = fastpostgres
 
 OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o \
-       transport/transport.o transport/engine_shm.o transport/engine_regipc.o
+       transport/transport.o transport/engine_shm.o
 
 # The version lives in this file and in fastpostgres.control, and the SQL file is
 # named after it; `just check-version` proves the three agree. The 1.0.0 file and

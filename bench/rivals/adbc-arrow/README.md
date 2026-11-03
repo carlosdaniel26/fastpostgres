@@ -29,10 +29,6 @@ prints them on every run.
   (`--mib`, 512 by default, one data segment): `ring` against `arrow-batch` and
   `arrow-table`, each reporting the bytes it carried and its peak RSS.
   Driven by `bench/harness/arrow_memory_bench.sh`.
-- `sqlalchemy_bench.py` again, per ring engine, by
-  `bench/harness/arrow_transport_bench.sh`: the same read once over shm and once
-  over regipc, which is the only run that holds the engine as a second factor
-  for this query.
 
 ## The rules this one holds to
 

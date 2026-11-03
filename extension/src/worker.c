@@ -273,14 +273,8 @@ fastpostgres_ring_main(Datum main_arg)
     const FastpostgresTransport *t;
     FastpostgresRing            *r;
     size_t                       rsize;
-    /* The engine's per-process state; the union is the larger of the two,
-     * because each hook reads only the ctx shaped for the engine it belongs
-     * to. Nothing here is shared with the client. */
-    union
-    {
-        FastpostgresShmCtx    shm;
-        FastpostgresRegipcCtx regipc;
-    } ctx;
+    /* The engine's per-process state. Nothing here is shared with the client. */
+    FastpostgresShmCtx           ctx;
 
     (void)main_arg;
 
@@ -340,9 +334,8 @@ fastpostgres_ring_main(Datum main_arg)
         {
             /* Timeout: re-check SIGTERM, the client that owns this ring (gone
              * means there is nobody to serve), and the ring's op. The op check
-             * is what makes fastpostgres_ring_stop work on the regipc engine:
-             * that function only posts the semaphore, and no leaf call carries
-             * the STOP, so the wake surfaces here as a timeout. */
+             * makes a STOP whose doorbell post was missed visible here: the
+             * stop path only posts the semaphore. */
             if (r->op == FASTPOSTGRES_OP_STOP) break;
             if (r->client_pid != 0 && kill((pid_t)r->client_pid, 0) != 0 && errno == ESRCH) break;
             continue;

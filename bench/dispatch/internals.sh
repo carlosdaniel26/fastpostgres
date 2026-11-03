@@ -23,13 +23,6 @@ internals: the meters behind the design notes
                    (CODEC-TRANSPORT.md, bench/results/codec-transport.log)
   cache-stat       cache counters on the host's PMU: decodes per row, transports
                    per KiB (bench/results/cache-stat.log)
-  transport        the ring's two doorbells, isolated: the semaphores against the
-                   regipc kernel call, one hop at a time (host, /dev/regipc)
-                   (docs/TRANSPORTS.md, bench/results/transport-shm-vs-regipc.log)
-  transport-e2e    the two doorbells end to end: a real read through PostgreSQL,
-                   the worker's batches, the client's rows - once per engine,
-                   /dev/regipc passed into the dev image
-                   (docs/TRANSPORTS.md, bench/results/transport-e2e.log)
 
 Arguments after the target go to that target's recipe.
 EOF
@@ -41,8 +34,6 @@ case "$target" in
   decode-mca)      just decode-mca "$@" ;;
   codec-transport) just codec-transport "$@" ;;
   cache-stat)      just cache-stat "$@" ;;
-  transport)       just transport "$@" ;;
-  transport-e2e)   just transport-e2e "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "internals: unknown target '$target'" >&2

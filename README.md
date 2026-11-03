@@ -195,8 +195,8 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 | class | command | what it answers |
 |---|---|---|
 | workloads | `just bench [scenario...]` | does swapping the driver help an application: lookups, pages, scans, joins, aggregates, concurrency, read/write mixes |
-| rivals | `just rivals [adbc\|arrow-transport\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
-| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|transport\|transport-e2e]` | what the row decode and the transport cost at the instruction, cache and port level |
+| rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
+| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat]` | what the row decode and the transport cost at the instruction, cache and port level |
 | adoption | `just adoption [magicstack-pgbench]` | what a published third-party suite's own queries and protocol find, with our cell in its roster |
 
 The full catalog - the scenarios, the method, the log behind every number and the
@@ -242,7 +242,7 @@ Read-only `SELECT`s take the ring; everything else goes over libpq. The `example
 | `FASTPOSTGRES_SEGMENT_BYTES` | 1 GiB | capacity of each data segment, in bytes; clamped to 64 KiB - 1 GiB. A stream alternates two of them |
 | `FASTPOSTGRES_OBJ_ARENA` | half the cgroup limit, at most 8 GiB | arena for the Python objects a tuple read builds; `0` uses the normal constructors |
 
-On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once. The second ring engine is a knob of its own: [`FASTPOSTGRES_TRANSPORT` and what each engine costs](docs/TRANSPORTS.md).
+On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once.
 
 ## Status
 

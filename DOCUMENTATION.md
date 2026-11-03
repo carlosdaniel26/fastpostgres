@@ -9,13 +9,13 @@ and the formal bits.
 
 | path | what it is |
 |---|---|
-| `extension/transport/` | the two doorbell engines (`engine_shm.c`, `engine_regipc.c`), the vendored regipc ABI and module |
+| `extension/transport/` | the doorbell engine (`engine_shm.c`) |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
 | `bench/` | the claim's tree: the measurement classes (`workloads/`, `rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
-| `docs/` | the manual: the two transports, the limitations, and the figures every page embeds |
+| `docs/` | the manual: the limitations and the figures every page embeds |
 | `bench/NOTES.md` | the decode's lab notebook: hypotheses, meters and their results |
 
 ## Documentation index
@@ -24,7 +24,6 @@ and the formal bits.
 |---|---|
 | run or read about the benchmarks | [`bench/README.md`](bench/README.md) |
 | see every committed measurement | [`bench/RESULTS.md`](bench/RESULTS.md) |
-| choose or change the transport | [`docs/TRANSPORTS.md`](docs/TRANSPORTS.md) |
 | understand the wire format and the two frames | [`extension/include/fastpostgres/fastpostgres_shm.h`](extension/include/fastpostgres/fastpostgres_shm.h) |
 | reproduce a measurement, or read the statistics | [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |

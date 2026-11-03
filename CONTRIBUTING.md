@@ -25,9 +25,9 @@ sources are formatted with the repository's `.clang-format`, and the
 The format lives in **one** header, `extension/include/fastpostgres/`, and both
 sides include it: the extension's worker writes it, the Python client and the
 codec benchmark read it. The doorbell has its own seam,
-`extension/transport/transport.h` — two engines, one ops table, selected per
-connection (`FASTPOSTGRES_TRANSPORT`) and recorded in the ring, so a ring made by
-one engine is refused by the other. If you change the layout, bump
+`extension/transport/transport.h` — one ops table, recorded in the ring, so a
+segment whose magic, version or engine does not match is refused rather than
+driven. If you change the layout, bump
 `FASTPOSTGRES_SHM_MAGIC`/`VERSION` in `extension/include/fastpostgres/ring.h` or
 `fastpostgres_shm.h` as the comment there says, and say why in the commit: a
 stale segment must be refused, not misread.

@@ -23,7 +23,7 @@ are released together.
   `WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md` and the
   notebook (formerly `DECODE-NOTES.md`, now `NOTES.md`) - moved in beside the
   records they cite; `docs/BENCHMARKS.md` became `bench/README.md`. What stays in
-  `docs/` is the manual: the two transports, the limitations, and the figures.
+  `docs/` is the manual: the limitations and the figures.
 - Each rival has a directory of its own (`bench/rivals/adbc-arrow/`,
   `bench/rivals/pgcache/`, and the workload suite's README for psycopg), and the
   fixture the comparisons had been sharing by importing each other moved to
@@ -36,37 +36,6 @@ are released together.
 - The codec x transport runner's default report path wrote to `docs/`, where
   nothing read it; it now writes `bench/results/codec-transport.log`, as its own
   docstring, the justfile comment and the chart always said.
-
-## [1.1.0] - 2026-11-02
-
-### Added
-
-- **Two transports, selectable.** The ring's notification path is now an engine:
-  `FASTPOSTGRES_TRANSPORT=shm` (the ring's own semaphores: one futex wake and a
-  scheduler handoff per batch, no privileges) or `regipc` (a cross-process call
-  through the regipc kernel module: the client puts the request descriptor in the
-  nine carrier registers, one ioctl makes ring 0 write it into a page the worker
-  pinned, and both sides poll this segment's counters before falling back to the
-  semaphores when idle). The payload is untouched: it is the data segment, and no
-  doorbell carries bytes. Measured in isolation (`just internals transport`):
-  **163.6k hops/s at p50 6.36 us for shm, 1.74M hops/s at p50 0.521 us for
-  regipc**, at 6.24 us against 1.14 us of CPU per hop - the regipc side spends
-  that CPU spinning, which is the trade the technique makes.
-- `fastpostgres_ring_start(text, text)` names the engine; the one-argument form
-  stays shm. The ring (magic `FPRING04`) records which engine made it, and a
-  segment written for one engine is refused by the other rather than driven.
-- The regipc ABI (version 2) is vendored at
-  [`extension/include/fastpostgres/regipc.h`](extension/include/fastpostgres/regipc.h)
-  with the module it belongs to
-  ([`extension/transport/regipc/module/`](extension/transport/regipc/module/)),
-  from the technique's own repository.
-
-### Changed
-
-- `python/`: `Ring(name, segment_bytes, transport=...)` and the
-  `FASTPOSTGRES_TRANSPORT` knob; the client compiles the engine it uses out of
-  `extension/transport/`, so both sides run the same doorbell code.
-
 
 ## [1.0.0] - 2026-11-01
 

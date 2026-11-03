@@ -1,13 +1,13 @@
 /*
  * transport.c — name resolution and the ring's provenance check. Everything
  * else about an engine lives with the engine; this file is the one place that
- * knows both names, because the worker hears about its engine as a string
+ * knows the name, because the worker hears about its engine as a string
  * (the third field of bgw_extra) and the SQL surface takes the same string.
  *
  * The check is deliberately exact: a segment whose magic, layout version or
- * engine does not match is refused before either side reads it as a ring. The
- * two engines disagree about what the bytes at the other side of the doorbell
- * mean, so "close enough" here would corrupt a live session.
+ * engine does not match is refused before either side reads it as a ring. A
+ * segment made for another engine must not be driven with the wrong doorbell,
+ * so "close enough" here would corrupt a live session.
  */
 #include "transport.h"
 
@@ -29,7 +29,6 @@ fastpostgres_transport_by_name(const char *name)
     if (name == NULL) return NULL;
 
     if (strcmp(name, fastpostgres_transport_shm.name) == 0) return &fastpostgres_transport_shm;
-    if (strcmp(name, fastpostgres_transport_regipc.name) == 0) return &fastpostgres_transport_regipc;
     return NULL;
 }
 

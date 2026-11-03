@@ -10,15 +10,10 @@
  * That data segment is the worker's to create and size, so the client says how
  * big it wants it in the ring (data_bytes) before starting the worker.
  *
- * Two transports share this block. `transport` says which one created it:
+ * `transport` says which engine created the block: FASTPOSTGRES_TRANSPORT_SHM,
+ * whose doorbells are the two sem_t below (futex under the hood).
  *
- *   SHM     the doorbells are the two sem_t below (futex under the hood)
- *   REGIPC  the request travels through the regipc kernel module: the client
- *           calls, ring 0 writes the nine carriers into `regipc.leaf` (a page
- *           the worker pinned), and both sides poll the counters in this
- *           segment before falling back to the semaphores when idle
- *
- * The payload never travels through either doorbell: it is the data segment,
+ * The payload never travels through a doorbell: it is the data segment,
  * published by fastpostgres_shm_publish() and read in place. A transport is a
  * notification mechanism, not a data path.
  *
@@ -42,14 +37,10 @@
 #define FASTPOSTGRES_RING_ERR     256
 
 /* Where the two tally rows sit in the segment (below). Appended after `arg`, so
- * every offset the readers already parse - the header, `batch`, the regipc
- * leaf's page - is unchanged; the assert in transport.c holds this literal to
- * the struct, and bench/ names it in its own reader. */
+ * every offset the readers already parse - the header, `batch`, `arg` - is
+ * unchanged; the assert in transport.c holds this literal to the struct, and
+ * bench/ names it in its own reader. */
 #define FASTPOSTGRES_RING_TALLY_OFFSET 4488u
-
-/* The regipc state sits on its own page: the module pins pages, and a 88-byte
- * leaf straddling two of them would be rejected by pin_user_pages(). */
-#define FASTPOSTGRES_RING_REGIPC_OFFSET 4096u
 
 enum FastpostgresRingOp
 {
@@ -61,35 +52,11 @@ enum FastpostgresRingOp
     FASTPOSTGRES_OP_NEXT_ROWS = 6 /* the row frame (falls back to columnar) */
 };
 
-/* The module's leaf, as laid out by struct regipc_leaf_result (regipc.h). It is
- * mirrored here so this header stays free of the kernel ABI; engine_regipc.c
- * includes both and asserts the two layouts agree. */
-typedef struct FastpostgresRingLeaf
-{
-    uint32_t magic;    /* REGIPC_LEAF_MAGIC */
-    uint32_t calls;    /* incremented by the module, in ring 0, once per call */
-    uint64_t checksum; /* FNV-1a over the low 32 bits of every carrier */
-    uint64_t values[9]; /* x0..x8 of the most recent call */
-} FastpostgresRingLeaf;
-
-/* What the two sides keep around the leaf: the worker's cursor over `calls`,
- * the response counter it publishes, and the pids the pairing needs. */
-typedef struct FastpostgresRingRegipc
-{
-    FastpostgresRingLeaf leaf;
-    uint64_t             worker_seen; /* the worker's cursor over leaf.calls */
-    uint64_t             resp_seq;    /* the last response the worker published */
-    uint32_t             worker_pid;  /* the callee: the client pairs with it */
-    uint32_t             client_pid;  /* the caller */
-    uint32_t             ready;       /* the worker registered with the module */
-    uint32_t             pad;
-} FastpostgresRingRegipc;
-
 /* One side's handoff tally: the client's row counts what it posted, the
  * worker's what it answered. Only that side writes its own row, so the record
  * is two snapshots of this segment around a run — no shared counter, no lock.
- * The events are counted, never timed by an extra clock: `spin_us` comes from
- * the poll loops' own clock reads (see engine_regipc.c). */
+ * The events are counted, never timed by an extra clock: the shm engine never
+ * polls, so it leaves `spin_us` at zero. */
 typedef struct FastpostgresRingSide
 {
     uint64_t handoffs; /* client: requests posted; worker: requests answered */
@@ -114,7 +81,7 @@ typedef struct FastpostgresRing
     uint32_t version;
     uint32_t worker_ready; /* release-store once the worker has mapped it */
     uint32_t client_pid;   /* owning client: the worker exits once it is gone */
-    uint32_t transport;    /* FASTPOSTGRES_TRANSPORT_SHM | _REGIPC */
+    uint32_t transport;    /* FASTPOSTGRES_TRANSPORT_SHM */
     uint64_t data_bytes;   /* capacity the client asks for a data segment (0 = FASTPOSTGRES_SEGMENT_BYTES) */
     uint64_t req_seq;      /* bumped by the client per request */
     uint64_t resp_seq;     /* bumped by the worker per response */
@@ -139,13 +106,6 @@ fastpostgres_ring_tally(FastpostgresRingSide *side, uint64_t handoffs, uint64_t 
     if (posts != 0) __atomic_add_fetch(&side->posts, posts, __ATOMIC_RELAXED);
     if (sleeps != 0) __atomic_add_fetch(&side->sleeps, sleeps, __ATOMIC_RELAXED);
     if (spin_us != 0) __atomic_add_fetch(&side->spin_us, spin_us, __ATOMIC_RELAXED);
-}
-
-/* The regipc block, at a fixed page inside the same segment. */
-static inline FastpostgresRingRegipc *
-fastpostgres_ring_regipc(FastpostgresRing *r)
-{
-    return (FastpostgresRingRegipc *)((char *)r + FASTPOSTGRES_RING_REGIPC_OFFSET);
 }
 
 /* The request payload every op carries: "<a1>\0<a2>\0" in `arg`. The client

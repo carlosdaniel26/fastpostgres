@@ -25,7 +25,6 @@ extension/test/regression.diffs
 extension/test/regression.out
 .ruff_cache/
 *.ko
-extension/transport/regipc/vector/fpvec
 
 # kbuild leftovers (the module variants)
 .*.cmd

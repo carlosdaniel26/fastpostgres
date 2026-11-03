@@ -77,11 +77,11 @@ test:
 bench *args:
     bench/harness/workloads_bench.sh {{args}}
 
-# the competitive benchmarks: adbc | arrow-transport | arrow-memory | cache | cache-budget
+# the competitive benchmarks: adbc | arrow-memory | cache | cache-budget
 rivals target="" *args:
     bench/dispatch/rivals.sh {{target}} {{args}}
 
-# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport | transport-e2e
+# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat
 internals target="" *args:
     bench/dispatch/internals.sh {{target}} {{args}}
 
@@ -93,7 +93,7 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: workloads | arrow | arrow-transport | arrow-memory | cache | cache-budget | codec | transport | transport-e2e | ab
+# one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | ab
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
 
@@ -102,13 +102,6 @@ charts target="" *args:
 [private]
 bench-adbc *sizes:
     just _run benchmarks.sh {{sizes}}
-
-# the same read with the ring engine as a second factor (rivals arrow-transport):
-# one fresh process per (engine, size) over shm and over regipc, ADBC measured
-# once - the container gets the host's /dev/regipc with --device
-[private]
-arrow-transport *args:
-    bench/harness/arrow_transport_bench.sh {{args}}
 
 # fastpostgres against ADBC + Arrow with the ring's buffer fixed (rivals
 # arrow-memory): the same reads and what each side held while it delivered them
@@ -141,34 +134,6 @@ decode-ir *args:
 [private]
 decode-mca *args:
     just _run_profile decode-mca.sh {{args}}
-
-# the ring's two doorbells, isolated, on the host (internals transport): the
-# regipc module cannot be loaded inside the image, so this one never runs in it
-[private]
-transport *args:
-    bench/jobs/transport.sh {{args}}
-
-# the regipc module object, built against the running kernel's headers
-[private]
-_regipc_module:
-    make -C extension/transport/regipc/module
-
-# load the regipc module (the second doorbell): builds it, then insmods with
-# mode=0666, the trust boundary the device node is and the mode the image's
-# postgres user needs to open it through --device
-regipc-load: _regipc_module
-    sudo insmod {{justfile_directory()}}/extension/transport/regipc/module/regipc.ko mode=0666
-
-# unload it
-regipc-unload:
-    sudo rmmod regipc
-
-# the same two doorbells end to end (internals transport-e2e): a real read
-# through PostgreSQL in the dev image, once per engine - the container gets the
-# host's /dev/regipc with --device, which is what makes the regipc cell possible
-[private]
-transport-e2e *args:
-    bench/harness/transport_e2e_bench.sh {{args}}
 
 # cache counters on the host's PMU (internals cache-stat)
 [private]
