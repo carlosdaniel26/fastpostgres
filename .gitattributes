@@ -6,4 +6,5 @@ docs/assets/*.png linguist-generated=true
 
 # The image and the demo are not part of the library's language split.
 docs/** linguist-documentation
+bench/*.md linguist-documentation
 *.c linguist-language=C

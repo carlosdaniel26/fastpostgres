@@ -1,6 +1,6 @@
 # FastPostgres dev tasks: one image, a throwaway PostgreSQL for every run.
 #
-# Measurement has three classes, one command each (docs/BENCHMARKS.md is the
+# Measurement has three classes, one command each (bench/README.md is the
 # catalog: what each answers, the method, and where its record lives):
 #
 #   just bench [scenario...]  workloads: realistic scenarios over a commerce
@@ -71,7 +71,7 @@ _run_profile *args:
 test:
     just _run tests.sh
 
-# the workload suite: realistic scenarios, app-facing API on both sides (docs/BENCHMARKS.md)
+# the workload suite: realistic scenarios, app-facing API on both sides (bench/README.md)
 bench *args:
     bench/harness/workloads_bench.sh {{args}}
 
@@ -155,7 +155,7 @@ cache-stat *args:
     bench/jobs/cache-stat.sh {{args}}
 
 # the codec x transport isolation matrix (internals codec-transport): sequential
-# by construction (docs/CODEC-TRANSPORT.md); writes bench/results/codec-transport.log as
+# by construction (bench/CODEC-TRANSPORT.md); writes bench/results/codec-transport.log as
 # the invoking user so the log is writable
 [private]
 codec-transport *args:
@@ -172,11 +172,6 @@ check-links:
 
 # what CI's lint job adds on top: ruff (python/), shellcheck (the harnesses)
 lint: check-version check-links
-
-# build the documentation site into site/ (mkdocs-material, in a throwaway image)
-docs:
-    docker run --rm -v "{{justfile_directory()}}:/docs" -w /docs python:3.12-slim \
-      sh -c "pip install -q mkdocs-material && mkdocs build --strict"
 
 # drop the built images
 clean:

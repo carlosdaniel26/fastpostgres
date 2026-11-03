@@ -22,7 +22,7 @@ Everything numeric below is from the two logs committed in this repository
 `bench/results/fastpostgres-vs-arrow.log` for the query-level comparison), measured on one
 machine with the versions in the footers: PostgreSQL 18, pyarrow 26.0.0, ADBC
 1.13.0. Where a claim is *not* measured, the text says so. The list of things
-this design gives up in exchange is in [`LIMITATIONS.md`](LIMITATIONS.md).
+this design gives up in exchange is in [`LIMITATIONS.md`](../docs/LIMITATIONS.md).
 
 ---
 
@@ -227,7 +227,7 @@ sequential stream the prefetcher keeps fed, not a working set that fits in cache
 At 1M rows about 1.2 lines per row come from L3 or beyond, and it still
 costs 17 cycles — the flatness is the result, not residency. The meter is
 `just cache-stat`, the run is `bench/results/cache-stat.log`, and the analysis is the
-cache section of [`docs/DECODE-NOTES.md`](DECODE-NOTES.md).
+cache section of [`NOTES.md`](NOTES.md).
 
 Arrow is zero-copy too, in the part of the path people usually mean: wrapping
 existing buffers in arrays costs nothing, and the record-batch wrap is counted as
@@ -299,7 +299,7 @@ throughput falls back and the median grows roughly linearly with the window,
 because what it then measures is queueing. So the protocol is not optimal for
 throughput; it is optimal for *latency*, which is what the query path needs, since
 it is not transport-bound. `transport_bench --in-flight N` is the experiment, and
-the sweep is in [`docs/DECODE-NOTES.md`](DECODE-NOTES.md).
+the sweep is in [`NOTES.md`](NOTES.md).
 
 **Costs:** same host only; the segment itself is the interface, so its
 permissions and lifetime are the security boundary (same user, single host, an
@@ -410,7 +410,7 @@ store, which it did, and then removed.
 
 The complete list of what is deliberately not supported — remote clients,
 `numeric`, `jsonb`, `10M+` spread measurement, and the rest — is in
-[`LIMITATIONS.md`](LIMITATIONS.md), which also has the FAQ of objections worth
+[`LIMITATIONS.md`](../docs/LIMITATIONS.md), which also has the FAQ of objections worth
 answering in public.
 
 ---
@@ -441,7 +441,7 @@ just bench                # the query-level comparison against ADBC + Arrow
 Then read, in this order: [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) for the
 method and the "what the first run was actually measuring" section,
 [`METHODOLOGY.md`](METHODOLOGY.md) for the claims-to-evidence table, and
-[`LIMITATIONS.md`](LIMITATIONS.md) for what is not claimed.
+[`LIMITATIONS.md`](../docs/LIMITATIONS.md) for what is not claimed.
 
 The predictions that would falsify this document, in order of how easy they are
 to test:

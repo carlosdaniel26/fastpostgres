@@ -36,18 +36,18 @@ stale segment must be refused, not misread.
 
 Every published number is a committed record with a `git:` stamp of the code
 that produced it. The rules are in
-[`docs/METHODOLOGY.md`](docs/METHODOLOGY.md), and in short:
+[`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and in short:
 
 - one player per process, one player at a time;
 - the same output on both sides, checked by the harness (a faster path that
   returned something else fails the run);
 - the evidence line proves the path (reads served by the ring against reads
   issued, the budget the cache resolved, the bytes each side held);
-- the record is rebuilt by its harness (`docs/RESULTS.md` says which), never
+- the record is rebuilt by its harness (`bench/RESULTS.md` says which), never
   edited by hand - a re-run replaces it, and the stamp changes.
 
 A new benchmark belongs to one of the three classes in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); if it does not fit, say so in the
+[`bench/README.md`](bench/README.md); if it does not fit, say so in the
 issue and we will find the class together.
 
 ## Releases

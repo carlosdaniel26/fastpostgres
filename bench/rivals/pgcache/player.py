@@ -6,7 +6,7 @@ Run inside the dev image, as postgres, by bench/harness/pgcache_bench.sh:
     player.py read <player> <workload> <n> <reps> [--cold]
 
 `setup` builds the same table `just bench` reads (SHAPES and the model come from
-bench/rivals/sqlalchemy_bench.py) and adds the view the pass-through workload needs.
+bench/lib/dataset.py) and adds the view the pass-through workload needs.
 `read` runs one player against one workload and prints one whitespace-separated
 line for the caller to format:
 
@@ -26,12 +26,12 @@ import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # bench/: lib
 
 import psycopg  # noqa: E402
 from fastpostgres import dbapi  # noqa: E402
 
-from sqlalchemy_bench import CORE_SQL, SHAPES, SHAPE, setup  # noqa: E402
+from lib.dataset import CORE_SQL, SHAPES, SHAPE, setup  # noqa: E402
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "host=/tmp dbname=postgres user=postgres")
 PGCACHE_URL = os.environ.get(

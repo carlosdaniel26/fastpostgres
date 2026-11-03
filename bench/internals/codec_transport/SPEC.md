@@ -113,9 +113,9 @@ means in a comment next to the counter.
 3. **File ownership.** Each unit owns only its own files under
    `bench/internals/codec_transport/` (`fpg_*` for the FPG codec, `arrow_*` for the
    Arrow codec, `transport_*` for the transports, `run_matrix.py` +
-   `docs/CODEC-TRANSPORT.md` for the runner and the write-up). Do not edit
-   `justfile`, `README.md`, `bench/charts/`, `docs/METHODOLOGY.md`,
-   `docs/LIMITATIONS.md`, `docs/CODEC-TRANSPORT.md` is the runner's, or
-   `bench/rivals/sqlalchemy_bench.py`.
+   `bench/CODEC-TRANSPORT.md` for the runner and the write-up). Do not edit
+   `justfile`, `README.md`, `bench/charts/`, `bench/METHODOLOGY.md`,
+   `docs/LIMITATIONS.md`, `bench/CODEC-TRANSPORT.md` is the runner's, or
+   `bench/rivals/adbc-arrow/sqlalchemy_bench.py`.
 4. A unit is done when it compiles/runs in the image, produces the JSON above
    for `--rows 1000`, and its checksum matches the others (when they exist).

@@ -8,7 +8,7 @@
 # across engines: the former measured one engine (shm) on this benchmark's schema
 # and players, the latter measured both engines on the workload suite's schema.
 # This harness measures all three cells in one run. Per size, one fresh process
-# per engine runs bench/rivals/sqlalchemy_bench.py: FASTPOSTGRES_TRANSPORT
+# per engine runs bench/rivals/adbc-arrow/sqlalchemy_bench.py: FASTPOSTGRES_TRANSPORT
 # is read at import and a ring's engine is fixed at creation, so a process
 # cannot serve both engines. The ADBC players ride inside those runs; they are
 # engine-independent, so they are measured once per size and recorded once.
@@ -56,7 +56,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 image=${IMAGE:-fastpostgres-dev}
 shm=${SHM:-3g}
 container=fp-arrow-transport
-player=/src/bench/rivals/sqlalchemy_bench.py
+player=/src/bench/rivals/adbc-arrow/sqlalchemy_bench.py
 probe_dir=/tmp/fp-arrow-transport
 
 quick=0
@@ -287,7 +287,7 @@ benchmark's process has exited:
 
     FASTPOSTGRES_TRANSPORT=regipc python3 probe.py 1000000
 
-It reads the benchmark's table (bench/rivals/sqlalchemy_bench.py's rows),
+It reads the benchmark's table (bench/rivals/adbc-arrow/sqlalchemy_bench.py's rows),
 digests it (count and the numeric columns' sums, the generated data's closed
 form) and reports the client's own evidence: how many reads the ring served
 (conn.shm_reads) and the ring file this process created, with the header read
@@ -327,7 +327,7 @@ def ring_headers(pid):
 
 
 def expected(n):
-    """The closed form of the generated data (bench/rivals/sqlalchemy_bench.py)."""
+    """The closed form of the generated data (bench/rivals/adbc-arrow/sqlalchemy_bench.py)."""
     cycles, rem = divmod(n, 500)
     return [n, n * (n + 1) // 2, n * (n + 1) / 4,
             cycles * sum(range(500)) + sum(range(1, rem + 1)), n // 2]
@@ -402,7 +402,7 @@ echo "postgres: $pg_version (in the container)"
 echo "python: $py_version, sqlalchemy $sqlalchemy_version, pyarrow $pyarrow_version, adbc $adbc_version (in the container, where the players run)"
 echo "fastpostgres image: $image $image_id"
 echo "shm: $shm (/dev/shm in the container; the ring's data segments live there)"
-echo "shape: $shape (SHAPE; the schema bench/rivals/sqlalchemy_bench.py builds)"
+echo "shape: $shape (SHAPE; the schema bench/rivals/adbc-arrow/sqlalchemy_bench.py builds)"
 echo "regipc: /dev/regipc mode ${regipc_mode}; module version ${regipc_version:-unknown};" \
   "srcversion ${regipc_srcversion:-unknown}; params ${regipc_params:-none}"
 echo "regipc in the container: $regipc_container"

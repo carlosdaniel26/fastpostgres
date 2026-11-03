@@ -1,7 +1,7 @@
 # Measurement methodology
 
 What this repository measures, how, and what the numbers can and cannot support.
-`docs/DECODE-NOTES.md` is the decode's lab notebook; this file is the protocol for
+`NOTES.md` is the decode's lab notebook; this file is the protocol for
 the benchmark and the record of its threats to validity.
 
 ## The claims
@@ -116,7 +116,7 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
 - **Two shapes, not every shape.** NULLs, both varlena header sizes and
   non-ASCII text are measured (`SHAPE=mixed`); wide rows, numeric/timestamps and
   TOAST-heavy values are not — see
-  [`LIMITATIONS.md`](LIMITATIONS.md) for the full list of what the benchmark
+  [`LIMITATIONS.md`](../docs/LIMITATIONS.md) for the full list of what the benchmark
   does not cover and what happens in those cases.
 - **The decode meters are simulation.** `just decode-ir` runs callgrind, which
   simulates instructions and caches and never touches the PMU (which is also why
@@ -125,7 +125,7 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   cycles. The IPC `decode-ir` prints is against TSC ticks, not core cycles.
 - **No PMU counters.** `perf stat` is unavailable in the container. The
   equivalents above are simulation-based or TSC-based, and the difference
-  matters — see `docs/DECODE-NOTES.md`.
+  matters — see `NOTES.md`.
 
 ## Reproducing
 

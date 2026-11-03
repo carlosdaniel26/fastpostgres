@@ -1118,7 +1118,7 @@ document kept answering that perf could not run. It cannot run *in the container
 there is no `perf` in the dev image and Docker's seccomp blocks `perf_event_open` —
 but the units under test are freestanding C++ that runs on the host, and
 `perf_event_paranoid=2` allows a user to count its own processes. That is what
-`just cache-stat [rows] [reps]` does; `docs/cache-stat.log` is one committed run,
+`just cache-stat [rows] [reps]` does; `bench/results/cache-stat.log` is one committed run,
 and the numbers below are that run (four runs agree within ±5% on cycles/row).
 
 ### Two counters had to be thrown out, and one trick was necessary
@@ -1323,4 +1323,4 @@ That is the decode alone. At query level it is not resolvable: the system-level 
 moved this repository's paths **−7% and +11%** on shapes the change did and did not
 touch, while the ADBC control held **±2%** — so that harness' resolution is about
 ±10% and a 3% client-side change is inside it. The charts and every log are in
-`docs/improve-*.log`, rendered by `just ab-charts`.
+`bench/results/ab/improve-*.log`, rendered by `just ab-charts`.

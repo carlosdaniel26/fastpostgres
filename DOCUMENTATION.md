@@ -12,25 +12,25 @@ and the formal bits.
 | `extension/transport/` | the two doorbell engines (`engine_shm.c`, `engine_regipc.c`), the vendored regipc ABI and module |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
-| `bench/` | the harnesses (`workloads/`, `rivals/`, `internals/`), the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
+| `bench/` | the claim's tree: the measurement classes (`workloads/`, `rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
-| `docs/` | the benchmark catalog, methodology, limitations, the comparisons, and every committed log |
-| `docs/DECODE-NOTES.md` | the decode's lab notebook: hypotheses, meters and their results |
+| `docs/` | the manual: the two transports, the limitations, and the figures every page embeds |
+| `bench/NOTES.md` | the decode's lab notebook: hypotheses, meters and their results |
 
 ## Documentation index
 
 | I want to... | go here |
 |---|---|
-| run or read about the benchmarks | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| see every committed measurement | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| run or read about the benchmarks | [`bench/README.md`](bench/README.md) |
+| see every committed measurement | [`bench/RESULTS.md`](bench/RESULTS.md) |
 | choose or change the transport | [`docs/TRANSPORTS.md`](docs/TRANSPORTS.md) |
 | understand the wire format and the two frames | [`extension/include/fastpostgres/fastpostgres_shm.h`](extension/include/fastpostgres/fastpostgres_shm.h) |
-| reproduce a measurement, or read the statistics | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) |
+| reproduce a measurement, or read the statistics | [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
-| understand why it is faster than Arrow, mechanism by mechanism | [`docs/WHY-IT-WINS.md`](docs/WHY-IT-WINS.md) |
-| compare against a result cache | [`docs/PG-CACHE.md`](docs/PG-CACHE.md) |
-| separate format cost from transport cost | [`docs/CODEC-TRANSPORT.md`](docs/CODEC-TRANSPORT.md) |
+| understand why it is faster than Arrow, mechanism by mechanism | [`bench/WHY-IT-WINS.md`](bench/WHY-IT-WINS.md) |
+| compare against a result cache | [`bench/PG-CACHE.md`](bench/PG-CACHE.md) |
+| separate format cost from transport cost | [`bench/CODEC-TRANSPORT.md`](bench/CODEC-TRANSPORT.md) |
 | contribute, or report a vulnerability | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) |
 | know what changed | [`CHANGELOG.md`](CHANGELOG.md) |
 
@@ -52,8 +52,8 @@ how this can be used:
 
 Issues and pull requests are welcome. `just test` runs the client test suite, and
 any measurement offered as evidence should follow
-[`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) and be committed as a log next to
-the others in `docs/`, with its `git:` stamp.
+[`bench/METHODOLOGY.md`](bench/METHODOLOGY.md) and be committed as a log next to
+the others in `bench/results/`, with its `git:` stamp.
 
 ## License
 

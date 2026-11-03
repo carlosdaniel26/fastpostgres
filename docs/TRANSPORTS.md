@@ -67,7 +67,7 @@ The costs are stated where they are paid:
 
 ## The measurement
 
-[`just internals transport`](BENCHMARKS.md) measures the doorbell alone, with the
+[`just internals transport`](../bench/README.md) measures the doorbell alone, with the
 product's engine code compiled into a two-process harness
 (`bench/internals/transport/peer.c`): one hop is the client's request
 descriptor and the worker's answer, with no data segment created and no payload
@@ -95,7 +95,7 @@ end-to-end record below measures.
 
 ### End to end: a real read, delivered in rows
 
-[`just internals transport-e2e`](BENCHMARKS.md) runs both engines through the
+[`just internals transport-e2e`](../bench/README.md) runs both engines through the
 whole path in the dev image — PostgreSQL executes the statement, the ring's
 background worker publishes batches into the data segment, the client decodes
 them — one fresh process per (engine, scenario, rep), with the transport passed
@@ -138,12 +138,12 @@ only, and a regipc worker spins too), and any concurrency.
 
 The records above answer what a handoff costs, but on the workload suite's
 schema: 100k-row batches, one bulk scan, one client. The Arrow comparison
-(`just rivals adbc`, catalogued in [`BENCHMARKS.md`](BENCHMARKS.md)) is the other
+(`just rivals adbc`, catalogued in [`BENCHMARKS.md`](../bench/README.md)) is the other
 delivered-rows measurement — a six-column, 1M/10M-row read with each stack's own
 players — and its committed record was measured on one engine, so it cannot say
 what the transport costs that read. This record adds the engine as a second
 factor: per size, one fresh process per engine runs
-`bench/rivals/sqlalchemy_bench.py` (`FASTPOSTGRES_TRANSPORT` is read at
+`bench/rivals/adbc-arrow/sqlalchemy_bench.py` (`FASTPOSTGRES_TRANSPORT` is read at
 import and a ring's engine is fixed at creation, so no process can serve both),
 and the ADBC players ride inside those runs and are recorded once — they do not
 depend on the engine.

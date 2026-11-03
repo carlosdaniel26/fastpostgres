@@ -17,5 +17,5 @@ if [ "$#" -eq 0 ]; then
 fi
 
 for n in "$@"; do
-    python3 /src/bench/rivals/sqlalchemy_bench.py "$n"
+    python3 /src/bench/rivals/adbc-arrow/sqlalchemy_bench.py "$n"
 done

@@ -29,12 +29,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))  # bench/: lib
-sys.path.insert(0, str(HERE.parent))      # rivals/: sqlalchemy_bench
 sys.path.insert(0, str(HERE))             # this directory: player
 
+from lib.dataset import SHAPE, SHAPES  # noqa: E402
 from lib.harness import rss_bytes  # noqa: E402
 from player import PLAYERS, WORKLOADS, do_read, do_setup, scrape  # noqa: E402
-from sqlalchemy_bench import SHAPE, SHAPES  # noqa: E402
 
 # FASTPOSTGRES_RING_BYTES: the control channel's own segment, fixed and not part
 # of the transfer buffer a budget is spent on.

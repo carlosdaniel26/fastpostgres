@@ -2,7 +2,7 @@
 
 Written for the reader who asks "why not just cache the result?". The measurement
 is `just pgcache-bench`, the record is
-[`fastpostgres-vs-pgcache.log`](../bench/results/fastpostgres-vs-pgcache.log), and the rival is
+[`fastpostgres-vs-pgcache.log`](results/fastpostgres-vs-pgcache.log), and the rival is
 [PgCache](https://www.pgcache.com): a wire-compatible proxy that caches query
 results and keeps them fresh from the origin's logical replication stream.
 
@@ -14,7 +14,7 @@ budget** instead of their own defaults, are measured in
 where the cache fits, and below its own footprint the cache stops existing while
 the ring keeps reading.
 
-![fast-postgres vs PgCache: the full scan against the aggregate](assets/pgcache-read.png)
+![fast-postgres vs PgCache: the full scan against the aggregate](../docs/assets/pgcache-read.png)
 
 (`just pgcache-charts` renders it from the log.)
 
@@ -118,7 +118,7 @@ The two regimes, in one line each:
 
 ## The same memory budget on both sides
 
-![fast-postgres vs PgCache under one budget: the sweep](assets/pgcache-memory.png)
+![fast-postgres vs PgCache under one budget: the sweep](../docs/assets/pgcache-memory.png)
 
 (`just pgcache-memory-charts` renders it from the log.)
 
@@ -137,7 +137,7 @@ evidence: the segment bytes the worker really mapped and the timed reads that
 really took the ring (a read that fell back to libpq would fail the run), and the
 proxy's `pgcache_cache_memory_*` gauges — the budget it resolved, what it is
 using, what is registered, whether registration is throttled. The record is
-[`fastpostgres-vs-pgcache-memory.log`](../bench/results/fastpostgres-vs-pgcache-memory.log):
+[`fastpostgres-vs-pgcache-memory.log`](results/fastpostgres-vs-pgcache-memory.log):
 1M rows, the same table and the same output checks as above.
 
 | 1M rows, one read | ring, segments of M/2 | pgcache, capped at M |

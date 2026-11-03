@@ -36,16 +36,15 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # bench/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # bench/: lib
 
 import adbc_driver_postgresql.dbapi as adbc  # noqa: E402
 import numpy as np  # noqa: E402
 import pyarrow.compute as pc  # noqa: E402
 from fastpostgres import dbapi  # noqa: E402
 
+from lib.dataset import CORE_SQL, SHAPE, SHAPES, setup  # noqa: E402
 from lib.harness import rss_bytes  # noqa: E402
-
-from sqlalchemy_bench import CORE_SQL, SHAPE, SHAPES, setup
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "host=/tmp dbname=postgres user=postgres")
 BASE = os.environ.get("SQLALCHEMY_DB", "postgres@/postgres?host=/tmp")

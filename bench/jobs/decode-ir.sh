@@ -13,7 +13,7 @@
 #
 # Scoping it that way is what makes the IPC honest: same function, same run
 # shape, both sides of the division from this script. The number settles the
-# 334-static-instruction bound in docs/DECODE-NOTES.md, which counted the loop's
+# 334-static-instruction bound in NOTES.md, which counted the loop's
 # own address span and so missed everything the row executes outside it (the
 # kind cases behind the jump table, and the callees).
 #

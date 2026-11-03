@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The meters behind the design notes: the row decode's cycles, instructions and
 # ports, the codec x transport matrix, and the host PMU's cache counters. These
-# are not benchmarks of the product - they are the evidence `docs/WHY-IT-WINS.md`
-# and `docs/CODEC-TRANSPORT.md` argue from - so they live behind one command and
+# are not benchmarks of the product - they are the evidence `WHY-IT-WINS.md`
+# and `CODEC-TRANSPORT.md` argue from - so they live behind one command and
 # out of the README's benchmark table.
 set -euo pipefail
 
@@ -14,13 +14,13 @@ usage() {
 internals: the meters behind the design notes
 
   decode-cycles    the row decode's TSC cycles/row, on a fixed shape
-                   (docs/DECODE-NOTES.md)
+                   (NOTES.md)
   decode-ir        its dynamic instructions and miss profile, plus the IPC
-                   (profile image; docs/DECODE-NOTES.md)
+                   (profile image; NOTES.md)
   decode-mca       the decode loop's ports and latency, modeled offline by llvm-mca
-                   (profile image; docs/DECODE-NOTES.md)
+                   (profile image; NOTES.md)
   codec-transport  format cost vs transport cost, isolated (2x2 matrix)
-                   (docs/CODEC-TRANSPORT.md, bench/results/codec-transport.log)
+                   (CODEC-TRANSPORT.md, bench/results/codec-transport.log)
   cache-stat       cache counters on the host's PMU: decodes per row, transports
                    per KiB (bench/results/cache-stat.log)
   transport        the ring's two doorbells, isolated: the semaphores against the

@@ -7,11 +7,11 @@ transfer buffer is fixed and reported, the Arrow side is asked for its own
 accounting, and the same rows and the same output run through both.
 
 The measurement is `just arrow-memory-bench`, the record is
-[`fastpostgres-vs-arrow-memory.log`](../bench/results/fastpostgres-vs-arrow-memory.log), and the
+[`fastpostgres-vs-arrow-memory.log`](results/fastpostgres-vs-arrow-memory.log), and the
 rival is the same one the read benchmark uses: ADBC's PostgreSQL driver, whose
 results arrive as Arrow record batches, consumed with pyarrow.
 
-![fast-postgres against Arrow under a fixed 512 MiB buffer](assets/arrow-memory.png)
+![fast-postgres against Arrow under a fixed 512 MiB buffer](../docs/assets/arrow-memory.png)
 
 (`just arrow-memory-charts` renders it from the log.)
 

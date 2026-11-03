@@ -18,8 +18,8 @@
     <a href="#measured-results"><strong>Results</strong></a> ·
     <a href="#quick-start"><strong>Quick Start</strong></a> ·
     <a href="DOCUMENTATION.md"><strong>Documentation</strong></a> ·
-    <a href="docs/METHODOLOGY.md"><strong>Methodology</strong></a> ·
-    <a href="docs/WHY-IT-WINS.md"><strong>Design notes</strong></a> ·
+    <a href="bench/METHODOLOGY.md"><strong>Methodology</strong></a> ·
+    <a href="bench/WHY-IT-WINS.md"><strong>Design notes</strong></a> ·
     <a href="docs/LIMITATIONS.md"><strong>Limitations</strong></a>
   </p>
 </div>
@@ -39,7 +39,7 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 - **The executor's own tuples.** The row frame carries PostgreSQL's tuples as they lie, one `memcpy` per row, so every type the server can store can be sent; types whose storage is not the wire bytes take the columnar frame instead.
 - **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place.
 - **One wire format, defined once.** Reader and writer share the same header, and the benchmark generator includes it too, so the format cannot drift between them.
-- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. The two are measured against each other in [`docs/PG-CACHE.md`](docs/PG-CACHE.md).
+- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. The two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
 
 ## How it works
 
@@ -53,7 +53,7 @@ The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)
 
 ## Measured results
 
-All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md).
 
 ### Realistic workloads: FastPostgres against psycopg 3
 
@@ -61,7 +61,7 @@ The comparison above is one statement over one table. The workload suite asks th
 pragmatic question: over a commerce schema with foreign keys and indexes (10k
 customers, 10k products, 1M orders, 3M order items), the same application on both
 drivers, the same app-facing call, per-statement latency and throughput
-([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
+([`bench/README.md`](bench/README.md),
 [`log`](bench/results/fastpostgres-vs-psycopg.log)):
 
 | scenario | FastPostgres | psycopg 3 | |
@@ -119,7 +119,7 @@ The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the v
 
 ### What each side holds: against Arrow under a fixed buffer
 
-Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), [`log`](bench/results/fastpostgres-vs-arrow-memory.log)):
+Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`bench/ARROW-MEMORY.md`](bench/ARROW-MEMORY.md), [`log`](bench/results/fastpostgres-vs-arrow-memory.log)):
 
 | 1M / 5M / 10M rows | rows/s | held while it delivers |
 |---|---|---|
@@ -136,7 +136,7 @@ A transfer buffer is a window: the ring's is the same 512 MiB whatever the resul
 
 ### Result caches: PgCache
 
-A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`docs/PG-CACHE.md`](docs/PG-CACHE.md), [`log`](bench/results/fastpostgres-vs-pgcache.log)):
+A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`bench/PG-CACHE.md`](bench/PG-CACHE.md), [`log`](bench/results/fastpostgres-vs-pgcache.log)):
 
 ![FastPostgres vs PgCache: the full scan and the aggregate](docs/assets/pgcache-read.png)
 
@@ -147,7 +147,7 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 
 A cached aggregate is 51x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 4.3x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
-Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
+Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
 
 ![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 
@@ -175,7 +175,7 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 | internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|transport]` | what the row decode and the transport cost at the instruction, cache and port level; `transport` is the two doorbells, isolated |
 
 The full catalog - the scenarios, the method, the log behind every number and the
-caveats - is [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); `just charts <target>`
+caveats - is [`bench/README.md`](bench/README.md); `just charts <target>`
 renders any of the logs into an image under `docs/assets/`. The harnesses read two
 host-side settings: `SHM` for the container's `/dev/shm` size (default `3g`) and
 `SHAPE` for the data shape (`bench`, the friendly one, or `mixed`).

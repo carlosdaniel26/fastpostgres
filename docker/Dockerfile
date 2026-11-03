@@ -24,7 +24,7 @@ COPY extension /src/extension
 COPY python /src/python
 COPY bench /src/bench
 COPY examples /src/examples
-COPY docker/entrypoint.sh docker/tests.sh bench/jobs/benchmarks.sh examples/run.sh \
+COPY docker/entrypoint.sh docker/tests.sh bench/rivals/adbc-arrow/benchmarks.sh examples/run.sh \
      bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh bench/jobs/decode-mca.sh \
      bench/jobs/loop-asm.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py

@@ -1,7 +1,7 @@
 # Limits, edge cases and trade-offs
 
 Written for a reader deciding whether to trust the numbers or to use this. The
-method is in [`METHODOLOGY.md`](METHODOLOGY.md); the measured record is
+method is in [`METHODOLOGY.md`](../bench/METHODOLOGY.md); the measured record is
 [`fastpostgres-vs-arrow.log`](../bench/results/fastpostgres-vs-arrow.log) (bench shape),
 [`fastpostgres-vs-arrow-mixed.log`](../bench/results/fastpostgres-vs-arrow-mixed.log) (the harder
 shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-arrow-small.log)
@@ -136,7 +136,7 @@ transport fixes that. A cached 1M-row result is the other way round: 1.47M rows/
 against 6.35M on the ring, and a hit costs what its cold fill costs, because a hit
 still ships every row through the socket and builds every Python object, while
 this path never builds them twice. Method and caveats in
-[`PG-CACHE.md`](PG-CACHE.md).
+[`PG-CACHE.md`](../bench/PG-CACHE.md).
 
 **"Would equal memory change that?"** It was measured, not argued
 (`just pgcache-memory-bench`, the record in

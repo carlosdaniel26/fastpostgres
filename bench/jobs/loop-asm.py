@@ -6,13 +6,13 @@ The loop worth modeling is the per-column loop inside `decode_tuple`
 alignment and the births. It is extracted from the built extension - the same
 -O2 object the benchmark runs - not from a replica TU, so the ports and the
 latency llvm-mca reports are the ports and latency of the code that ships.
-(This automates what docs/DECODE-NOTES.md:17-22 did by hand.)
+(This automates what NOTES.md:17-22 did by hand.)
 
 How the region is chosen: `objdump -dl` carries every instruction's source file
 and line, inlined callees included. Without `--line` the outermost loop in the
 symbol is modeled - for the built client that is the row loop of
 `fp_decode_tuples` (one iteration per row, `decode_tuple` inlined), the loop
-docs/DECODE-NOTES.md counted 334 static instructions for. `--line N` (optionally
+NOTES.md counted 334 static instructions for. `--line N` (optionally
 with `--source`, default codec.cpp) models the innermost loop whose body carries
 an instruction from that line instead; note the loop's own head line can be
 attributed to an inlined callee, so an anchor *inside* the body is the reliable

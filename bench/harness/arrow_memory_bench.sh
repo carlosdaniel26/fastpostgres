@@ -9,7 +9,7 @@
 # holds the whole result in Arrow buffers, and both report the bytes they carried
 # next to the ring's fixed ones. Every player also reports its peak RSS.
 #
-# One player per process, one at a time (docs/METHODOLOGY.md): interleaving them
+# One player per process, one at a time (METHODOLOGY.md): interleaving them
 # measures the neighbours' cache footprint. The table is rebuilt per size, so
 # every read returns exactly n rows, and all three players must return the same
 # column sum - a faster path that returned something else fails the run. The ring
@@ -25,7 +25,7 @@ image=${IMAGE:-fastpostgres-dev}
 shm=${SHM:-3g}
 shape=${SHAPE:-bench}
 origin=fp-arrow-mem
-player_py=/src/bench/rivals/arrow_memory_bench.py
+player_py=/src/bench/rivals/adbc-arrow/arrow_memory_bench.py
 
 quick=0
 keep=0

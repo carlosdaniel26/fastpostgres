@@ -4,11 +4,11 @@ Runs inside the image. `_client.read_rows` is the exact call the SQLAlchemy
 benchmark's shm path makes (dbapi.py:572); this driver makes it directly, with
 no SQLAlchemy in the way, so callgrind's instruction counts and llvm-mca's
 region belong to the decode and not to the ORM. One shape per process: the
-object arena is append-only and process-scoped (bench/jobs/benchmarks.sh:9-20).
+object arena is append-only and process-scoped (bench/rivals/adbc-arrow/benchmarks.sh:9-20).
 
   bench   the benchmark's own row shape (id, sku, name, price, stock, active),
           same expressions as its INSERT, so cycles/row and Ir/row are
-          comparable to the numbers already in docs/DECODE-NOTES.md
+          comparable to the numbers already in NOTES.md
   mixed   the same six columns with NULLs on ~10% of the values and text
           lengths on both sides of the 126-byte varlena header split, plus a
           non-ASCII value every eighth row: the null test, the alignment walk
