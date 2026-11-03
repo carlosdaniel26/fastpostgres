@@ -53,24 +53,24 @@ summed in place — the `ZERO-COPY READ` rows):
 | | this repo | Arrow IPC |
 |---|---|---|
 | payload | 47.2 MiB | 45.7 MiB |
-| encode | **3.1 ms** (16 GB/s) | 7.8 ms (6 GB/s) |
-| decode + six aggregates | **1.7 ms** | 1.9 ms |
-| encode + decode | **4.8 ms** | 9.7 ms |
+| encode | **3.5 ms** (14.3 GB/s) | 7.5 ms (6.4 GB/s) |
+| decode + six aggregates | **1.8 ms** | 1.9 ms |
+| encode + decode | **5.2 ms** | 9.3 ms |
 | copies of the payload | **1** | 6 |
-| peak RSS | **100 MB** (2.1× the payload) | 383 MB (8.4×) |
+| peak RSS | **99 MB** (2.1× the payload) | 383 MB (8.4×) |
 
 **Transport only**, the *same payload bytes*, codec out of the loop:
 
 | | shared memory | UNIX socket |
 |---|---|---|
-| throughput | **11.18 / 11.17 GB/s** | 6.93 / 7.40 GB/s |
-| median latency | **3.6 µs** | 32.8 / 33.0 µs |
-| p99 latency | **6.1 / 7.5 µs** | 411 / 408 µs |
-| CPU, producer + consumer | **4.5 / 4.4 ms** | 7.1 / 6.5 ms |
+| throughput | **11.00 / 10.62 GB/s** | 6.81 / 7.01 GB/s |
+| median latency | **3.5 µs** | 31.8 / 31.8 µs |
+| p99 latency | **6.0 / 6.2 µs** | 404.6 / 393.9 µs |
+| CPU, producer + consumer | **4.6 / 4.6 ms** | 7.3 / 6.9 ms |
 | copies | **1** | 2 |
 
 Read together: at the query level the gap is 3.6–5.7×, at the format level it is
-2×, and at the transport level it is 1.5–1.6× on throughput and ~9× on median
+1.8×, and at the transport level it is 1.5–1.6× on throughput and ~9× on median
 latency. The factors multiply rather than overlap — which is what the isolation
 matrix was built to show, and what the rest of this document explains
 mechanism by mechanism.
@@ -141,15 +141,15 @@ Splitting the format column, per 1M rows:
 
 | stage | this repo | Arrow IPC | why |
 |---|---|---|---|
-| encode | 3.1 ms | 7.8 ms | **this is the real format gap**: 2.5× |
-| decode | 1.7 ms | 1.9 ms | a scan; both are memory-bound, 12% apart |
+| encode | 3.5 ms | 7.5 ms | **this is the real format gap**: 2.2× |
+| decode | 1.8 ms | 1.9 ms | a scan; both are memory-bound, 6% apart |
 
 The decode is *not* where the formats separate, and saying otherwise would be
 dishonest: both sides read ~25 MB of numeric columns and offset tables and are
-within 12% of each other. The separation is in encode (writing the bytes out)
+within 6% of each other. The separation is in encode (writing the bytes out)
 and, at query level, in the transport (moving them).
 
-That 2.5× encode gap is worth dwelling on, because the project found it the hard
+That 2.2× encode gap is worth dwelling on, because the project found it the hard
 way. The first version of this matrix had Arrow *winning* the format cell, and
 investigation showed the harness, not the formats, was responsible:
 
@@ -159,9 +159,9 @@ investigation showed the harness, not the formats, was responsible:
   copies per run — where a serializer holding contiguous buffers copies each
   **column** twice (offsets, then bytes).
 
-Both are fixed. Arrow's numbers barely moved (7.3 → 7.8 ms). That asymmetry is
+Both are fixed. Arrow's numbers barely moved (7.3 → 7.5 ms). That asymmetry is
 the evidence: the gap was on this side of the harness, and once removed, the
-remaining 2.5× is the format's own structure — three copies of the same bytes
+remaining 2.2× is the format's own structure — three copies of the same bytes
 (arrays, stream, sink) against one write into the buffer that ships.
 
 ---
@@ -182,7 +182,7 @@ process. Each hop exists so that the reader on the other side can be anyone.
 
 **Cost:** the frame cannot be reused across queries (the arena is append-only),
 cannot be compressed, and cannot be encrypted in place. **Evidence:** 1 copy
-against 2 in the encode path; 16 GB/s against 6 GB/s.
+against 2 in the encode path; 14.3 GB/s against 6.4 GB/s.
 
 ### 4.2 The layout is fixed and known on both ends, so the reader walks it
 
@@ -202,7 +202,7 @@ that must complete before the first value can be read.
 **Cost:** anything not in the frame's kind vocabulary (13 kinds today) cannot be
 carried; a reader that does not know the version must refuse the payload rather
 than guess, which is exactly what `FASTPOSTGRES_COLUMNAR_VERSION` enforces.
-**Evidence:** the decode numbers (1.7 vs 1.9 ms) — modest, because both sides
+**Evidence:** the decode numbers (1.8 vs 1.9 ms) — modest, because both sides
 spend their time streaming memory, but the frame's walk is what leaves room for
 the aggregates in the same budget.
 

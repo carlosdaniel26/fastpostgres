@@ -136,7 +136,7 @@ What the comparison **cannot** say:
 - It cannot predict end-to-end server time. A real read adds the executor, the
   worker, ring arbitration, the client's object construction and a live server
   sharing CPU, caches and memory bandwidth. This matrix isolates codec and
-  transport inside that pipeline; it does not replace `just bench`.
+  transport inside that pipeline; it does not replace `just rivals adbc`.
 - It cannot attribute a format difference to any one mechanism (wire size,
   metadata, alignment, or codec implementation) without reading the breakdown
   fields each cell reports.
@@ -191,7 +191,7 @@ writable. The recipe below avoids the situation by running as the invoking user.
 ## First results (1M rows, 1 MiB chunks)
 
 The committed run, verbatim in [`codec-transport.log`](results/codec-transport.log);
-charts rendered from it by `just codec-charts` ([`bench/charts/codec.py`](charts/codec.py)).
+charts rendered from it by `just charts codec` ([`bench/charts/codec.py`](charts/codec.py)).
 
 ![format cost](../docs/assets/codec-format.png)
 
@@ -199,8 +199,8 @@ charts rendered from it by `just codec-charts` ([`bench/charts/codec.py`](charts
 
 | cell | payload | rows/s | encode ms | decode ms | copies | peak RSS |
 |---|---|---|---|---|---|---|
-| `fpcolumn` | 47.2 MiB | **206.5M** | **3.1** | **1.7** | **1** | **100 MB** |
-| `arrow-ipc` | 45.7 MiB | 102.7M | 7.8 | 1.9 | 6 | 383 MB |
+| `fpcolumn` | 47.2 MiB | **192.03M** | **3.5** | **1.8** | **1** | **99 MB** |
+| `arrow-ipc` | 45.7 MiB | 107.06M | 7.5 | 1.9 | 6 | 383 MB |
 
 ![transport cost](../docs/assets/transport.png)
 
@@ -208,22 +208,22 @@ charts rendered from it by `just codec-charts` ([`bench/charts/codec.py`](charts
 
 | cell | GB/s | p50 µs | p99 µs | CPU ms (both sides) | copies |
 |---|---|---|---|---|---|
-| `fpcolumn` + shm | 11.18 | 3.6 | 6.1 | 4.5 | 1 |
-| `fpcolumn` + uds | 6.93 | 32.8 | 411 | 7.1 | 2 |
-| `arrow-ipc` + shm | 11.17 | 3.6 | 7.5 | 4.4 | 1 |
-| `arrow-ipc` + uds | 7.40 | 33.0 | 408 | 6.5 | 2 |
+| `fpcolumn` + shm | 11.00 | 3.5 | 6.0 | 4.6 | 1 |
+| `fpcolumn` + uds | 6.81 | 31.8 | 404.6 | 7.3 | 2 |
+| `arrow-ipc` + shm | 10.62 | 3.7 | 6.2 | 4.6 | 1 |
+| `arrow-ipc` + uds | 7.01 | 31.8 | 393.9 | 6.9 | 2 |
 
 Three readings:
 
-1. **The format:** `fpcolumn` is **2× the end-to-end rate** (4.8 ms against 9.7 ms
-   per 1M rows), wins encode by 2.5× (3.1 against 7.8 ms) and decode by a
-   little, and does it in **1 copy against 6** and **100 MB against 383 MB**
+1. **The format:** `fpcolumn` is **1.8× the end-to-end rate** (5.2 ms against
+   9.3 ms per 1M rows), wins encode by 2.2× (3.5 against 7.5 ms) and decode by
+   a little, and does it in **1 copy against 6** and **99 MB against 383 MB**
    (both broken down below).
 2. **The transport:** moving *identical bytes*, shared memory is **1.5–1.6× the
-   throughput** of a UNIX socket, **~9× lower p50 latency**, with a tail 50–70×
-   away (6–8 µs p99 against 408–412 µs), **one copy instead of two**, and ~35%
-   less CPU (4.4–4.5 ms against 6.5–7.1 ms). It does not care which format
-   produced the bytes (11.18 against 11.17 GB/s; 6.93 against 7.40).
+   throughput** of a UNIX socket, **~9× lower p50 latency**, with a tail 60–70×
+   away (6.0–6.2 µs p99 against 394–405 µs), **one copy instead of two**, and
+   ~35% less CPU (4.6 ms against 6.9–7.3 ms). It does not care which format
+   produced the bytes (11.00 against 10.62 GB/s; 6.81 against 7.01).
 3. **The decomposition:** the codec is where the *bytes* get cheaper, the
    transport is where the *bytes move* cheaper, and the query-level benchmark is
    what happens when both are in the path. Nothing here is measured together with
@@ -242,23 +242,24 @@ initialisation; the frame's are its medians over the same reps):
 | path | build / encode | read / aggregate | total |
 |---|---|---|---|
 | Arrow **in memory** (`from_arrays` + `pc.sum`, no IPC) | 0.68 ms — a zero-copy numpy wrap | 1.70 ms | **2.38 ms** |
-| this repository's columnar frame | 3.10 ms — writes 47 MB once | 1.70 ms | **4.78 ms** |
+| this repository's columnar frame | 3.46 ms — writes 47 MB once | 1.75 ms | **5.21 ms** |
 | Arrow **IPC** round trip (the cell measured above) | 6.78 ms (0.68 build + 6.10 serialize) | 1.78 ms (0.08 read + 1.70 aggregate) | **8.56 ms** |
 
-Read that table the honest way: the aggregate cost is **identical** (1.70 ms on
-both sides), and the IPC *read* is nearly free (0.08 ms, because it aliases).
-What separates the three is the write — 0.68 ms to not write anything, 3.10 ms to
-write the frame once, 6.10 ms to write the IPC stream. So the frame is not faster
-than Arrow in general: it is **1.8× faster than Arrow's serializing path** and
-**2× slower than Arrow's in-memory path**, and the difference between those two
-Arrow modes is precisely the work the frame exists to do. Anyone quoting the 2×
-without that sentence is quoting half a comparison.
+Read that table the honest way: the aggregate cost is **within 3% on both
+sides** (1.75 against 1.70 ms), and the IPC *read* is nearly free (0.08 ms,
+because it aliases). What separates the three is the write — 0.68 ms to not
+write anything, 3.46 ms to write the frame once, 6.10 ms to write the IPC
+stream. So the frame is not faster than Arrow in general: it is **1.6× faster
+than Arrow's serializing path** and **2.2× slower than Arrow's in-memory path**,
+and the difference between those two Arrow modes is precisely the work the
+frame exists to do. Anyone quoting the 2.2× without that sentence is quoting
+half a comparison.
 
 **Memory, and where each approach spends its copies**
 
 | | `fpcolumn` | `arrow-ipc` |
 |---|---|---|
-| peak RSS | 100 MB (**2.1×** the payload) | 383 MB (**8.4×** the payload) |
+| peak RSS | 99 MB (**2.1×** the payload) | 383 MB (**8.4×** the payload) |
 | copies of the payload | **1** | 6 |
 | of which the encode path | 1 (values → payload) | 2 (values → arrays, arrays → stream) |
 | of which the decode/aggregates | **0** — decoded views alias the payload | 3 (temporaries the aggregate kernels materialize) |
@@ -278,32 +279,32 @@ ships.
 **Per side, on the transport**
 
 | cell | CPU producer + consumer | peak RSS producer / consumer | min → p50 → p99 → max |
-|---|---|---|---|
-| `fpcolumn` + shm | 2.2 + 2.3 = **4.5 ms** | 52 / 26 MB | 3.2 → 3.6 → 6.1 → 6.1 µs |
-| `fpcolumn` + uds | 2.7 + 4.5 = **7.1 ms** | 51 / 26 MB | 13.5 → 32.8 → 411.5 → 411.5 µs |
-| `arrow-ipc` + shm | 2.1 + 2.3 = **4.4 ms** | 50 / 26 MB | 3.5 → 3.6 → 7.5 → 7.5 µs |
-| `arrow-ipc` + uds | 2.5 + 4.0 = **6.5 ms** | 49 / 26 MB | 26.0 → 33.0 → 408.1 → 408.1 µs |
+|---|---|---|---|---|
+| `fpcolumn` + shm | 2.2 + 2.4 = **4.6 ms** | 52 / 26 MB | 3.3 → 3.5 → 6.0 → 6.0 µs |
+| `fpcolumn` + uds | 2.9 + 4.4 = **7.3 ms** | 51 / 26 MB | 13.5 → 31.8 → 404.6 → 404.6 µs |
+| `arrow-ipc` + shm | 2.2 + 2.4 = **4.6 ms** | 50 / 26 MB | 3.4 → 3.7 → 6.2 → 6.2 µs |
+| `arrow-ipc` + uds | 2.9 + 4.0 = **6.9 ms** | 49 / 26 MB | 24.2 → 31.8 → 393.9 → 393.9 µs |
 
 Three more readings from the same cells:
 
-- **The socket costs the consumer twice the CPU** (4.5 against 2.3 ms) and the
-  producer about a quarter more (2.7 against 2.2 ms). That is the copy through
+- **The socket costs the consumer 1.8× the CPU** (4.4 against 2.4 ms) and the
+  producer about a third more (2.9 against 2.2 ms). That is the copy through
   the kernel's socket buffer, plus the wakeups it takes to drain it.
 - **The memory is the payload, not the transport.** 52/26 MB against 51/26 MB:
   the producer holds the payload and its chunk buffer, the consumer holds what it
   received — the pipe adds nothing measurable, which is what one would want from
   a pipe and is worth checking rather than assuming.
 - **The socket's tail is not a tail, it is a second mode.** `p99 == max` in every
-  cell, and for the socket the p50 (33 µs) sits far below the mean (41 µs): half
-  the chunks arrive in ~14–33 µs and the other half wait ~410 µs for the reader
+  cell, and for the socket the p50 (32 µs) sits far below the mean (40 µs): half
+  the chunks arrive in ~13–32 µs and the other half wait ~405 µs for the reader
   to come back. With one chunk in flight that is the protocol as designed — it is
   why the p99 column reads as a mechanism, not as noise, and why a mean alone
   would have hidden it.
 
 ### What the first run was actually measuring
 
-The first committed log had Arrow's encode at 30× the frame's, and this one has
-it 2.5× *slower* than the frame. Two harness bugs, not two format properties:
+The first run of this matrix had Arrow's encode at 30× the frame's, and this one
+has it 2.2× *slower* than the frame. Two harness bugs, not two format properties:
 
 - **The dataset boundary moved.** The Arrow cell built its UTF-8 buffers
   (offsets plus concatenated text) inside the timed encode while the C++ cell's
@@ -455,7 +456,7 @@ docker run --rm --shm-size=3g --entrypoint python3 --user "$(id -u):$(id -g)" \
 
 ```bash
 just codec-transport            # full matrix, log to stdout and bench/results/codec-transport.log
-just codec-charts               # the four figures, from that log
+just charts codec               # the four figures, from that log
 just codec-transport --quick    # smoke the runner on 1K rows
 ```
 
