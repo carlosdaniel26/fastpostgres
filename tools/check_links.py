@@ -25,7 +25,7 @@ def for_each_page():
     for path in sorted(ROOT.rglob("*.md")):
         if any(part in SKIP for part in path.relative_to(ROOT).parts):
             continue
-        if "benchmarks/results" in path.as_posix():
+        if "bench/results" in path.as_posix():
             continue
         yield path
 

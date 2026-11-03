@@ -16,12 +16,12 @@ jobs:
       - name: ruff
         run: |
           pip install ruff
-          ruff check python benchmarks
+          ruff check python bench
       - name: shellcheck
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          shellcheck benchmarks/*/*.sh docker/*.sh examples/*.sh
+          shellcheck bench/*/*.sh docker/*.sh examples/*.sh
       - name: markdown links and the release version
         run: |
           python3 tools/check_links.py
@@ -48,4 +48,4 @@ jobs:
       - name: the workload suite, quick
         run: |
           docker run --rm --shm-size=3g -e BENCH_GIT_REV="${GITHUB_SHA}" fastpostgres-dev \
-            python3 /src/benchmarks/workloads/runner.py --quick | tail -n 40
+            python3 /src/bench/workloads/runner.py --quick | tail -n 40

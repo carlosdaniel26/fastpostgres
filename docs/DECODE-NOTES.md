@@ -956,8 +956,8 @@ and `just cache-stat`.
 
 ## The meters: callgrind, llvm-mca, and the decode's own counter
 
-Three instruments, now owned by the repo. The jobs live in `benchmarks/jobs/`, the driver
-in `benchmarks/internals/decode_driver.py`, the justfile is the frontend:
+Three instruments, now owned by the repo. The jobs live in `bench/jobs/`, the driver
+in `bench/internals/decode_driver.py`, the justfile is the frontend:
 
 | command | what it answers |
 |---|---|

@@ -22,11 +22,11 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir \
 
 COPY extension /src/extension
 COPY python /src/python
-COPY benchmarks /src/benchmarks
+COPY bench /src/bench
 COPY examples /src/examples
-COPY docker/entrypoint.sh docker/tests.sh benchmarks/jobs/benchmarks.sh examples/run.sh \
-     benchmarks/jobs/decode-cycles.sh benchmarks/jobs/decode-ir.sh benchmarks/jobs/decode-mca.sh \
-     benchmarks/jobs/loop-asm.py /usr/local/bin/
+COPY docker/entrypoint.sh docker/tests.sh bench/jobs/benchmarks.sh examples/run.sh \
+     bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh bench/jobs/decode-mca.sh \
+     bench/jobs/loop-asm.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py
 
 WORKDIR /src/extension

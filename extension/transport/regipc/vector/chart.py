@@ -16,7 +16,7 @@ One figure, three panels, two channels:
 
 Every number plotted or annotated comes from the jsonl lines. The only outside
 number is the plain nine-GPR reference line: 0.521 us, measured in
-benchmarks/results/transport-shm-vs-regipc.log (the ABI 2 baseline), as in the
+bench/results/transport-shm-vs-regipc.log (the ABI 2 baseline), as in the
 original version of this chart.
 """
 import argparse
@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 HERE = Path(__file__).resolve().parent
 DEFAULT_LOGS = [HERE / "sweep-bulk.jsonl", HERE / "sweep.jsonl"]
 FILENAME = "regipc-copy-vs-vector.png"
-PLAIN_CALL_US = 0.521  # the ABI 2 nine-GPR call, benchmarks/results/transport-shm-vs-regipc.log
+PLAIN_CALL_US = 0.521  # the ABI 2 nine-GPR call, bench/results/transport-shm-vs-regipc.log
 
 # The series, in draw order. (key, colour, label)
 CHANNELS = [

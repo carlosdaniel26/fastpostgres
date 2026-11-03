@@ -20,7 +20,7 @@ jobs:
       - name: the workload suite, quick
         run: |
           docker run --rm --shm-size=3g -e BENCH_GIT_REV="${GITHUB_SHA}" fastpostgres-dev \
-            python3 /src/benchmarks/workloads/runner.py --quick | tee workload-smoke.log
+            python3 /src/bench/workloads/runner.py --quick | tee workload-smoke.log
       - uses: actions/upload-artifact@v4
         with:
           name: workload-smoke

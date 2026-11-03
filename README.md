@@ -62,7 +62,7 @@ pragmatic question: over a commerce schema with foreign keys and indexes (10k
 customers, 10k products, 1M orders, 3M order items), the same application on both
 drivers, the same app-facing call, per-statement latency and throughput
 ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
-[`log`](benchmarks/results/fastpostgres-vs-psycopg.log)):
+[`log`](bench/results/fastpostgres-vs-psycopg.log)):
 
 | scenario | FastPostgres | psycopg 3 | |
 |---|---|---|---|
@@ -119,7 +119,7 @@ The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the v
 
 ### What each side holds: against Arrow under a fixed buffer
 
-Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), [`log`](benchmarks/results/fastpostgres-vs-arrow-memory.log)):
+Speed is half of the comparison; memory is the other half. With the ring's transfer buffer fixed at 512 MiB - a quarter of its default - the same reads report what each side carried ([`docs/ARROW-MEMORY.md`](docs/ARROW-MEMORY.md), [`log`](bench/results/fastpostgres-vs-arrow-memory.log)):
 
 | 1M / 5M / 10M rows | rows/s | held while it delivers |
 |---|---|---|
@@ -136,7 +136,7 @@ A transfer buffer is a window: the ring's is the same 512 MiB whatever the resul
 
 ### Result caches: PgCache
 
-A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`docs/PG-CACHE.md`](docs/PG-CACHE.md), [`log`](benchmarks/results/fastpostgres-vs-pgcache.log)):
+A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`docs/PG-CACHE.md`](docs/PG-CACHE.md), [`log`](bench/results/fastpostgres-vs-pgcache.log)):
 
 ![FastPostgres vs PgCache: the full scan and the aggregate](docs/assets/pgcache-read.png)
 
@@ -147,7 +147,7 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 
 A cached aggregate is 51x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 4.3x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
-Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](benchmarks/results/fastpostgres-vs-pgcache-memory.log)).
+Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](docs/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
 
 ![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 

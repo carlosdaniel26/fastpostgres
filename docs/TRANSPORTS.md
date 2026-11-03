@@ -69,10 +69,10 @@ The costs are stated where they are paid:
 
 [`just internals transport`](BENCHMARKS.md) measures the doorbell alone, with the
 product's engine code compiled into a two-process harness
-(`benchmarks/internals/transport/peer.c`): one hop is the client's request
+(`bench/internals/transport/peer.c`): one hop is the client's request
 descriptor and the worker's answer, with no data segment created and no payload
 moved. Both cells run the same loop and the same ring, so only the ops table
-differs. Record: [`transport-shm-vs-regipc.log`](../benchmarks/results/transport-shm-vs-regipc.log).
+differs. Record: [`transport-shm-vs-regipc.log`](../bench/results/transport-shm-vs-regipc.log).
 
 | | hops/s | p50 | p99 | µs of CPU per hop | at 100k rows/batch |
 |---|---|---|---|---|---|
@@ -84,7 +84,7 @@ with the caveat the table cannot show and the chart does: the regipc cell spends
 its CPU *spinning* (both processes, ~2 cores for the duration), while the shm
 cell spends it *sleeping*. At 100k rows per batch that is 174.3 G rows/s of
 *directory* work, not rows delivered — the payload is the data segment's job, and
-[`fastpostgres-vs-psycopg.log`](../benchmarks/results/fastpostgres-vs-psycopg.log)
+[`fastpostgres-vs-psycopg.log`](../bench/results/fastpostgres-vs-psycopg.log)
 is where delivered rows are measured.
 
 What the numbers say, then, is narrow and useful: **the doorbell is no longer what
@@ -101,7 +101,7 @@ background worker publishes batches into the data segment, the client decodes
 them — one fresh process per (engine, scenario, rep), with the transport passed
 in `FASTPOSTGRES_TRANSPORT`. The regipc cell works in a container because the
 device node travels: `docker run --device /dev/regipc`. Record:
-`benchmarks/results/transport-e2e.log`.
+`bench/results/transport-e2e.log`.
 
 Three scenarios, each on both engines, median of 3 processes, one client and one
 ring per process, 64 MiB data segments, a 100,000-row batch ask:
@@ -143,7 +143,7 @@ delivered-rows measurement — a six-column, 1M/10M-row read with each stack's o
 players — and its committed record was measured on one engine, so it cannot say
 what the transport costs that read. This record adds the engine as a second
 factor: per size, one fresh process per engine runs
-`benchmarks/rivals/sqlalchemy_bench.py` (`FASTPOSTGRES_TRANSPORT` is read at
+`bench/rivals/sqlalchemy_bench.py` (`FASTPOSTGRES_TRANSPORT` is read at
 import and a ring's engine is fixed at creation, so no process can serve both),
 and the ADBC players ride inside those runs and are recorded once — they do not
 depend on the engine.
@@ -161,7 +161,7 @@ dropping an engine. Every fastpostgres record carries its cell's proof: the
 control rings the cell's processes left in the container's `/dev/shm` all name
 the engine that was asked for, their requests are answered, and the harness's own
 probe read was served by the ring, with the same digest (count + column sums) in
-every cell. Record: `benchmarks/results/arrow-transport.log`.
+every cell. Record: `bench/results/arrow-transport.log`.
 
 **At this read's scale the engine does not move the delivered rate.**
 
@@ -183,7 +183,7 @@ are not a measurable share of a read that takes 120-170 ms.
 
 **The Arrow family reproduces the committed record**: `arrow+sum` 2.33M/2.32M
 rows/s here against 2.28M/2.24M in
-[`fastpostgres-vs-arrow.log`](../benchmarks/results/fastpostgres-vs-arrow.log)
+[`fastpostgres-vs-arrow.log`](../bench/results/fastpostgres-vs-arrow.log)
 (+2%/+4%), `table+to_pylist` 1.29M/1.24M against its 1.27M/1.27M, and
 `stream()+sum` 8.28M/8.25M against its 8.23M/8.42M. The row-decode paths run
 below the committed record's numbers (DBAPI 6.2-6.6M against 7.27-7.33M, the
@@ -195,7 +195,7 @@ same on both engines, which is what this record is about.
 ## Reproducing
 
 ```bash
-make -C benchmarks/internals/transport          # the harness binary (no root, no PostgreSQL)
+make -C bench/internals/transport          # the harness binary (no root, no PostgreSQL)
 just internals transport 100000,1000000 3       # host, needs the module and /dev/regipc
 ```
 

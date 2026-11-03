@@ -1,6 +1,6 @@
 # The repository's Python lint, deliberately conservative: pyflakes plus the
 # pycodestyle errors that are typos, not style arguments. Run from the root:
-#   ruff check python benchmarks
+#   ruff check python bench
 
 line-length = 100
 extend-exclude = [

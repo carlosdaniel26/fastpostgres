@@ -43,7 +43,7 @@ markdown_extensions:
       permalink: true
 
 # The documents link to the repository around them - the README, the records
-# under benchmarks/results/, the extension's headers - which are not site pages.
+# under bench/results/, the extension's headers - which are not site pages.
 # tools/check_links.py validates every one of them; the site build should not
 # repeat that check and fail on the links that leave docs/.
 validation:

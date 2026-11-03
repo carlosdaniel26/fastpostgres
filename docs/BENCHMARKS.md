@@ -40,10 +40,10 @@ just bench --scale=2 --duration=30 --clients=8
 The rival is **psycopg 3**, the plain driver the same application ran on before,
 and both sides use the same app-facing call - `execute(...).fetchall()` - so the
 comparison is the driver swap and nothing else; the other stacks are the rivals
-class. The record is [`fastpostgres-vs-psycopg.log`](../benchmarks/results/fastpostgres-vs-psycopg.log),
+class. The record is [`fastpostgres-vs-psycopg.log`](../bench/results/fastpostgres-vs-psycopg.log),
 the chart is `just charts workloads`.
 
-The schema is a small commerce database (`benchmarks/workloads/schema.py`) at a
+The schema is a small commerce database (`bench/workloads/schema.py`) at a
 scale where 1 means 10k customers, 10k products, 1M orders and 3M order items:
 four tables with primary and foreign keys, an `orders (customer_id, created_at)`
 index for the page, a status index, an items-by-product index, and money as
@@ -107,11 +107,11 @@ just rivals cache --quick
 
 | target | the question | record | method and caveats |
 |---|---|---|---|
-| `adbc` | the read against the Arrow ecosystem's own answer, same output | [`fastpostgres-vs-arrow.log`](../benchmarks/results/fastpostgres-vs-arrow.log), [`-mixed`](../benchmarks/results/fastpostgres-vs-arrow-mixed.log), [`-small`](../benchmarks/results/fastpostgres-vs-arrow-small.log) | [`METHODOLOGY.md`](METHODOLOGY.md), [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](LIMITATIONS.md) |
-| `arrow-transport` | the same read with the ring's engine as a second factor: fastpostgres over shm, fastpostgres over regipc and ADBC + Arrow in one run, one fresh process per (engine, size) | [`arrow-transport.log`](../benchmarks/results/arrow-transport.log) | [`TRANSPORTS.md`](TRANSPORTS.md#the-arrow-read-both-engines) |
-| `arrow-memory` | the same reads with the ring's buffer fixed: what each side holds | [`fastpostgres-vs-arrow-memory.log`](../benchmarks/results/fastpostgres-vs-arrow-memory.log) | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
-| `cache` | a CDC-maintained result cache in front of the same server, its defaults | [`fastpostgres-vs-pgcache.log`](../benchmarks/results/fastpostgres-vs-pgcache.log) | [`PG-CACHE.md`](PG-CACHE.md) |
-| `cache-budget` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](../benchmarks/results/fastpostgres-vs-pgcache-memory.log) | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
+| `adbc` | the read against the Arrow ecosystem's own answer, same output | [`fastpostgres-vs-arrow.log`](../bench/results/fastpostgres-vs-arrow.log), [`-mixed`](../bench/results/fastpostgres-vs-arrow-mixed.log), [`-small`](../bench/results/fastpostgres-vs-arrow-small.log) | [`METHODOLOGY.md`](METHODOLOGY.md), [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](LIMITATIONS.md) |
+| `arrow-transport` | the same read with the ring's engine as a second factor: fastpostgres over shm, fastpostgres over regipc and ADBC + Arrow in one run, one fresh process per (engine, size) | [`arrow-transport.log`](../bench/results/arrow-transport.log) | [`TRANSPORTS.md`](TRANSPORTS.md#the-arrow-read-both-engines) |
+| `arrow-memory` | the same reads with the ring's buffer fixed: what each side holds | [`fastpostgres-vs-arrow-memory.log`](../bench/results/fastpostgres-vs-arrow-memory.log) | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
+| `cache` | a CDC-maintained result cache in front of the same server, its defaults | [`fastpostgres-vs-pgcache.log`](../bench/results/fastpostgres-vs-pgcache.log) | [`PG-CACHE.md`](PG-CACHE.md) |
+| `cache-budget` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](../bench/results/fastpostgres-vs-pgcache-memory.log) | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
 
 ## 3. Internals: `just internals [target]`
 
@@ -126,10 +126,10 @@ costs - and their results live in the lab notebook rather than in this catalog.
 | `decode-cycles` | TSC cycles per row on a fixed shape | [`../docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md) |
 | `decode-ir` | dynamic instructions, branch and cache misses, IPC (callgrind; profile image) | [`../docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md) |
 | `decode-mca` | the decode loop's ports and latency, modeled offline (llvm-mca; profile image) | [`../docs/DECODE-NOTES.md`](../docs/DECODE-NOTES.md) |
-| `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](../benchmarks/results/codec-transport.log) |
-| `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](../benchmarks/results/cache-stat.log) |
-| `transport` | the ring's two doorbells, isolated: the semaphores against the regipc kernel call, one hop at a time (host, `/dev/regipc`) | [`TRANSPORTS.md`](TRANSPORTS.md), [`transport-shm-vs-regipc.log`](../benchmarks/results/transport-shm-vs-regipc.log) |
-| `transport-e2e` | the same two doorbells end to end: a real read through PostgreSQL in the dev image, once per engine (the host's `/dev/regipc` passed in with `--device`) | [`TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows`](TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows), `benchmarks/results/transport-e2e.log` |
+| `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](../bench/results/codec-transport.log) |
+| `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](../bench/results/cache-stat.log) |
+| `transport` | the ring's two doorbells, isolated: the semaphores against the regipc kernel call, one hop at a time (host, `/dev/regipc`) | [`TRANSPORTS.md`](TRANSPORTS.md), [`transport-shm-vs-regipc.log`](../bench/results/transport-shm-vs-regipc.log) |
+| `transport-e2e` | the same two doorbells end to end: a real read through PostgreSQL in the dev image, once per engine (the host's `/dev/regipc` passed in with `--device`) | [`TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows`](TRANSPORTS.md#end-to-end-a-real-read-delivered-in-rows), `bench/results/transport-e2e.log` |
 
 ## Charts: `just charts [target]`
 

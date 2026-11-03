@@ -1,6 +1,6 @@
 # Records: every committed measurement
 
-The measurements live in [`benchmarks/results/`](../benchmarks/results/), next to
+The measurements live in [`bench/results/`](../bench/results/), next to
 the harnesses that produce them, not beside the prose. Each file is one run end to
 end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 `git:`), every player's own report, and the checks its class makes (the digest, the
@@ -26,7 +26,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
   untouched and the stamp is clean:
 
   ```
-  just bench > /tmp/workloads.log && cp /tmp/workloads.log benchmarks/results/fastpostgres-vs-psycopg.log
+  just bench > /tmp/workloads.log && cp /tmp/workloads.log bench/results/fastpostgres-vs-psycopg.log
   ```
 
 - One file per run family; a re-run replaces it, and the `git:` stamp says which

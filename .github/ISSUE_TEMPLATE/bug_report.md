@@ -10,7 +10,7 @@ labels: bug
 
 **Reproduction**
 The smallest SQL, Python or command that shows it. If a benchmark number is
-involved, name the log under `benchmarks/results/` and the line.
+involved, name the log under `bench/results/` and the line.
 
 **Environment**
 - FastPostgres version (extension and wheel): 

@@ -8,9 +8,9 @@ the benchmark and the record of its threats to validity.
 
 | claim | evidence | command |
 |---|---|---|
-| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `benchmarks/results/fastpostgres-vs-arrow.log` (5.0–5.7×) | `just bench` |
+| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (5.0–5.7×) | `just bench` |
 | the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.6–3.8×) | `just bench` |
-| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `benchmarks/results/fastpostgres-vs-arrow-mixed.log` (4.7–6.0× and 4.1–4.3×) | `SHAPE=mixed just bench` |
+| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (4.7–6.0× and 4.1–4.3×) | `SHAPE=mixed just bench` |
 | SQLAlchemy's `Row` construction, not the transport, is what makes the object path expensive | PATHS table (−72…83% against the driver read) | `just bench` |
 | the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
@@ -135,16 +135,16 @@ just bench                  # 100K / 1M / 10M, log to stdout
 just bench 100000 1000000   # any sizes
 SHAPE=mixed just bench      # the harder data shape (NULLs, long and non-ASCII text)
 just charts                 # runs the benchmark and renders both charts
-just charts --log benchmarks/results/fastpostgres-vs-arrow.log   # the committed run, re-rendered
+just charts --log bench/results/fastpostgres-vs-arrow.log   # the committed run, re-rendered
 just decode-cycles          # the decode's TSC cycles/row (seconds)
 just decode-ir              # its dynamic instructions and miss profile (minutes)
 just decode-mca             # its ports and latency, modelled offline (seconds)
 ```
 
 The runs this repository quotes are committed at
-`benchmarks/results/fastpostgres-vs-arrow.log` (bench shape) and
-`benchmarks/results/fastpostgres-vs-arrow-mixed.log` (mixed shape), and the charts in
-`assets/` are rendered from the first. `just rivals adbc > benchmarks/results/my.log` keeps any other run
+`bench/results/fastpostgres-vs-arrow.log` (bench shape) and
+`bench/results/fastpostgres-vs-arrow-mixed.log` (mixed shape), and the charts in
+`assets/` are rendered from the first. `just rivals adbc > bench/results/my.log` keeps any other run
 with its `### ENV` block attached.
 
 The `bench-*.log` files at the repository root predate this harness — they carry

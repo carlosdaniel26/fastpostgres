@@ -12,7 +12,7 @@ and the formal bits.
 | `extension/transport/` | the two doorbell engines (`engine_shm.c`, `engine_regipc.c`), the vendored regipc ABI and module |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
-| `benchmarks/` | the harnesses (`workloads/`, `rivals/`, `internals/`), the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
+| `bench/` | the harnesses (`workloads/`, `rivals/`, `internals/`), the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
 | `docs/` | the benchmark catalog, methodology, limitations, the comparisons, and every committed log |

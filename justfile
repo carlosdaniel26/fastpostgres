@@ -22,7 +22,7 @@
 #
 #   docker/      the image: its Dockerfile (a dev stage and the profile stage
 #                the offline meters need) and its entrypoint
-#   benchmarks/  the harnesses, the class dispatchers, the chart scripts, the
+#   bench/  the harnesses, the class dispatchers, the chart scripts, the
 #                image-side jobs, and the committed records under results/
 #   extension/   the PostgreSQL extension;  python/  the client package
 #   examples/    the app the demo switches drivers on   (run inside the image)
@@ -73,15 +73,15 @@ test:
 
 # the workload suite: realistic scenarios, app-facing API on both sides (docs/BENCHMARKS.md)
 bench *args:
-    benchmarks/harness/workloads_bench.sh {{args}}
+    bench/harness/workloads_bench.sh {{args}}
 
 # the competitive benchmarks: adbc | arrow-transport | arrow-memory | cache | cache-budget
 rivals target="" *args:
-    benchmarks/dispatch/rivals.sh {{target}} {{args}}
+    bench/dispatch/rivals.sh {{target}} {{args}}
 
 # the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport | transport-e2e
 internals target="" *args:
-    benchmarks/dispatch/internals.sh {{target}} {{args}}
+    bench/dispatch/internals.sh {{target}} {{args}}
 
 # the same SQLAlchemy app on psycopg 3 and on fastpostgres
 demo n="5000":
@@ -89,7 +89,7 @@ demo n="5000":
 
 # one figure per log: workloads | arrow | arrow-transport | arrow-memory | cache | cache-budget | codec | transport | transport-e2e | ab
 charts target="" *args:
-    benchmarks/dispatch/charts.sh {{target}} {{args}}
+    bench/dispatch/charts.sh {{target}} {{args}}
 
 # the ADBC + Arrow read comparison (rivals adbc): fast-postgres against the
 # Arrow ecosystem's own answer over the same rows
@@ -102,24 +102,24 @@ bench-adbc *sizes:
 # once - the container gets the host's /dev/regipc with --device
 [private]
 arrow-transport *args:
-    benchmarks/harness/arrow_transport_bench.sh {{args}}
+    bench/harness/arrow_transport_bench.sh {{args}}
 
 # fastpostgres against ADBC + Arrow with the ring's buffer fixed (rivals
 # arrow-memory): the same reads and what each side held while it delivered them
 [private]
 arrow-memory-bench *args:
-    benchmarks/harness/arrow_memory_bench.sh {{args}}
+    bench/harness/arrow_memory_bench.sh {{args}}
 
 # fastpostgres against a result cache (rivals cache): the two regimes (large
 # result, small expensive result) and the cache's two taxes (cold fill, pass-through)
 [private]
 pgcache-bench *args:
-    benchmarks/harness/pgcache_bench.sh {{args}}
+    bench/harness/pgcache_bench.sh {{args}}
 
 # the same comparison under one memory budget on both sides (rivals cache-budget)
 [private]
 pgcache-memory-bench *args:
-    benchmarks/harness/pgcache_memory_bench.sh {{args}}
+    bench/harness/pgcache_memory_bench.sh {{args}}
 
 # the row decode's TSC cycles/row on a fixed shape (internals decode-cycles)
 [private]
@@ -140,27 +140,27 @@ decode-mca *args:
 # regipc module cannot be loaded inside the image, so this one never runs in it
 [private]
 transport *args:
-    benchmarks/jobs/transport.sh {{args}}
+    bench/jobs/transport.sh {{args}}
 
 # the same two doorbells end to end (internals transport-e2e): a real read
 # through PostgreSQL in the dev image, once per engine - the container gets the
 # host's /dev/regipc with --device, which is what makes the regipc cell possible
 [private]
 transport-e2e *args:
-    benchmarks/harness/transport_e2e_bench.sh {{args}}
+    bench/harness/transport_e2e_bench.sh {{args}}
 
 # cache counters on the host's PMU (internals cache-stat)
 [private]
 cache-stat *args:
-    benchmarks/jobs/cache-stat.sh {{args}}
+    bench/jobs/cache-stat.sh {{args}}
 
 # the codec x transport isolation matrix (internals codec-transport): sequential
-# by construction (docs/CODEC-TRANSPORT.md); writes benchmarks/results/codec-transport.log as
+# by construction (docs/CODEC-TRANSPORT.md); writes bench/results/codec-transport.log as
 # the invoking user so the log is writable
 [private]
 codec-transport *args:
     just _image
-    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} benchmarks/internals/codec_transport/run_matrix.py {{args}}
+    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} bench/internals/codec_transport/run_matrix.py {{args}}
 
 # the release version agrees in pyproject.toml, the control file and sql/
 check-version:
