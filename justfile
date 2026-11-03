@@ -1,6 +1,6 @@
 # FastPostgres dev tasks: one image, a throwaway PostgreSQL for every run.
 #
-# Measurement has three classes, one command each (bench/README.md is the
+# Measurement has four classes, one command each (bench/README.md is the
 # catalog: what each answers, the method, and where its record lives):
 #
 #   just bench [scenario...]  workloads: realistic scenarios over a commerce
@@ -10,6 +10,8 @@
 #                            result cache, at their defaults and under a budget
 #   just internals [target]  the meters behind the design notes: decode cycles /
 #                            IR / ports, the codec x transport matrix, PMU counters
+#   just adoption [target]   a published third-party suite, on its own terms:
+#                            MagicStack's pgbench, with our cell in its roster
 #   just charts [target]     one figure per log
 #
 # Plus the client suite and the demo:
@@ -22,7 +24,7 @@
 #
 #   docker/      the image: its Dockerfile (a dev stage and the profile stage
 #                the offline meters need) and its entrypoint
-#   bench/  the harnesses, the class dispatchers, the chart scripts, the
+#   bench/       the harnesses, the class dispatchers, the chart scripts, the
 #                image-side jobs, and the committed records under results/
 #   extension/   the PostgreSQL extension;  python/  the client package
 #   examples/    the app the demo switches drivers on   (run inside the image)
@@ -82,6 +84,10 @@ rivals target="" *args:
 # the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat | transport | transport-e2e
 internals target="" *args:
     bench/dispatch/internals.sh {{target}} {{args}}
+
+# a published third-party suite, on its own terms: magicstack-pgbench
+adoption target="" *args:
+    bench/dispatch/adoption.sh {{target}} {{args}}
 
 # the same SQLAlchemy app on psycopg 3 and on fastpostgres
 demo n="5000":
@@ -161,6 +167,12 @@ cache-stat *args:
 codec-transport *args:
     just _image
     docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} bench/internals/codec_transport/run_matrix.py {{args}}
+
+# the adopted suite in the dev image (adoption magicstack-pgbench): the suite's
+# own protocol over its Python roster, with our cell added to that roster
+[private]
+adoption-bench *args:
+    just _run adoption.sh {{args}}
 
 # the release version agrees in pyproject.toml, the control file and sql/
 check-version:

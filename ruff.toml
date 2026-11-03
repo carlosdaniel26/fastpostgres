@@ -5,6 +5,7 @@
 line-length = 100
 extend-exclude = [
   "python/src/fastpostgres/native", # C++ sources, clang-format's business
+  "bench/adoption/magicstack-pgbench", # vendored: upstream's own style
   "third_party",
   "data",
 ]

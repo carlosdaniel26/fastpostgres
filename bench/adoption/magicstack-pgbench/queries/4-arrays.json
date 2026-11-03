@@ -1,0 +1,6 @@
+{
+  "setup": "CREATE TABLE _test(a int[]); INSERT INTO _test(a) (SELECT (SELECT array_agg(i) FROM generate_series(1, 100) as s(i)) FROM generate_series(1, 100));",
+  "teardown": "DROP TABLE _test;",
+  "query": "SELECT * FROM _test",
+  "args": []
+}

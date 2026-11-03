@@ -31,6 +31,7 @@ and the formal bits.
 | understand why it is faster than Arrow, mechanism by mechanism | [`bench/WHY-IT-WINS.md`](bench/WHY-IT-WINS.md) |
 | compare against a result cache | [`bench/PG-CACHE.md`](bench/PG-CACHE.md) |
 | separate format cost from transport cost | [`bench/CODEC-TRANSPORT.md`](bench/CODEC-TRANSPORT.md) |
+| see what a published third-party suite found | [`bench/ADOPTION.md`](bench/ADOPTION.md) |
 | contribute, or report a vulnerability | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) |
 | know what changed | [`CHANGELOG.md`](CHANGELOG.md) |
 

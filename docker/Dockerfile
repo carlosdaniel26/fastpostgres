@@ -10,7 +10,7 @@
 FROM postgres:18 AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential postgresql-server-dev-18 python3 python3-dev python3-setuptools \
-      python3-sqlalchemy python3-psycopg python3-psycopg-c python3-numpy python3-pip \
+      python3-venv python3-sqlalchemy python3-psycopg python3-psycopg-c python3-numpy python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
 # The Arrow rival the benchmark measures against: neither pyarrow nor the ADBC
@@ -20,14 +20,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
       pyarrow adbc_driver_postgresql
 
+# The adopted suite's driver roster (bench/adoption/): its Python runner imports
+# every driver it can select, so all of them have to be present for any of its
+# cells to run. Benchmark-only, like the Arrow layer above; the versions a record
+# was produced with are in that record's own block.
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+      aiopg asyncpg distro py-postgresql psycopg2-binary uvloop
+
 COPY extension /src/extension
 COPY python /src/python
 COPY bench /src/bench
 COPY examples /src/examples
-COPY docker/entrypoint.sh docker/tests.sh bench/rivals/adbc-arrow/benchmarks.sh examples/run.sh \
-     bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh bench/jobs/decode-mca.sh \
-     bench/jobs/loop-asm.py /usr/local/bin/
+COPY docker/entrypoint.sh docker/tests.sh examples/run.sh \
+     bench/jobs/adoption.sh bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh \
+     bench/jobs/decode-mca.sh bench/jobs/loop-asm.py \
+     bench/rivals/adbc-arrow/benchmarks.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py
+
+# The adopted suite's Python cells run through its own wrapper, which wants a
+# virtualenv beside it (`make -C _python venv`, in its README). The venv is made
+# here instead, with the system's packages visible, so the roster installed above
+# is the one install; the suite's own requirements.txt stays in the vendored tree.
+RUN python3 -m venv --system-site-packages \
+      /src/bench/adoption/magicstack-pgbench/_python/venv
 
 WORKDIR /src/extension
 RUN make clean && make && make install

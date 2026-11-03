@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""fastpostgres in the adopted suite's Python-runner contract.
+
+MagicStack's runner dispatches on an implementation's platform prefix: a
+`fastpostgres-dbapi` cell makes it exec `pgbench_fastpostgres` (this file,
+reached through the symlink that sits beside the vendored runner) with the same
+switches it gives its own runners - warmup, duration, timeout, host/port/user,
+concurrency, `--output-format=json` - plus the driver name and a
+`queries/*.json` path. Everything about the measurement is theirs: this file
+connects with fastpostgres's DBAPI, executes the query, and hands their own
+`runner()` the result, so the warmup, the timed loop, the latency buckets and
+the JSON are the suite's protocol, not a re-implementation of it.
+
+`arg_format='python'` is what the suite uses for drivers whose placeholders are
+`%s` - psycopg2's, and this client's (`dbapi.paramstyle = "format"`) - and it
+rewrites the query's `$n` to match before execution.
+
+A query this driver cannot run exits 3, which is the suite's own "not supported
+by the runner" contract and makes it skip that cell instead of failing the run.
+COPY is the one that uses it: the client's writes go through libpq, and libpq's
+COPY has no DBAPI call here.
+"""
+import argparse
+import asyncio
+import importlib.util
+import json
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+SUITE = Path(__file__).resolve().parents[1] / "magicstack-pgbench"
+
+
+def load_suite():
+    """The vendored Python runner as a module; its main() guard keeps it quiet."""
+    loader = SourceFileLoader("magicstack_pgbench_python", str(SUITE / "_python" / "pgbench_python.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def connect(args):
+    from fastpostgres import dbapi
+    return dbapi.connect(
+        f"host={args.pghost} port={args.pgport} user={args.pguser} dbname=postgres")
+
+
+def execute(conn, query, params):
+    cur = conn.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    cur.close()
+    return len(rows)
+
+
+def executemany(conn, query, rows):
+    cur = conn.cursor()
+    cur.executemany(query, rows)
+    count = cur.rowcount
+    cur.close()
+    return count
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        description='fastpostgres in the pgbench_python contract')
+    parser.add_argument('-C', '--concurrency', type=int, default=10)
+    parser.add_argument('-D', '--duration', type=int, default=30)
+    parser.add_argument('--timeout', default=2, type=int)
+    parser.add_argument('--warmup-time', type=int, default=5)
+    parser.add_argument('--output-format', default='text', choices=['text', 'json'])
+    parser.add_argument('--pghost', type=str, default='127.0.0.1')
+    parser.add_argument('--pgport', type=int, default=5432)
+    parser.add_argument('--pguser', type=str, default='postgres')
+    parser.add_argument('driver', choices=['dbapi'])
+    parser.add_argument('queryfile')
+    args = parser.parse_args(argv[1:])
+
+    with open(args.queryfile, 'rt') as fh:
+        querydata = json.load(fh)
+    query = querydata.get('query')
+    query_args = querydata.get('args') or []
+    setup = querydata.get('setup')
+    teardown = querydata.get('teardown')
+
+    if query.startswith('COPY '):
+        return 3
+
+    suite = load_suite()
+    batch = bool(query_args) and isinstance(query_args[0], dict)
+    asyncio.run(suite.runner(args, connect, execute, None,
+                             executemany if batch else None,
+                             False, 'python', query, query_args, setup, teardown))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

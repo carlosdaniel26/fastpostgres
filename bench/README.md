@@ -16,6 +16,7 @@ Every number the project quotes is a line in a committed log under
 | workloads | [`just bench`](../README.md#benchmarks-and-meters) | does swapping the driver help an application - lookups, pages, scans, joins, aggregates, concurrency, writes - over a schema with foreign keys and indexes |
 | rivals | `just rivals [target]` | how the ring compares with the other stacks (ADBC + Arrow, a result cache), at their defaults and under a fixed memory budget |
 | internals | `just internals [target]` | what the row decode and the transport cost at the instruction, cache and port level - the evidence the design notes argue from |
+| adoption | `just adoption [target]` | what a published suite's own queries and protocol find, with our cell in its roster - [`adoption/`](adoption/), written up in [`ADOPTION.md`](ADOPTION.md) |
 
 Rules every class follows, because a measurement that breaks them is not one:
 

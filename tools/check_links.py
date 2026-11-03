@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKIP = {".git", "third_party", "data", ".commandcode", "node_modules", "build", "dist"}
+SKIP = {".git", "third_party", "data", ".commandcode", "node_modules", "build", "dist",
+        "magicstack-pgbench"}
 LINK = re.compile(r"\]\((?!https?:|#)([^)#]+)(#[^)]+)?\)")
 SRC = re.compile(r'src="(?!https?:)([^"]+)"')
 HREF = re.compile(r'href="(?!https?:|#)([^"#]+)"')

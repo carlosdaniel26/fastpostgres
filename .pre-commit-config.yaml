@@ -11,6 +11,7 @@ repos:
       - id: ruff
         args: [--fix]
         files: ^(python|bench)/.*\.pyi?$
+        exclude: ^bench/adoption/magicstack-pgbench/
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

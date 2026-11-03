@@ -7,4 +7,6 @@ docs/assets/*.png linguist-generated=true
 # The image and the demo are not part of the library's language split.
 docs/** linguist-documentation
 bench/*.md linguist-documentation
+# The adopted suite, byte for byte as its authors wrote it.
+bench/adoption/magicstack-pgbench/** linguist-vendored
 *.c linguist-language=C
