@@ -10,7 +10,8 @@ Reads pairs of logs and renders three figures:
 
 Every bar carries its number, the control is drawn in the rival's grey so it is
 obvious when it did not move, and the footer names the machine, the commit and
-the logs. Same palette and decluttering as `bench/charts/adbc.py`.
+the logs. Same palette as `bench/charts/adbc.py`; the type and the layout come
+from `bench/charts/theme.py`.
 
 Usage:
     bench/charts/ab.py                     # the docs/improve-*.log defaults
@@ -30,6 +31,8 @@ try:
     from matplotlib.ticker import NullFormatter
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
+
+import theme  # noqa: E402
 
 OUT = Path.cwd()
 
@@ -96,20 +99,6 @@ def meta(path):
     return out
 
 
-def declutter(ax):
-    ax.set_xticks([]) if False else None
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    ax.grid(axis="y", color="#e8e8e8", zorder=0)
-    ax.set_axisbelow(True)
-    ax.tick_params(colors="#444444")
-
-
-def footer(fig, text):
-    fig.text(0.5, 0.02, text, ha="center", va="bottom", fontsize=7.5,
-             color="#888888", linespacing=1.5)
-
-
 def save(fig, path):
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -151,7 +140,7 @@ def plot_codec(before, after, nt, meta_text):
     ax_t.set_ylim(0, max(c["encode_ms"] + c["decode_ms"]
                          for c in list(before.values()) + list(after.values())) * 1.20)
     ax_t.margins(x=0.2)
-    declutter(ax_t)
+    theme.declutter(ax_t)
 
     # the non-temporal-store A/B, if it ran
     if nt:
@@ -181,7 +170,7 @@ def plot_codec(before, after, nt, meta_text):
         ax_nt.set_ylabel("encode, ms per 1M rows")
         ax_nt.set_ylim(0, max(c["encode_ms"] for c in nt) * 1.35)
         ax_nt.margins(x=0.35)
-        declutter(ax_nt)
+        theme.declutter(ax_nt)
     else:
         ax_nt.axis("off")
         ax_nt.text(0.5, 0.5, "no non-temporal-store log", ha="center", va="center",
@@ -189,7 +178,7 @@ def plot_codec(before, after, nt, meta_text):
 
     fig.suptitle("Codec: the store instruction, and everything else held still",
                  fontsize=12.5, y=0.975)
-    footer(fig, meta_text)
+    theme.footer(fig, meta_text)
     fig.subplots_adjust(left=0.075, right=0.98, top=0.83, bottom=0.16, wspace=0.30)
     return fig
 
@@ -227,7 +216,7 @@ def plot_system(before, after, cycles_before, cycles_after, meta_text):
     ax_r.set_ylim(0, max([v for pair_ in list(before.values()) + list(after.values())
                           for v in pair_]) * 1.18)
     ax_r.margins(x=0.12)
-    declutter(ax_r)
+    theme.declutter(ax_r)
 
     if cycles_before and cycles_after:
         for i, (value, color, alpha) in enumerate(
@@ -244,7 +233,7 @@ def plot_system(before, after, cycles_before, cycles_after, meta_text):
         )
         ax_c.set_ylim(0, max(cycles_before, cycles_after) * 1.22)
         ax_c.margins(x=0.3)
-        declutter(ax_c)
+        theme.declutter(ax_c)
     else:
         ax_c.axis("off")
         ax_c.text(0.5, 0.5, "no read_rows: line in one of the logs", ha="center",
@@ -252,7 +241,7 @@ def plot_system(before, after, cycles_before, cycles_after, meta_text):
 
     fig.suptitle("System level: rows per second, and what the client spends per row",
                  fontsize=12.5, y=0.975)
-    footer(fig, meta_text + "\ncaveat: the ADBC control moved ±2%, this repo's two paths moved "
+    theme.footer(fig, meta_text + "\ncaveat: the ADBC control moved ±2%, this repo's two paths moved "
                             "-7% and +11% — this harness cannot resolve a 3% client-side change")
     fig.subplots_adjust(left=0.075, right=0.975, top=0.82, bottom=0.20, wspace=0.3)
     return fig
@@ -299,12 +288,12 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
         ax_l.barh([y - 0.18], [b["p50_ms"] * 1e3], height=0.34, color=color, alpha=FADED, zorder=3)
         ax_l.barh([y + 0.18], [a["p50_ms"] * 1e3], height=0.34, color=color, zorder=3)
         ax_l.text(max(b["p50_ms"], a["p50_ms"]) * 1e3, y,
-                  f"{a['p50_ms'] * 1e3:.1f} µs", va="center", fontsize=7.4)
+                  f"{a['p50_ms'] * 1e3:.1f} μs", va="center", fontsize=7.4)
     labels = [f"{FORMAT_LABELS.get(k[0], k[0])}\n{TRANSPORT_LABELS.get(k[1], k[1])}"
               for k, _b, _a in rows]
     for ax, title, xlabel, key, scale in (
         (ax_g, "throughput", "GB/s", "gb_per_s", 1.0),
-        (ax_l, "median latency", "p50, µs", "p50_ms", 1e3),
+        (ax_l, "median latency", "p50, μs", "p50_ms", 1e3),
     ):
         ax.set_yticks(ys)
         ax.set_yticklabels(labels, fontsize=7.4)
@@ -314,7 +303,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
         if rows:
             hi = max(max(b[key], a[key]) * scale for _k, b, a in rows)
             ax.set_xlim(0, hi * 1.30)
-        declutter(ax)
+        theme.declutter(ax)
 
     # The in-flight sweep: median of the repeats per N, on a log2 axis, so one
     # point per setting (the raw log has every run and they overlapped).
@@ -337,7 +326,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
                 # alternate above/below: five three-line labels in a row collided
                 up = idx % 2 == 0
                 ax_i.annotate(f"{value:.1f} GB/s\n({100 * (value - base) / base:+.0f}%)\n"
-                              f"p50 {p:,.0f} µs",
+                              f"p50 {p:,.0f} μs",
                               (point, value), textcoords="offset points",
                               xytext=(0, 10 if up else -10), ha="center",
                               va="bottom" if up else "top", fontsize=7.2, linespacing=1.3)
@@ -350,7 +339,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
             ax_i.set_ylabel("GB/s over the payload")
             ax_i.set_title("shared memory: overlapping the two sides", fontsize=9.5)
             ax_i.set_ylim(0, max(gb) * 1.45)
-            declutter(ax_i)
+            theme.declutter(ax_i, grid="x")
         else:
             ax_i.axis("off")
     else:
@@ -360,7 +349,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
 
     fig.suptitle("Transport: unchanged bytes at the default, and what a window buys",
                  fontsize=12.5, y=0.975)
-    footer(fig, meta_text)
+    theme.footer(fig, meta_text)
     fig.subplots_adjust(left=0.155, right=0.985, top=0.83, bottom=0.16)
     return fig
 
@@ -415,7 +404,7 @@ def plot_cache_fix(nt, counters, meta_text):
                    fontsize=9.5)
     ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.25)
     ax_t.margins(x=0.3)
-    declutter(ax_t)
+    theme.declutter(ax_t)
 
     # (b) the mechanism: RFO requests and L2 reads per row
     p, n = by_variant["plain"], by_variant["nt"]
@@ -437,7 +426,7 @@ def plot_cache_fix(nt, counters, meta_text):
                    f" (solid), L2 reads (faded)", fontsize=9.5)
     ax_c.set_ylim(0, max(p["rfo_requests_per_row"], p["l2_reads_per_row"]) * 1.30)
     ax_c.margins(x=0.3)
-    declutter(ax_c)
+    theme.declutter(ax_c)
 
     # (c) the consequence in the counters: L1 miss rate, cycles per row
     ax_m.bar([0 - 0.17, 1 - 0.17], [p["l1_miss_pct"], n["l1_miss_pct"]], width=0.30,
@@ -453,11 +442,11 @@ def plot_cache_fix(nt, counters, meta_text):
                    fontsize=9.5)
     ax_m.set_ylim(0, max(p["l1_miss_pct"], n["l1_miss_pct"]) * 1.25)
     ax_m.margins(x=0.3)
-    declutter(ax_m)
+    theme.declutter(ax_m)
 
     fig.suptitle("The cache fix: the destination's read-for-ownership, removed",
                  fontsize=12.5, y=0.975)
-    footer(fig, meta_text + "\nRFO = a store that had to read the cache line first; "
+    theme.footer(fig, meta_text + "\nRFO = a store that had to read the cache line first; "
                             "it is the traffic non-temporal stores avoid")
     fig.subplots_adjust(left=0.075, right=0.985, top=0.82, bottom=0.20, wspace=0.30)
     return fig

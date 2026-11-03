@@ -11,7 +11,8 @@ and renders four figures:
     codec_chart-who-pays.png    CPU and memory per side, and the whole
                                 min->p50->p99->max spread, per transport
 
-Same palette and decluttering as `bench/charts/adbc.py`: the accent marks this
+Same palette as `bench/charts/adbc.py`; the type and the layout come from
+`bench/charts/theme.py`: the accent marks this
 repository's mechanism (`fpcolumn`, shared memory), the greys the rival (Arrow
 IPC, UNIX socket). Every bar carries its number, and the footer carries the
 machine, rows, chunk size and commit the log was produced from.
@@ -34,6 +35,8 @@ try:
     from matplotlib.ticker import FuncFormatter, NullFormatter
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
+
+import theme  # noqa: E402
 
 OUT = Path.cwd()
 
@@ -85,15 +88,7 @@ def transport_pairs(cells, runs):
 # ---- drawing helpers ------------------------------------------------------
 
 
-def declutter(ax):
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
-
-
-def footer(fig, meta, note):
+def footer_text(meta, note):
     chunk = re.match(r"(\d+)", meta.get("chunk", ""))
     parts = [meta.get("cpu", ""), meta.get("mem", ""), f"{meta.get('rows', '?')} rows",
              f"{int(chunk.group(1)) // 1024} KiB chunks" if chunk else "",
@@ -105,8 +100,7 @@ def footer(fig, meta, note):
         # the semantics on their own line: appended to the meta line it ran off
         # both edges of the canvas at 150 dpi
         line += "\n" + note
-    fig.text(0.5, 0.02, line, ha="center", va="bottom", fontsize=7.5,
-             color="#888888", linespacing=1.5)
+    return line
 
 
 def save(fig, path):
@@ -136,19 +130,19 @@ def plot_format(formats, meta):
     for x, e, d in zip(xs, enc, dec):
         if e > max(enc) * 0.18:
             ax_t.text(x, e / 2, f"encode {e:,.1f}", ha="center", va="center",
-                      fontsize=7.5, color="white", fontweight="bold")
+                      fontsize=7.5, color="white")
         else:
             ax_t.text(x + 0.28, e / 2, f"encode {e:,.1f}", ha="left", va="center", fontsize=7.5)
         ax_t.text(x, e + d / 2, f"decode {d:,.1f}", ha="center", va="center", fontsize=7.5)
         ax_t.text(x, e + d, f"{e + d:,.1f} ms", ha="center", va="bottom",
-                  fontsize=8.5, fontweight="bold")
+                  fontsize=8.5)
     ax_t.set_xticks(xs)
     ax_t.set_xticklabels(labels)
     ax_t.set_ylabel("ms per 1M rows")
     ax_t.set_title("encode + decode, transport held out (lower is better)", fontsize=9.5)
     ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.20)
     ax_t.margins(x=0.12)
-    declutter(ax_t)
+    theme.declutter(ax_t)
 
     rss = [c["rss_kb"] / 1024 for c in formats]
     ax_m.bar(xs, rss, width=0.52, color=colors, zorder=3)
@@ -161,10 +155,10 @@ def plot_format(formats, meta):
     ax_m.set_title("memory and copies", fontsize=9.5)
     ax_m.set_ylim(0, max(rss) * 1.30)
     ax_m.margins(x=0.15)
-    declutter(ax_m)
+    theme.declutter(ax_m)
 
     fig.suptitle("Format cost: the same rows, encoded and decoded", fontsize=12.5, y=0.975)
-    footer(fig, meta, "one process, no transport")
+    theme.footer(fig, footer_text(meta, "one process, no transport"))
     fig.subplots_adjust(left=0.09, right=0.97, top=0.84, bottom=0.14, wspace=0.28)
     return fig
 
@@ -212,8 +206,8 @@ def plot_transport(pairs, meta):
     )
     ax_r.set_ylim(0, max(cell(p, t)["gb_per_s"] for p in payloads for t in transports) * 1.18)
     ax_r.margins(x=0.14)
-    ax_r.legend(frameon=False, fontsize=8, loc="upper right")
-    declutter(ax_r)
+    theme.legend(ax_r, loc="upper right", fontsize=8)
+    theme.declutter(ax_r)
 
     # latency: p50 -> p99 per cell, log scale (the range is ~100x). The numbers
     # live in the row labels: putting them beside the markers pushed them off the
@@ -232,7 +226,7 @@ def plot_transport(pairs, meta):
                      s=44, zorder=4)
         tick_labels.append(
             f"{FORMAT_LABELS.get(payload, payload)} · {TRANSPORT_LABELS.get(transport, transport)}\n"
-            f"p50 {p50:,.0f} µs · p99 {p99:,.0f} µs"
+            f"p50 {p50:,.0f} μs · p99 {p99:,.0f} μs"
         )
     lows = min(cell(p, t)["p50_ms"] for p, t in rows) * 1e3
     highs = max(cell(p, t)["p99_ms"] for p, t in rows) * 1e3
@@ -244,13 +238,13 @@ def plot_transport(pairs, meta):
                      if lows * 0.42 <= t <= highs * 2.2])
     ax_l.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
     ax_l.xaxis.set_minor_formatter(NullFormatter())
-    ax_l.set_xlabel("per-chunk latency, µs (log scale)")
+    ax_l.set_xlabel("per-chunk latency, μs (log scale)")
     ax_l.set_title("latency: filled = p50, hollow = p99", fontsize=9.5)
     ax_l.margins(y=0.24)
-    declutter(ax_l)
+    theme.declutter(ax_l, grid="x")
 
     fig.suptitle("Transport cost: identical payload bytes, producer → consumer", fontsize=12.5, y=0.975)
-    footer(fig, meta, "one chunk in flight")
+    theme.footer(fig, footer_text(meta, "one chunk in flight"))
     fig.subplots_adjust(left=0.235, right=0.975, top=0.84, bottom=0.14, wspace=0.42)
     return fig
 
@@ -283,7 +277,7 @@ def plot_footprint(formats, meta):
     ax_m.set_title("solid = payload, faded = held on top of it", fontsize=9.5)
     ax_m.set_ylim(0, max(rss) * 1.30)
     ax_m.margins(x=0.18)
-    declutter(ax_m)
+    theme.declutter(ax_m)
 
     # copies by stage: one row per (cell, stage), zero counts annotated
     rows = [(c["cell"], stage, n) for c in formats
@@ -301,10 +295,10 @@ def plot_footprint(formats, meta):
     ax_c.set_xlabel("copies of the payload per run")
     ax_c.set_xlim(0, max((n for _c, _s, n in rows), default=1) + 0.9)
     ax_c.set_title("where the copies happen", fontsize=9.5)
-    declutter(ax_c)
+    theme.declutter(ax_c)
 
     fig.suptitle("Footprint of each approach: memory and copies", fontsize=12.5, y=0.975)
-    footer(fig, meta, "one process, no transport")
+    theme.footer(fig, footer_text(meta, "one process, no transport"))
     fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.14, wspace=0.55)
     return fig
 
@@ -340,7 +334,7 @@ def plot_who_pays(pairs, meta):
     ax_cpu.set_xlabel("producer + consumer")
     ax_cpu.set_xlim(0, max(p + c for p, c in zip(prod, cons)) * 1.30)
     ax_cpu.set_title("CPU, ms", fontsize=9.5)
-    declutter(ax_cpu)
+    theme.declutter(ax_cpu)
 
     # memory per side
     p_rss = [cell[r].get("producer_rss_kb", 0) / 1024 for r in rows]
@@ -355,7 +349,7 @@ def plot_who_pays(pairs, meta):
     ax_mem.set_xlabel("producer / consumer")
     ax_mem.set_xlim(0, max(max(p, c) for p, c in zip(p_rss, c_rss)) * 1.55)
     ax_mem.set_title("peak RSS, MB", fontsize=9.5)
-    declutter(ax_mem)
+    theme.declutter(ax_mem)
 
     # latency: min -> p50 -> p99 -> max, log scale
     for y, r in zip(ys, rows):
@@ -372,7 +366,7 @@ def plot_who_pays(pairs, meta):
     ax_lat.set_yticks(ys)
     ax_lat.set_yticklabels([
         f"{FORMAT_LABELS.get(p, p)} · {t}  ({cell[(p, t)]['p50_ms'] * 1e3:,.0f}/"
-        f"{cell[(p, t)]['p99_ms'] * 1e3:,.0f} µs)"
+        f"{cell[(p, t)]['p99_ms'] * 1e3:,.0f} μs)"
         for p, t in rows
     ], fontsize=7.8)
     ax_lat.invert_yaxis()
@@ -383,12 +377,13 @@ def plot_who_pays(pairs, meta):
     ax_lat.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
     ax_lat.xaxis.set_minor_formatter(NullFormatter())
     ax_lat.set_xlabel("min · p50 · p99 · max")
-    ax_lat.set_title("per-chunk latency, µs (log)", fontsize=9.5)
-    declutter(ax_lat)
+    ax_lat.set_title("per-chunk latency, μs (log)", fontsize=9.5)
+    theme.declutter(ax_lat, grid="x")
 
     fig.suptitle("Who pays: CPU, memory and latency per side", fontsize=12.5, y=0.975)
-    footer(fig, meta, "solid = producer, faded = consumer · | = min/max, ● = filled p50, "
-                      "○ = hollow p99 · shm = shared memory, uds = UNIX socket")
+    theme.footer(fig, footer_text(
+        meta, "solid = producer, faded = consumer · | = min/max, ● = filled p50, "
+              "○ = hollow p99 · shm = shared memory, uds = UNIX socket"))
     fig.subplots_adjust(left=0.115, right=0.975, top=0.83, bottom=0.16, wspace=0.85)
     return fig
 
@@ -421,7 +416,7 @@ def main():
               f"{c['encode_ms']:>10.1f} {c['decode_ms']:>10.1f} {c['copies']:>7} "
               f"{c['rss_kb'] / 1024:>8.0f}")
     print()
-    print(f"{'payload + transport':<28} {'GB/s':>7} {'p50 µs':>8} {'p99 µs':>8} "
+    print(f"{'payload + transport':<28} {'GB/s':>7} {'p50 μs':>8} {'p99 μs':>8} "
           f"{'CPU ms':>7} {'copies':>7}")
     for payload, transport, c in pairs:
         cpu = c.get("cpu_user_ms", 0) + c.get("cpu_sys_ms", 0)

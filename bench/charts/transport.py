@@ -32,6 +32,8 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "transport-shm-vs-regipc.log"
 FILENAME = "transport.png"
@@ -126,8 +128,7 @@ def panel(ax, groups, title, ylabel, formatter, log=True):
     ax.set_title(title, fontsize=10.5)
     ax.set_xticks(range(len(counts)))
     ax.set_xticklabels([f"{human(c)} hops" for c in counts])
-    ax.grid(axis="y", alpha=0.25, which="both")
-    ax.set_axisbelow(True)
+    theme.declutter(ax)
     ax.margins(y=0.30)
 
 
@@ -151,16 +152,19 @@ def main():
     panel(axes[2], group(runs, us_cpu_per_hop), "What the handoff cost the machine",
           "microseconds of CPU", lambda value: f"{value:.2f}")
 
-    axes[1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=2, fontsize=9)
+    # under the panel, not on the plot: the theme's box is for a legend that
+    # sits over the axes
+    theme.legend(axes[1], loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=2, fontsize=9,
+                 frameon=False)
     footer = "median of 3 runs per bar, whiskers = min..max. Doorbell only: no data segment and no payload."
     figure.suptitle("The ring's two doorbells: the semaphores against the regipc kernel call",
                     fontsize=12, y=0.99)
-    figure.text(0.5, 0.015, footer, ha="center", fontsize=8.5, color="#4a5568")
-    figure.text(0.5, 0.925,
-                f"{env.get('cpu', 'unknown')} · {env.get('cores', '?')} cores · "
-                f"kernel {env.get('kernel', '?')} · batch {env.get('batch_rows', '?')} rows · "
-                f"git {machine.get('git') or env.get('git', '?')}",
-                ha="center", fontsize=8.5, color="#4a5568")
+    theme.footer(figure, footer, y=0.015)
+    theme.footer(figure,
+                 f"{env.get('cpu', 'unknown')} · {env.get('cores', '?')} cores · "
+                 f"kernel {env.get('kernel', '?')} · batch {env.get('batch_rows', '?')} rows · "
+                 f"git {machine.get('git') or env.get('git', '?')}",
+                 y=0.925)
     figure.subplots_adjust(left=0.06, right=0.985, top=0.78, bottom=0.20, wspace=0.30)
 
     args.out.mkdir(parents=True, exist_ok=True)

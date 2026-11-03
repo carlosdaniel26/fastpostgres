@@ -32,6 +32,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "fastpostgres-vs-pgcache.log"
 FILENAME = "pgcache-read.png"
@@ -122,18 +124,14 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
         ax.bar_label(drawn, labels=texts, fontsize=6.8, padding=2)
 
     ax.set_xticks(xs)
-    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_xticklabels(labels)
     ax.set_xlabel("rows")
     ax.set_ylabel(ylabel)
     if log:
         ax.set_yscale("log")
         ax.yaxis.set_minor_formatter(NullFormatter())
     ax.yaxis.set_major_formatter(FuncFormatter(fmt))
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
+    theme.declutter(ax)
     ax.margins(y=0.24)
     return handles
 
@@ -159,11 +157,11 @@ def main():
 
     fig.suptitle("fast-postgres against a result cache, same rows, same output",
                  fontsize=12.5, y=0.975)
-    fig.legend(handles, [label for _, _, label in SERIES], loc="upper center",
-               bbox_to_anchor=(0.5, 0.925), ncol=2, frameon=False, fontsize=9)
+    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.925), ncol=2,
+                 handles=handles, labels=[label for _, _, label in SERIES], fontsize=9)
 
     footer = " · ".join(env.get(k, "?") for k in ("cpu", "postgres", "pgcache image", "git"))
-    fig.text(0.5, 0.03, footer, ha="center", fontsize=7.5, color="#888888")
+    theme.footer(fig, footer, y=0.03)
     fig.subplots_adjust(left=0.075, right=0.985, top=0.80, bottom=0.14)
 
     path = args.out / FILENAME

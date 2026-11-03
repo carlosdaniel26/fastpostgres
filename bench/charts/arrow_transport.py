@@ -45,6 +45,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "arrow-transport.log"
 FILENAME = "arrow-transport.png"
@@ -99,19 +101,13 @@ def fmt_size(size):
 
 
 def style(ax, log_y=True, yfmt=fmt_rate):
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
     ax.margins(y=0.30)
     if log_y:
         ax.set_yscale("log")
         ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=15))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: yfmt(v)))
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
-    ax.grid(axis="y", alpha=0.25, which="both")
-    ax.set_axisbelow(True)
+    theme.declutter(ax)
 
 
 def best(records, size, engine, players):
@@ -213,13 +209,13 @@ def main():
 
     handles = [plt.Rectangle((0, 0), 1, 1, color=color, label=label) for name, color, label in ENGINES
                if name in present]
-    figure.legend(handles, [h.get_label() for h in handles], loc="upper center",
-                  bbox_to_anchor=(0.5, 0.905), ncol=len(handles), frameon=False, fontsize=9)
+    theme.legend(figure, loc="upper center", bbox_to_anchor=(0.5, 0.905), ncol=len(handles),
+                 handles=handles, labels=[h.get_label() for h in handles], fontsize=9)
     figure.suptitle("the Arrow read under the ring's two engines, and the Arrow ecosystem's own", fontsize=12, y=0.985)
     machine_line = (f"{machine.get('cpu', 'unknown')} · {machine.get('cores', '?')} cores · "
                     f"kernel {machine.get('kernel', '?')} · postgres {machine.get('postgres', '?')} · "
                     f"image {machine.get('image', '?')} · git {machine.get('git', '?')}")
-    figure.text(0.5, 0.925, machine_line, ha="center", fontsize=8.0, color="#4a5568")
+    theme.footer(figure, machine_line, y=0.925)
     heads_fpg = sorted({f"fastpostgres over {e}: {PLAYER_NAMES[h['player']]}"
                        for (size, e), h in chosen.items() if e != "adbc"})
     heads_adbc = sorted({PLAYER_NAMES[h["player"]] for (size, e), h in chosen.items() if e == "adbc"})
@@ -231,8 +227,7 @@ def main():
         f"p50 is derived (one read = rows / rate; the script prints medians, not percentiles). "
         f"digest {status}: the same rows in every cell (count + column sums)."
     )
-    figure.text(0.5, 0.012, footer, ha="center", va="bottom", fontsize=7.6, color="#4a5568",
-                linespacing=1.5)
+    theme.footer(figure, footer, y=0.012)
     figure.subplots_adjust(left=0.055, right=0.99, top=0.76, bottom=0.19, wspace=0.28)
 
     args.out.mkdir(parents=True, exist_ok=True)

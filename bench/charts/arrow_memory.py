@@ -33,6 +33,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "fastpostgres-vs-arrow-memory.log"
 FILENAME = "arrow-memory.png"
@@ -121,12 +123,8 @@ def style(ax, ticks, ylabel, log_y=False):
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     else:
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
     ax.margins(y=0.26, x=0.12)
+    theme.declutter(ax, grid="x")
 
 
 def main():
@@ -183,11 +181,11 @@ def main():
     ]
     fig.suptitle("the same rows against a fixed 512 MiB shared-memory buffer",
                  fontsize=12.5, y=0.975)
-    fig.legend(handles, [h.get_label() for h in handles], loc="upper center",
-               bbox_to_anchor=(0.5, 0.925), ncol=4, frameon=False, fontsize=8.5)
+    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.925), ncol=4,
+                 handles=handles, labels=[h.get_label() for h in handles])
 
     footer = " · ".join(env.get(k, "?") for k in ENV_KEYS)
-    fig.text(0.5, 0.03, footer, ha="center", fontsize=7.5, color="#888888")
+    theme.footer(fig, footer, y=0.03)
     fig.subplots_adjust(left=0.07, right=0.985, top=0.79, bottom=0.14)
 
     path = args.out / FILENAME

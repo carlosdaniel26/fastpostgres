@@ -32,6 +32,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+
+sys.path.insert(0, str(HERE.parents[3] / "bench" / "charts"))
+import theme  # noqa: E402
+
 DEFAULT_LOGS = [HERE / "sweep-bulk.jsonl", HERE / "sweep.jsonl"]
 FILENAME = "regipc-copy-vs-vector.png"
 PLAIN_CALL_US = 0.521  # the ABI 2 nine-GPR call, bench/results/transport-shm-vs-regipc.log
@@ -166,9 +170,8 @@ def main():
         ax.set_xticks(list(range(len(widths))))
         ax.set_xticklabels(labels, fontsize=9)
         ax.set_xlabel("bytes per call")
-        ax.grid(axis="y", alpha=0.25, which="both")
-        ax.set_axisbelow(True)
-        ax.legend(fontsize=7.5, loc="upper left", framealpha=0.9)
+        theme.declutter(ax)
+        theme.legend(ax, loc="upper left", fontsize=7.5)
         ax.set_xlim(-0.6, len(widths) - 0.4)
 
     axes[0].set_title("what one call costs", fontsize=10.5)
@@ -183,17 +186,17 @@ def main():
 
     hot, real = best("bulk-hot"), best("vec-real")
     if hot and real:
-        figure.text(0.5, 0.925,
-                    f"best copy {hot[1]:.2f} GB/s at {hot[0]} B vs vector {real[1]:.2f} GB/s of real state "
-                    f"at {real[0]} B; median of {len(runs)} runs, every run verified"
-                    if verified else
-                    f"best copy {hot[1]:.2f} GB/s at {hot[0]} B vs vector {real[1]:.2f} GB/s of real state "
-                    f"at {real[0]} B; median of {len(runs)} runs (WARNING: unverified runs included)",
-                    ha="center", fontsize=9, color="#4a5568")
-    figure.text(0.5, 0.015,
-                f"source: {', '.join(str(p) for p in logs)} - bars are medians of the per-run p50 / rate; "
-                "the vector channel's FP save/restore is paid at every width, the copy channel's is zero.",
-                ha="center", fontsize=8.5, color="#4a5568")
+        theme.footer(figure,
+                     f"best copy {hot[1]:.2f} GB/s at {hot[0]} B vs vector {real[1]:.2f} GB/s of real state "
+                     f"at {real[0]} B; median of {len(runs)} runs, every run verified"
+                     if verified else
+                     f"best copy {hot[1]:.2f} GB/s at {hot[0]} B vs vector {real[1]:.2f} GB/s of real state "
+                     f"at {real[0]} B; median of {len(runs)} runs (WARNING: unverified runs included)",
+                     y=0.925)
+    theme.footer(figure,
+                 f"source: {', '.join(str(p) for p in logs)} - bars are medians of the per-run p50 / rate; "
+                 "the vector channel's FP save/restore is paid at every width, the copy channel's is zero.",
+                 y=0.015)
     figure.subplots_adjust(left=0.055, right=0.985, top=0.78, bottom=0.17, wspace=0.26)
 
     args.out.mkdir(parents=True, exist_ok=True)

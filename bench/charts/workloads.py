@@ -35,6 +35,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "fastpostgres-vs-psycopg.log"
 FILENAME = "workloads.png"
@@ -124,17 +126,13 @@ def fmt_ms(v, _pos=None):
 
 
 def style(ax, log_y=False, yfmt=None):
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
     ax.margins(y=0.18)
     if log_y:
         ax.set_yscale("log")
         ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=15))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: yfmt(v)))
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+    theme.declutter(ax)
 
 
 def grouped(ax, data, scenarios, index, fmt, ticks, log_y=False, yfmt=None):
@@ -190,11 +188,11 @@ def main():
 
     handles = [plt.Rectangle((0, 0), 1, 1, color=color, label=label) for _p, color, label in SERIES]
     fig.suptitle("realistic workloads over a commerce schema, 1M orders", fontsize=12.5, y=0.975)
-    fig.legend(handles, [h.get_label() for h in handles], loc="upper center",
-               bbox_to_anchor=(0.5, 0.925), ncol=2, frameon=False, fontsize=9)
+    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.925), ncol=2,
+                 handles=handles, labels=[h.get_label() for h in handles], fontsize=9)
 
     footer = " · ".join(env.get(k, "?") for k in ENV_KEYS) + f" · digests {status}"
-    fig.text(0.5, 0.03, footer, ha="center", fontsize=7.5, color="#888888")
+    theme.footer(fig, footer)
     fig.subplots_adjust(left=0.075, right=0.985, top=0.80, bottom=0.15)
 
     path = args.out / FILENAME

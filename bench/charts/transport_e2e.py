@@ -35,6 +35,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "transport-e2e.log"
 FILENAME = "transport-e2e.png"
@@ -84,19 +86,13 @@ def fmt_us(v):
 
 
 def style(ax, log_y=True, yfmt=fmt_rate):
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
     ax.margins(y=0.28)
     if log_y:
         ax.set_yscale("log")
         ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=15))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: yfmt(v)))
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
-    ax.grid(axis="y", alpha=0.25, which="both")
-    ax.set_axisbelow(True)
+    theme.declutter(ax)
 
 
 def main():
@@ -188,14 +184,14 @@ def main():
                if name in present]
     handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="#666666", alpha=0.45,
                                  label="lighter bar: p95 of the same reads"))
-    figure.legend(handles, [h.get_label() for h in handles], loc="upper center",
-                  bbox_to_anchor=(0.5, 0.905), ncol=3, frameon=False, fontsize=9)
+    theme.legend(figure, loc="upper center", bbox_to_anchor=(0.5, 0.905), ncol=3,
+                 handles=handles, labels=[h.get_label() for h in handles], fontsize=9)
     figure.suptitle("the ring's two doorbells, end to end: a real read through PostgreSQL, "
                     "the worker's batches, the client's rows", fontsize=12, y=0.985)
     machine_line = (f"{machine.get('cpu', 'unknown')} · {machine.get('cores', '?')} cores · "
                     f"postgres {machine.get('postgres', '?')} · {machine.get('python', '?')} · "
                     f"image {machine.get('image', '?')} · git {machine.get('git', '?')}")
-    figure.text(0.5, 0.925, machine_line, ha="center", fontsize=8.0, color="#4a5568")
+    theme.footer(figure, machine_line, y=0.925)
     reps = machine.get("reps", "?")
     read_counts = " / ".join(f"{n}" for n in sorted({int(c["reads"]) for c in cells.values()}))
     footer = (f"median of {reps} processes per bar; timed reads per process: {read_counts} "
@@ -203,8 +199,7 @@ def main():
               f"its p50 = p95).\n"
               f"the same rows on both engines (digest {status}); the payload path is shared, so what "
               f"differs is the doorbell - and the worker's CPU is not in these numbers.")
-    figure.text(0.5, 0.012, footer, ha="center", va="bottom", fontsize=7.6, color="#4a5568",
-                linespacing=1.5)
+    theme.footer(figure, footer, y=0.012)
     figure.subplots_adjust(left=0.055, right=0.99, top=0.76, bottom=0.19, wspace=0.28)
 
     args.out.mkdir(parents=True, exist_ok=True)

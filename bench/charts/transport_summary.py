@@ -30,6 +30,8 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 ISOLATED = ROOT / "bench" / "results" / "transport-shm-vs-regipc.log"
 E2E = ROOT / "bench" / "results" / "transport-e2e.log"
@@ -114,8 +116,7 @@ def main():
     ax.set_ylabel("hops per second (log scale)")
     ax.set_title(f"the doorbell: {hops['regipc']['hops'] / hops['shm']['hops']:.1f}x more hops per second",
                  fontsize=10.5)
-    ax.grid(axis="y", alpha=0.25, which="both")
-    ax.set_axisbelow(True)
+    theme.declutter(ax)
 
     # 2: the read, regipc relative to shm
     ax = axes[1]
@@ -140,7 +141,7 @@ def main():
     ax.set_xticklabels([label for _, label in SCENARIOS], fontsize=9)
     ax.set_ylabel("regipc relative to shm")
     ax.set_title("the read: the same rows, delivered", fontsize=10.5)
-    ax.legend(fontsize=8.5, loc="upper left")
+    theme.legend(ax, loc="upper left", fontsize=8.5)
 
     # 3: the bill
     ax = axes[2]
@@ -157,21 +158,20 @@ def main():
     ax.set_xticklabels([label for _, label in SCENARIOS], fontsize=9)
     ax.set_ylabel("client CPU per delivered row, us (log scale)")
     ax.set_title("the bill: what the win costs in CPU", fontsize=10.5)
-    ax.legend(fontsize=8.5, loc="upper right")
+    theme.legend(ax, loc="upper right", fontsize=8.5)
 
     for ax in axes:
-        ax.grid(axis="y", alpha=0.25, which="both")
-        ax.set_axisbelow(True)
+        theme.declutter(ax)
 
     figure.suptitle("regipc against shm: the doorbell is 12x cheaper, the read is not", fontsize=12, y=0.99)
-    figure.text(0.5, 0.915,
-                f"isolated record {hop_stamp} (1M hops) · end-to-end record {e2e_stamp} (3 processes per cell, "
-                f"the engine proven per read) · both engines deliver the same digest",
-                ha="center", fontsize=8.5, color="#4a5568")
-    figure.text(0.5, 0.015,
-                "bulk: 13 hops in 400 ms, so the doorbell is noise (0.99x). small reads: 4 hops per read, ~35% of the "
-                "time, so removing it lands 1.3-1.55x - and the client pays for it in spin CPU, which is the trade.",
-                ha="center", fontsize=8.5, color="#4a5568")
+    theme.footer(figure,
+                 f"isolated record {hop_stamp} (1M hops) · end-to-end record {e2e_stamp} (3 processes per cell, "
+                 f"the engine proven per read) · both engines deliver the same digest",
+                 y=0.915)
+    theme.footer(figure,
+                 "bulk: 13 hops in 400 ms, so the doorbell is noise (0.99x). small reads: 4 hops per read, ~35% of the "
+                 "time, so removing it lands 1.3-1.55x - and the client pays for it in spin CPU, which is the trade.",
+                 y=0.015)
     figure.subplots_adjust(left=0.055, right=0.985, top=0.78, bottom=0.19, wspace=0.28)
 
     args.out.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,8 @@ try:
 except ImportError:
     sys.exit("matplotlib is required (pip install matplotlib)")
 
+import theme  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "docs" / "assets"
 
@@ -178,12 +180,7 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
         ax.set_yscale("log")
         ax.yaxis.set_minor_formatter(NullFormatter())
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_rate))
-    # Declutter (Knaflic, ch. 3): drop the frame, keep only faint axis lines.
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color("#cccccc")
-    ax.tick_params(colors="#666666", length=0)
+    theme.declutter(ax)
     ax.margins(y=0.22)  # room for the second label line
     return handles
 
@@ -194,9 +191,9 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
     ax.set_title(title)
     fig.suptitle(headline, fontsize=13 if len(headline) <= 70 else 10, y=0.975)
     if handles:
-        fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.92),
-                   ncol=len(series), frameon=False)
-    fig.text(0.5, 0.03, footer, ha="center", fontsize=7.5, color="#888888")
+        theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.92), ncol=len(series),
+                     handles=handles, labels=labels)
+    theme.footer(fig, footer)
     fig.subplots_adjust(left=0.13, right=0.97, top=0.79, bottom=0.12)
     return fig
 
