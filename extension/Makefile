@@ -12,10 +12,10 @@ MODULE_big = fastpostgres
 OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o \
        transport/transport.o transport/engine_shm.o
 
-# The version lives in this file and in fastpostgres.control, and the SQL file is
-# named after it; `just check-version` proves the three agree. The 1.0.0 file and
-# the 1.0.0 -> 1.1.0 upgrade path stay so an installed 1.0.0 can be updated.
-DATA = sql/fastpostgres--1.0.0.sql sql/fastpostgres--1.1.0.sql sql/fastpostgres--1.0.0--1.1.0.sql
+# PostgreSQL wants a version in fastpostgres.control and wants the SQL file named
+# after it. Nothing is released, so both say 0.0.0: no upgrade paths to carry, and
+# no place else in the tree states a version.
+DATA = sql/fastpostgres--0.0.0.sql
 
 REGRESS = fastpostgres
 REGRESS_OPTS = --inputdir=test

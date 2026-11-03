@@ -32,7 +32,6 @@ and the formal bits.
 | separate format cost from transport cost | [`bench/CODEC-TRANSPORT.md`](bench/CODEC-TRANSPORT.md) |
 | see what a published third-party suite found | [`bench/ADOPTION.md`](bench/ADOPTION.md) |
 | contribute, or report a vulnerability | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) |
-| know what changed | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Known limitations
 

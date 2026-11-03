@@ -11,11 +11,10 @@ requirements; everything else runs in `docker/Dockerfile`.
 
 ```bash
 just test          # pg_regress (the extension) and the client suite, in the image
-just check-version # the release version agrees in its three places
 just check-links   # every markdown link and cross-file anchor resolves
 ```
 
-`just lint` runs the two checks above; CI adds `ruff` (the conservative rule set
+`just lint` runs the check above; CI adds `ruff` (the conservative rule set
 in `python/pyproject.toml`) and `shellcheck` over the harnesses. The C and C++
 sources are formatted with the repository's `.clang-format`, and the
 `.pre-commit-config.yaml` wires all of it for `pre-commit install`.
@@ -52,11 +51,11 @@ issue and we will find the class together.
 
 ## Releases
 
-The version lives in three places and `just check-version` proves they agree:
-`python/pyproject.toml`, `extension/fastpostgres.control`, and the
-`extension/sql/fastpostgres--<version>.sql` file name. To release: bump all
-three, add the `CHANGELOG.md` entry, tag `v<version>` - the release workflow
-builds the extension tarball and the wheel and attaches them with checksums.
+There are none, and the tree carries no release machinery for them: no changelog,
+no tag, no release workflow. Two tools insist on a version string anyway -
+PostgreSQL wants `default_version` in `extension/fastpostgres.control` with the
+SQL file named after it, and setuptools wants one in `python/pyproject.toml` - and
+all of them say `0.0.0`, which is the point.
 
 ## Pull requests
 

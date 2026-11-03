@@ -155,15 +155,12 @@ adoption-bench *args:
     just _run adoption.sh {{args}}
 
 # the release version agrees in pyproject.toml, the control file and sql/
-check-version:
-    @python3 tools/check_versions.py
-
 # every markdown link and cross-file anchor resolves
 check-links:
     @python3 tools/check_links.py
 
 # what CI's lint job adds on top: ruff (python/), shellcheck (the harnesses)
-lint: check-version check-links
+lint: check-links
 
 # drop the built images
 clean:

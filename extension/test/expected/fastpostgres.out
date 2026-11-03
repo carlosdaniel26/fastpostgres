@@ -8,7 +8,7 @@ CREATE EXTENSION fastpostgres;
 SELECT extname, extversion FROM pg_extension WHERE extname = 'fastpostgres';
    extname    | extversion 
 --------------+------------
- fastpostgres | 1.1.0
+ fastpostgres | 0.0.0
 (1 row)
 
 SELECT proname, pg_get_function_identity_arguments(oid) AS args
