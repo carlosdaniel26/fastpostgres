@@ -9,7 +9,6 @@ usage() {
   cat <<'EOF'
 charts: one figure per log
 
-  workloads      the realistic workload suite (bench/results/fastpostgres-vs-psycopg.log)
   arrow          fastpostgres vs ADBC + Arrow (bench/results/fastpostgres-vs-arrow.log)
   arrow-memory   the same reads under a fixed ring buffer
   cache          fastpostgres vs PgCache, defaults
@@ -22,7 +21,6 @@ EOF
 }
 
 case "$target" in
-  workloads)    exec bench/charts/workloads.py "$@" ;;
   arrow)        exec bench/charts/adbc.py "$@" ;;
   arrow-memory) exec bench/charts/arrow_memory.py "$@" ;;
   cache)        exec bench/charts/cache.py "$@" ;;

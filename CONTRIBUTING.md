@@ -62,5 +62,4 @@ all of them say `0.0.0`, which is the point.
 - One concern per PR; a move and a behaviour change in one diff are impossible to
   review together.
 - Say what you measured, with the log, if the change is about performance.
-- CI must be green: lint, `tests.sh` (pg_regress + client), and the workload
-  smoke run, which checks digests and publishes no numbers.
+- CI must be green: lint and `tests.sh` (pg_regress + client).

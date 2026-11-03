@@ -61,13 +61,13 @@ the shapes where delivery is the work.
 
 **It loses two cells badly, and the losses are informative.** `7-oneplusone` is
 42.7k against 82.4k: one row per statement, ten statements in flight per
-connection, every one of them opening and closing a stream - the same trade the
-workload suite's `lookup` cell measures, here against asyncpg's prepared
-pipeline. `6-batch` is 5.4 queries/s against asyncpg's 895: that cell is not the
-ring at all, it is the client's DML path (libpq, one row at a time), and a
-1000-row `executemany` taking 1.9 seconds says the client has no batch insert
-path worth the name. The same cell is also psycopg3-async's worst (28 queries/s),
-so it is a driver feature this suite prices rather than an artefact.
+connection, every one of them opening and closing a stream, here against
+asyncpg's prepared pipeline. `6-batch` is 5.4 queries/s against asyncpg's 895:
+that cell is not the ring at all, it is the client's DML path (libpq, one row at
+a time), and a 1000-row `executemany` taking 1.9 seconds says the client has no
+batch insert path worth the name. The same cell is also psycopg3-async's worst
+(28 queries/s), so it is a driver feature this suite prices rather than an
+artefact.
 
 **`3-large_object` is the interesting loss**: 100 rows of 1 KB `bytea` per
 statement, and the ring is 2.8x behind asyncpg (8.0k against 22.1k). The ring's
@@ -87,8 +87,7 @@ the transport is.
   one-row `SELECT 1+1` per statement is the regime where opening a stream costs
   more than a socket round trip, and the record's own numbers show it.
 - **It cannot check values, only row counts.** The suite's protocol does not
-  digest what came back; the classes here that do (the workload suite, the ADBC
-  comparison) are the ones to read for that.
+  digest what came back; the ADBC comparison is the one to read for that.
 - **It is one query set, not a verdict.** Seven queries on a fixed schema,
   one concurrency, one machine; the same caveats as everywhere else in this tree
   apply, and [`METHODOLOGY.md`](METHODOLOGY.md) is where they are written down.

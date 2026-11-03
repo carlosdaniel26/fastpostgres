@@ -1,6 +1,6 @@
 """Helpers every benchmark harness shares.
 
-The harnesses live in three classes - workloads, rivals, internals - and each one
+The harnesses live in two classes - rivals, internals - and each one
 used to carry its own copy of these. They are here once so a change to how a
 percentile or an RSS reading is computed lands everywhere at the same time.
 """

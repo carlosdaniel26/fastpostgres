@@ -16,5 +16,5 @@ and the extension tree beside this package: the wire format has one copy, in
 pip install ./python
 ```
 
-The rest - what it is, the measured results, the workload suite, the limits - is
+The rest - what it is, the measured results, the limits - is
 in the [repository](https://github.com/carlosdaniel26/fastpostgres).

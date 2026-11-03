@@ -6,7 +6,6 @@ comparison that drives it, so a clone shows both sides.
 
 | rival | the question | the driver | the record |
 |---|---|---|---|
-| **psycopg 3** | does swapping the driver help an application? The workload suite runs the same commerce schema and the same app-facing call on both, so the comparison is the driver and nothing else | [`../workloads/`](../workloads/) (`--player psycopg 3`) | [`fastpostgres-vs-psycopg.log`](../results/fastpostgres-vs-psycopg.log) |
 | **ADBC + Arrow** | the same read from the Arrow ecosystem's own answer: tuples against tuples, columnar against columnar | [`adbc-arrow/`](adbc-arrow/) | [`fastpostgres-vs-arrow.log`](../results/fastpostgres-vs-arrow.log), `-mixed`, `-small` |
 | **ADBC + Arrow, under a budget** | the same reads with the ring's transfer buffer fixed: what each side holds while it delivers | [`adbc-arrow/arrow_memory_bench.py`](adbc-arrow/arrow_memory_bench.py) | [`fastpostgres-vs-arrow-memory.log`](../results/fastpostgres-vs-arrow-memory.log) |
 | **PgCache** | a result cache removes execution; the ring removes delivery. Each wins a different shape | [`pgcache/`](pgcache/) | [`fastpostgres-vs-pgcache.log`](../results/fastpostgres-vs-pgcache.log) |

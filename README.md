@@ -57,31 +57,6 @@ The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)
 
 All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md).
 
-### Realistic workloads: FastPostgres against psycopg 3
-
-The workload suite asks the pragmatic question: over a commerce schema with foreign keys and indexes (10k customers, 10k products, 1M orders, 3M order items), the same application on both drivers, the same app-facing call, per-statement latency and throughput ([`bench/README.md`](bench/README.md), [`log`](bench/results/fastpostgres-vs-psycopg.log)):
-
-| scenario | FastPostgres | psycopg 3 | |
-|---|---|---|---|
-| primary-key lookups, statements/s | 8.2K | **38.6K** | each ring statement opens and closes a stream |
-| a filtered, ordered page of 100, statements/s | 2.2K | **4.7K** | same trade, and p95 1.03 ms against 0.23 |
-| the scan (1M rows out), rows/s | **2.21M** | 0.84M | 2.6x the socket |
-| the join (2.7M rows out), rows/s | **2.18M** | 1.26M | 1.7x |
-| the aggregate, ms/read | 231.3 | **85.2** | the ring's read runs as a serial plan in its worker |
-| four clients on the page, statements/s | 13.3K | **16.8K** | the per-statement cost again |
-| 90/10 reads and inserts, reads/s | 2.57K | **3.09K** | writes 286 against 343 per second |
-
-Three things this says that the transport benchmark cannot. **Bulk delivery is
-where the ring wins**, at every size. **A small statement is where it loses**:
-opening a stream is two semaphore round trips, where psycopg pays one socket
-round trip - so a point read belongs on libpq, not on the ring. And **a parallel
-plan is neither stack's to win**: the aggregate is slower on the ring because
-its background worker runs the plan serially (the ring's 231.3 ms matches the
-same query with `max_parallel_workers_per_gather = 0`, 224 ms, while psycopg's
-backend gets a parallel plan).
-
-![Realistic workloads over a commerce schema](docs/assets/workloads.png)
-
 ### Where it loses
 
 Read this before the ratios above: the losses are as measured as the wins, and
@@ -89,9 +64,6 @@ they are what decides whether this belongs in an application.
 
 | where | the number | why |
 |---|---|---|
-| a point read | 8.2K statements/s against psycopg's 38.6K (4.7x slower) | opening a stream is two semaphore round trips; psycopg pays one socket round trip |
-| a page of 100, at p95 | 1.03 ms against 0.23 | the same trade, and it hurts most at the tail |
-| an aggregate | 231.3 ms against 85.2 | the worker's plan is serial and the backend's gets a `Gather` |
 | 1K rows, the columnar path | the plain driver read wins | the columnar path's fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
 | through SQLAlchemy CORE | -72-83% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
 | `SELECT 1+1`, 10 connections, a published suite | 42.7K queries/s against asyncpg's 82.4K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
@@ -120,7 +92,7 @@ That is **5.0-5.7x faster when both build Python tuples** and **3.6-3.8x faster 
 
 The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the same two comparisons read **4.7-6.0x** and **4.1-4.3x**: the data slows FastPostgres ~13% and ADBC ~18%, so the ratio holds.
 
-`just bench` also prints the rest of what FastPostgres does with those rows, against its own driver read:
+The same read also reports the rest of what FastPostgres does with its rows, against its own driver read:
 
 | path (1M rows, `bench` shape) | vs the plain driver read |
 |---|---|
@@ -182,7 +154,6 @@ git clone https://github.com/carlosdaniel26/fastpostgres.git
 cd fastpostgres
 
 just test          # the extension's SQL surface and the client's test suite
-just bench         # the workload suite: seven scenarios against psycopg 3
 just rivals adbc   # FastPostgres vs ADBC + Arrow, 100K / 1M / 10M rows
 just adoption magicstack-pgbench   # somebody else's suite, our cell in its roster
 just demo 5000     # the same app on psycopg 3 and on FastPostgres
@@ -194,7 +165,6 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 
 | class | command | what it answers |
 |---|---|---|
-| workloads | `just bench [scenario...]` | does swapping the driver help an application: lookups, pages, scans, joins, aggregates, concurrency, read/write mixes |
 | rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
 | internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat]` | what the row decode and the transport cost at the instruction, cache and port level |
 | adoption | `just adoption [magicstack-pgbench]` | what a published third-party suite's own queries and protocol find, with our cell in its roster |
@@ -247,7 +217,7 @@ On the server side, `max_worker_processes` bounds how many rings (background wor
 ## Status
 
 - **A research prototype.** Linux, same host, single writer's discretion: see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for the list, including the ones that shape how it can be used at all.
-- **Tested**: the extension's SQL surface under `pg_regress`, and 34 client tests covering the wire types, the ring pool, fork safety, the libpq fallbacks and the unknown-transport refusal; CI runs both, plus ruff, shellcheck, the markdown link check and the release-version check, and a weekly workload smoke.
+- **Tested**: the extension's SQL surface under `pg_regress`, and 29 client tests covering the wire types, the ring pool, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check.
 - **Not here yet**: an async client, COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
 
 ## How this was built

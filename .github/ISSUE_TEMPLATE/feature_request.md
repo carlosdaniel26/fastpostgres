@@ -12,4 +12,4 @@ scenario classes are written down.
 
 **If it is a benchmark: what would it prove, and against what?**
 A measurement needs a rival, the same output on both sides, and a class to live
-in (workloads, rivals or internals); see `bench/METHODOLOGY.md`.
+in (rivals, internals or adoption); see `bench/METHODOLOGY.md`.

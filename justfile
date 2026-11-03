@@ -1,11 +1,8 @@
 # FastPostgres dev tasks: one image, a throwaway PostgreSQL for every run.
 #
-# Measurement has four classes, one command each (bench/README.md is the
+# Measurement has three classes, one command each (bench/README.md is the
 # catalog: what each answers, the method, and where its record lives):
 #
-#   just bench [scenario...]  workloads: realistic scenarios over a commerce
-#                            schema - lookups, pagination, scan, join, aggregate,
-#                            concurrency, read/write mixes - against psycopg 3
 #   just rivals [target]     the competitive comparisons: ADBC + Arrow, and a
 #                            result cache, at their defaults and under a budget
 #   just internals [target]  the meters behind the design notes: decode cycles /
@@ -30,7 +27,7 @@
 #   examples/    the app the demo switches drivers on   (run inside the image)
 
 #
-# Row counts default to each harness's own; the workload suite takes --scale.
+# Row counts default to each harness's own.
 # Override the ring's shared-memory size with SHM=<size> (default 3g); MCA_CPU
 # picks the core decode-mca models.
 
@@ -73,10 +70,6 @@ _run_profile *args:
 test:
     just _run tests.sh
 
-# the workload suite: realistic scenarios, app-facing API on both sides (bench/README.md)
-bench *args:
-    bench/harness/workloads_bench.sh {{args}}
-
 # the competitive benchmarks: adbc | arrow-memory | cache | cache-budget
 rivals target="" *args:
     bench/dispatch/rivals.sh {{target}} {{args}}
@@ -93,7 +86,7 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: workloads | arrow | arrow-memory | cache | cache-budget | codec | ab
+# one figure per log: arrow | arrow-memory | cache | cache-budget | codec | ab
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
 

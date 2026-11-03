@@ -8,7 +8,6 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 
 | record | what it is | the argument it backs |
 |---|---|---|
-| `fastpostgres-vs-psycopg.log` | the workload suite: seven scenarios over the commerce schema, against psycopg 3 | [`README.md`](README.md), the README's workload table |
 | `fastpostgres-vs-arrow.log`, `-mixed`, `-small` | the read against ADBC + Arrow, at three sizes and two shapes | [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
 | `fastpostgres-vs-arrow-memory.log` | the same reads with the ring's buffer fixed: what each side held | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
 | `fastpostgres-vs-pgcache.log` | against a CDC-maintained result cache, each side at its defaults | [`PG-CACHE.md`](PG-CACHE.md) |
@@ -25,7 +24,7 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
   untouched and the stamp is clean:
 
   ```
-  just bench > /tmp/workloads.log && cp /tmp/workloads.log bench/results/fastpostgres-vs-psycopg.log
+  just rivals cache > /tmp/pgcache.log && cp /tmp/pgcache.log bench/results/fastpostgres-vs-pgcache.log
   ```
 
 - One file per run family; a re-run replaces it, and the `git:` stamp says which

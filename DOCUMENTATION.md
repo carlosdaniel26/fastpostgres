@@ -12,7 +12,7 @@ and the formal bits.
 | `extension/transport/` | the doorbell engine (`engine_shm.c`) |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the SQLAlchemy dialect, and the tests |
-| `bench/` | the claim's tree: the measurement classes (`workloads/`, `rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
+| `bench/` | the claim's tree: the measurement classes (`rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
 | `docs/` | the manual: the limitations and the figures every page embeds |

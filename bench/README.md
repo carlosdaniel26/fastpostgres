@@ -13,7 +13,6 @@ Every number the project quotes is a line in a committed log under
 
 | class | command | the question it answers |
 |---|---|---|
-| workloads | [`just bench`](../README.md#benchmarks-and-meters) | does swapping the driver help an application - lookups, pages, scans, joins, aggregates, concurrency, writes - over a schema with foreign keys and indexes |
 | rivals | `just rivals [target]` | how the ring compares with the other stacks (ADBC + Arrow, a result cache), at their defaults and under a fixed memory budget |
 | internals | `just internals [target]` | what the row decode and the transport cost at the instruction, cache and port level - the evidence the design notes argue from |
 | adoption | `just adoption [target]` | what a published suite's own queries and protocol find, with our cell in its roster - [`adoption/`](adoption/), written up in [`ADOPTION.md`](ADOPTION.md) |
@@ -24,7 +23,7 @@ Rules every class follows, because a measurement that breaks them is not one:
   neighbours' cache footprint (see [`METHODOLOGY.md`](METHODOLOGY.md)).
 - **The same output, checked.** Every comparison defines what "the same" means -
   Python tuples for tuples, one column summed in place for columnar, a digest
-  over the rows for the workload suite - and fails the run when it disagrees.
+  over the rows - and fails the run when it disagrees.
 - **Evidence per cell.** A player says how its work actually travelled: reads
   served by the ring against reads issued, the ring pool, the bytes it mapped,
   its peak RSS, the transfer segment it was given. A fallback to libpq that the
@@ -35,75 +34,7 @@ Rules every class follows, because a measurement that breaks them is not one:
 Nothing is deleted from the history: the old recipe names still exist as targets
 of the dispatchers below, and their logs remain the record.
 
-## 1. Workloads: `just bench [scenario...]`
-
-```
-just bench                                  # every scenario, scale 1
-just bench lookup paged                     # only those
-just bench --quick                          # a tenth of the scale, short windows
-just bench --scale=2 --duration=30 --clients=8
-```
-
-The rival is **psycopg 3**, the plain driver the same application ran on before,
-and both sides use the same app-facing call - `execute(...).fetchall()` - so the
-comparison is the driver swap and nothing else; the other stacks are the rivals
-class. The record is [`fastpostgres-vs-psycopg.log`](results/fastpostgres-vs-psycopg.log),
-the chart is `just charts workloads`.
-
-The schema is a small commerce database (`bench/workloads/schema.py`) at a
-scale where 1 means 10k customers, 10k products, 1M orders and 3M order items:
-four tables with primary and foreign keys, an `orders (customer_id, created_at)`
-index for the page, a status index, an items-by-product index, and money as
-`numeric` - which the row frame cannot carry natively, so the realistic reads
-exercise the columnar frame the client falls back to. The data is generated, and
-`orders.total` is not reconciled against the items to the cent; the shape is the
-realistic part.
-
-| scenario | class | shape | measured as |
-|---|---|---|---|
-| `lookup` | app | 200 primary-key lookups | statements/s, p50/p95/p99 |
-| `paged` | app | 200 pages: `where customer_id = $1 order by created_at desc limit 100` | statements/s, p95 |
-| `scan` | analytics | the two-table join, every row out | rows/s, 3 reps |
-| `join` | analytics | `order_items x products`, 90% of the rows | rows/s, 3 reps |
-| `aggregate` | analytics | `group by country` over the join | ms/read, 3 reps |
-| `concurrent` | concurrency | 4 clients on the paged query for 10 s | statements/s, p50/p95/p99, ring-fallback rate |
-| `mixed` | mixed | 90% paged reads and 10% order inserts, 10 s | reads/s, writes/s, p95 of each |
-
-Each statement's rows are checked against its parameters (a lookup must return
-the row it asked for; a page must be at most 100 rows with non-negative totals)
-and folded into a digest the runner compares across players. The duration
-scenarios compare per statement instead of by total, because a window that stops
-on a clock does not issue the same number of statements twice.
-
-The suite runs with the transfer segment at 64 MiB (`SEGMENT_MIB`), not the
-client's 1 GiB default: an application's read is one batch, and 1 GiB per segment
-would reserve 2 GiB of address space per client for a few MB of batch.
-
-**What the committed run shows.** Three shapes, three answers:
-
-- **Bulk delivery is the ring's.** The scan moves 2.21M rows/s against 0.84M and
-  the join 2.18M against 1.26M, and every read was served by the ring - the log's
-  `served_by_shm` equals `reads` in every cell.
-- **A small statement is psycopg's.** A primary-key lookup is 4.7x slower on the
-  ring (8.2K against 38.6K statements/s, p50 0.12 ms against 0.02), because each
-  statement opens and closes a stream - two semaphore round trips - where psycopg
-  pays one socket round trip. The page (2.2x) and the four concurrent clients
-  (1.3x) show the same trade, and the page's p95 is where it hurts most: 1.03 ms
-  against 0.23.
-- **A parallel plan is neither stack's to win.** The aggregate is 2.7x slower on
-  the ring (231.3 ms against 85.2), because the read runs as a serial plan in the
-  background worker. A side measurement on the same data puts that query at 224 ms
-  with `max_parallel_workers_per_gather = 0` and at 93 ms with it on: the ring's
-  number is the serial one, and psycopg's backend is the one that gets the Gather.
-  That is the cost of running the read inside a worker, and the suite measures it
-  rather than hiding it.
-
-Those three sentences are why this class exists: the transport benchmark says
-"5-6x faster" and it is right about bulk reads, wrong about point reads, and
-silent about plans. The per-cell evidence in the log says which path served each
-read, and the README's workload table is this log's headline numbers.
-
-## 2. Rivals: `just rivals [target]`
+## 1. Rivals: `just rivals [target]`
 
 ```
 just rivals                  # list the targets
@@ -118,7 +49,7 @@ just rivals cache --quick
 | `cache` | a CDC-maintained result cache in front of the same server, its defaults | [`fastpostgres-vs-pgcache.log`](results/fastpostgres-vs-pgcache.log) | [`PG-CACHE.md`](PG-CACHE.md) |
 | `cache-budget` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](results/fastpostgres-vs-pgcache-memory.log) | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
 
-## 3. Internals: `just internals [target]`
+## 2. Internals: `just internals [target]`
 
 These are not benchmarks of the product. They are the meters behind
 [`WHY-IT-WINS.md`](WHY-IT-WINS.md) and
@@ -136,8 +67,8 @@ costs - and their results live in the lab notebook rather than in this catalog.
 
 ## Charts: `just charts [target]`
 
-`workloads` · `arrow` - the workload suite and the Arrow read: delivered rates,
-the ratio against Arrow, the p50 per read.
+`arrow` - the Arrow read: delivered rates, the ratio against Arrow, the p50 per
+read.
 `arrow-memory` · `cache` · `cache-budget` · `codec` - the fixed-buffer read, the
 result-cache comparisons and the codec x transport matrix.
 
@@ -164,7 +95,6 @@ the color carries the reading.
 
 ## Which numbers should I quote?
 
-The committed logs, never a sentence alone. For "does this help my app", the
-workload log; for "how does it compare with the other stacks", the rival logs;
-for "why", the internals notebook. The README carries the headline of each and
-links the log it came from.
+The committed logs, never a sentence alone. For "how does it compare with the
+other stacks", the rival logs; for "why", the internals notebook. The README
+carries the headline of each and links the log it came from.

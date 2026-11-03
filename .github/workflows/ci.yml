@@ -33,17 +33,3 @@ jobs:
         run: docker build --target dev -t fastpostgres-dev -f docker/Dockerfile .
       - name: pg_regress and the client suite
         run: docker run --rm --shm-size=3g fastpostgres-dev tests.sh
-
-  bench-smoke:
-    # The harnesses are validated, not quoted: this job fails on a digest
-    # mismatch and publishes no numbers (a shared runner is not a measurement).
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: build the dev image
-        run: docker build --target dev -t fastpostgres-dev -f docker/Dockerfile .
-      - name: the workload suite, quick
-        run: |
-          docker run --rm --shm-size=3g -e BENCH_GIT_REV="${GITHUB_SHA}" fastpostgres-dev \
-            python3 /src/bench/workloads/runner.py --quick | tail -n 40
