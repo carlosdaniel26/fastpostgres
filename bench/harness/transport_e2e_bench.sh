@@ -153,7 +153,7 @@ for name in $engines; do [ "$name" = regipc ] && want_regipc=1; done
 # (insmod); the device is the host's to pass to the container.
 if [ "$want_regipc" = 1 ] && [ ! -e /dev/regipc ]; then
   echo "transport_e2e: /dev/regipc is missing: the regipc module is not loaded." >&2
-  echo "  sudo insmod $root/extension/transport/regipc/module/regipc.ko mode=0666" >&2
+  echo "  just regipc-load    # builds the module, then insmods it with mode=0666" >&2
   echo "  (the container gets the node with --device; the host must have it first)" >&2
   exit 1
 fi

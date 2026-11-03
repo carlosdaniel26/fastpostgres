@@ -148,6 +148,21 @@ decode-mca *args:
 transport *args:
     bench/jobs/transport.sh {{args}}
 
+# the regipc module object, built against the running kernel's headers
+[private]
+_regipc_module:
+    make -C extension/transport/regipc/module
+
+# load the regipc module (the second doorbell): builds it, then insmods with
+# mode=0666, the trust boundary the device node is and the mode the image's
+# postgres user needs to open it through --device
+regipc-load: _regipc_module
+    sudo insmod {{justfile_directory()}}/extension/transport/regipc/module/regipc.ko mode=0666
+
+# unload it
+regipc-unload:
+    sudo rmmod regipc
+
 # the same two doorbells end to end (internals transport-e2e): a real read
 # through PostgreSQL in the dev image, once per engine - the container gets the
 # host's /dev/regipc with --device, which is what makes the regipc cell possible
