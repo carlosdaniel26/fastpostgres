@@ -141,15 +141,37 @@ def main():
 
     rows = sorted(data)
     fig, (ax_rate, ax_bytes) = plt.subplots(1, 2, figsize=(11.0, 5.0))
-    style(ax_rate, rows, "rows/s")
     style(ax_bytes, rows, "bytes held", log_y=True)
 
-    for player, color in (("ring", ACCENT), ("arrow-batch", GREEN), ("arrow-table", ORANGE)):
-        xs = [n for n in rows if player in data[n]]
-        # the two Arrow paths sit within a few percent of each other: keep their
-        # labels apart, one above the point and one below
-        line(ax_rate, xs, [data[n][player] for n in xs], color, fmt=fmt_rows,
-             dy=7 if player != "arrow-table" else -11)
+    # The rate panel is bars - one group per size, one bar per player - so it is
+    # categorical on x and its grid runs on y; the bytes panel stays lines, where
+    # the ring's flat window against the table's working set is the point.
+    players = (("ring", ACCENT), ("arrow-batch", GREEN), ("arrow-table", ORANGE))
+    slot = 0.8 / len(players)
+    peak = 0.0
+    for index, (player, color) in enumerate(players):
+        xs, values = [], []
+        for position, n in enumerate(rows):
+            if player not in data[n]:
+                continue
+            xs.append(position - 0.4 + slot * (index + 0.5))
+            values.append(data[n][player])
+        if not xs:
+            continue
+        peak = max([peak] + values)
+        ax_rate.bar(xs, values, slot * 0.9, color=color, zorder=3)
+        for x, value in zip(xs, values):
+            ax_rate.annotate(fmt_rows(value), (x, value), textcoords="offset points",
+                             xytext=(0, 5), ha="center", fontsize=6.5, color=color, zorder=5)
+    ax_rate.set_xticks(range(len(rows)))
+    ax_rate.set_xticklabels([fmt_rows(n) for n in rows], fontsize=8.5)
+    ax_rate.set_xlabel("rows read")
+    ax_rate.set_ylabel("rows/s")
+    ax_rate.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
+    ax_rate.set_xlim(-0.6, len(rows) - 0.4)
+    if peak:
+        ax_rate.set_ylim(0, peak * 1.18)
+    theme.declutter(ax_rate, grid="y")
     ax_rate.set_title("the same read, same output, same rows", fontsize=9.5)
 
     # the ring's fixed budget first: the line the others are read against
@@ -170,12 +192,9 @@ def main():
     ax_bytes.set_title("what each held while it delivered", fontsize=9.5)
 
     handles = [
-        plt.Line2D([], [], color=ACCENT, marker="o", markersize=4.5,
-                   label="fast-postgres (stream(), one segment)"),
-        plt.Line2D([], [], color=GREEN, marker="o", markersize=4.5,
-                   label="ADBC record-batch reader"),
-        plt.Line2D([], [], color=ORANGE, marker="o", markersize=4.5,
-                   label="ADBC Arrow table"),
+        plt.Rectangle((0, 0), 1, 1, color=ACCENT, label="fast-postgres (stream(), one segment)"),
+        plt.Rectangle((0, 0), 1, 1, color=GREEN, label="ADBC record-batch reader"),
+        plt.Rectangle((0, 0), 1, 1, color=ORANGE, label="ADBC Arrow table"),
         plt.Line2D([], [], color=GREY, linestyle="--", marker=None,
                    label="the ring's fixed transfer buffer"),
     ]
