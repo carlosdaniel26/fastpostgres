@@ -26,33 +26,23 @@ extern "C" {
 
 #define FASTPOSTGRES_TRANSPORT_SHM 1u
 
-/* The per-process state a side owns and passes back to the hooks; nothing in
- * here is shared. */
-typedef struct FastpostgresShmCtx {
-    int unused;
-} FastpostgresShmCtx;
-
 typedef struct FastpostgresTransport {
     const char *name;      /* "shm": the FASTPOSTGRES_TRANSPORT value */
     uint32_t    id;        /* FASTPOSTGRES_TRANSPORT_*: stored in the ring */
     const char *mechanism; /* one line for the logs and the records */
 
-    /* `ctx` is the calling process's own state, never shared. The engine
-     * allocates nothing itself; the caller owns the storage and passes the
-     * same pointer back. */
-
     /* --- client (the side that asks) --- */
-    int (*client_init)(FastpostgresRing *r, void *ctx);
-    void (*client_fini)(FastpostgresRing *r, void *ctx);
-    int (*post_request)(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms);
-    int (*wait_response)(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms);
-    int (*wait_ready)(FastpostgresRing *r, void *ctx, int timeout_ms);
+    int (*client_init)(FastpostgresRing *r);
+    void (*client_fini)(FastpostgresRing *r);
+    int (*post_request)(FastpostgresRing *r, uint64_t seq, int timeout_ms);
+    int (*wait_response)(FastpostgresRing *r, uint64_t seq, int timeout_ms);
+    int (*wait_ready)(FastpostgresRing *r, int timeout_ms);
 
     /* --- worker (the side that answers) --- */
-    int (*worker_init)(FastpostgresRing *r, void *ctx);
-    void (*worker_fini)(FastpostgresRing *r, void *ctx);
-    int (*wait_request)(FastpostgresRing *r, void *ctx, uint64_t *seq, int timeout_ms);
-    int (*post_response)(FastpostgresRing *r, void *ctx, uint64_t seq);
+    int (*worker_init)(FastpostgresRing *r);
+    void (*worker_fini)(FastpostgresRing *r);
+    int (*wait_request)(FastpostgresRing *r, uint64_t *seq, int timeout_ms);
+    int (*post_response)(FastpostgresRing *r, uint64_t seq);
 } FastpostgresTransport;
 
 /* "shm" resolves; anything else returns NULL. */

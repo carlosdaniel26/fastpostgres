@@ -273,8 +273,6 @@ fastpostgres_ring_main(Datum main_arg)
     const FastpostgresTransport *t;
     FastpostgresRing            *r;
     size_t                       rsize;
-    /* The engine's per-process state. Nothing here is shared with the client. */
-    FastpostgresShmCtx           ctx;
 
     (void)main_arg;
 
@@ -309,8 +307,7 @@ fastpostgres_ring_main(Datum main_arg)
         proc_exit(1);
     }
 
-    memset(&ctx, 0, sizeof(ctx));
-    if (t->worker_init(r, &ctx) < 0)
+    if (t->worker_init(r) < 0)
     {
         elog(LOG, "fastpostgres_ring_main: %s worker_init failed: %m", t->name);
         munmap(r, rsize);
@@ -329,7 +326,7 @@ fastpostgres_ring_main(Datum main_arg)
 
         if (got_sigterm) break;
 
-        rc = t->wait_request(r, &ctx, &seq, FASTPOSTGRES_RING_WAIT_MS);
+        rc = t->wait_request(r, &seq, FASTPOSTGRES_RING_WAIT_MS);
         if (rc == 0)
         {
             /* Timeout: re-check SIGTERM, the client that owns this ring (gone
@@ -353,7 +350,7 @@ fastpostgres_ring_main(Datum main_arg)
         r->error[0] = 0;
 
         if (!ring_handle(r, seg)) break;
-        if (t->post_response(r, &ctx, seq) < 0)
+        if (t->post_response(r, seq) < 0)
         {
             elog(LOG, "fastpostgres_ring_main: %s post_response failed: %m", t->name);
             break;
@@ -362,7 +359,7 @@ fastpostgres_ring_main(Datum main_arg)
 
     abort_txn();
     __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
-    t->worker_fini(r, &ctx);
+    t->worker_fini(r);
     munmap(r, rsize);
     proc_exit(0);
 }

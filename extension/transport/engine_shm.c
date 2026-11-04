@@ -7,13 +7,10 @@
  * works everywhere — and it is exactly the protocol ring.cpp on the client
  * side already speaks, mirrored here so both sides keep one definition.
  *
- * The worker's cursor over the requests it has answered is not kept in its ctx
- * (the shm ctx has no fields: the engine needs no per-process state). It is
- * read from the ring instead, in the shape the counters already have: req_seq
- * is what the client has asked, resp_seq is what this worker has answered, so
- * an unanswered request is exactly req_seq != resp_seq. That is the same
- * duplicate suppression the worker used to do with a local cursor, moved into
- * the engine so the worker loop is engine-agnostic.
+ * The worker's cursor over the requests it has answered is read from the ring
+ * in the shape the counters already have: req_seq is what the client has asked,
+ * resp_seq is what this worker has answered, so an unanswered request is exactly
+ * req_seq != resp_seq — the duplicate suppression, with no per-process state.
  *
  * Neither side polls in this engine, so the ring's tally records it as what it
  * is: one post and one semaphore wait per handoff, and no spin at all.
@@ -52,24 +49,21 @@ shm_since_ms(const struct timespec *start)
 /* ---- client ------------------------------------------------------------- */
 
 static int
-shm_client_init(FastpostgresRing *r, void *ctx)
+shm_client_init(FastpostgresRing *r)
 {
     (void)r;
-    (void)ctx;
     return 1; /* the semaphores were initialised when the ring was made */
 }
 
 static void
-shm_client_fini(FastpostgresRing *r, void *ctx)
+shm_client_fini(FastpostgresRing *r)
 {
     (void)r;
-    (void)ctx;
 }
 
 static int
-shm_post_request(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
+shm_post_request(FastpostgresRing *r, uint64_t seq, int timeout_ms)
 {
-    (void)ctx;
     (void)seq; /* the caller's value is the one this increment lands on: one request is in flight at a time */
     (void)timeout_ms;
 
@@ -84,12 +78,11 @@ shm_post_request(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
 }
 
 static int
-shm_wait_response(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
+shm_wait_response(FastpostgresRing *r, uint64_t seq, int timeout_ms)
 {
     struct timespec deadline;
     int             rc;
 
-    (void)ctx;
     (void)seq; /* the semaphore is the whole criterion; status/nrows are read under the fence below */
     shm_deadline(&deadline, timeout_ms);
     /* No poll before it: this wait is the futex sleep a wait policy would aim
@@ -103,12 +96,11 @@ shm_wait_response(FastpostgresRing *r, void *ctx, uint64_t seq, int timeout_ms)
 }
 
 static int
-shm_wait_ready(FastpostgresRing *r, void *ctx, int timeout_ms)
+shm_wait_ready(FastpostgresRing *r, int timeout_ms)
 {
     struct timespec start;
     struct timespec pause = {0, 1000000L}; /* 1 ms */
 
-    (void)ctx;
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (;;)
     {
@@ -121,27 +113,24 @@ shm_wait_ready(FastpostgresRing *r, void *ctx, int timeout_ms)
 /* ---- worker ------------------------------------------------------------- */
 
 static int
-shm_worker_init(FastpostgresRing *r, void *ctx)
+shm_worker_init(FastpostgresRing *r)
 {
     (void)r;
-    (void)ctx;
     return 1;
 }
 
 static void
-shm_worker_fini(FastpostgresRing *r, void *ctx)
+shm_worker_fini(FastpostgresRing *r)
 {
     (void)r;
-    (void)ctx;
 }
 
 static int
-shm_wait_request(FastpostgresRing *r, void *ctx, uint64_t *seq, int timeout_ms)
+shm_wait_request(FastpostgresRing *r, uint64_t *seq, int timeout_ms)
 {
     struct timespec deadline;
     int             rc;
 
-    (void)ctx;
     shm_deadline(&deadline, timeout_ms);
     for (;;)
     {
@@ -167,10 +156,8 @@ shm_wait_request(FastpostgresRing *r, void *ctx, uint64_t *seq, int timeout_ms)
 }
 
 static int
-shm_post_response(FastpostgresRing *r, void *ctx, uint64_t seq)
+shm_post_response(FastpostgresRing *r, uint64_t seq)
 {
-    (void)ctx;
-
     /* Release: the worker's status/nrows/error writes must be visible to the
      * client before the response counter that lets it look at them. */
     __atomic_store_n(&r->resp_seq, seq, __ATOMIC_RELEASE);

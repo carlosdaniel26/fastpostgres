@@ -11,7 +11,6 @@ typedef struct {
     void                           *map;
     size_t                          size;
     const FastpostgresTransport    *ops;       /* the engine's hooks (always the shm entry) */
-    FastpostgresShmCtx              ctx;       /* this process's own state; nothing shared with the peer */
     uint64_t                        seq;       /* the sequence of the request last posted */
     int                             done;      /* client_fini has run (or was never needed) */
     char                            data[128]; /* the columnar segment of the current stream */

@@ -49,7 +49,7 @@ ring_fini(RingObject *self)
 {
     if (self->ring != nullptr && self->ops != nullptr && !self->done)
     {
-        self->ops->client_fini(self->ring, &self->ctx);
+        self->ops->client_fini(self->ring);
         self->done = 1;
     }
 }
@@ -159,7 +159,6 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     self->ops  = ops;
     self->seq  = 0;
     self->done = 1; /* nothing to release until client_init succeeds */
-    memset(&self->ctx, 0, sizeof(self->ctx));
     memcpy(self->data, seg, std::strlen(seg) + 1);
     /* the capacity the worker is to map each data segment at (0 = its default) */
     r->data_bytes = data_bytes;
@@ -167,7 +166,7 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 
     /* Last: the engine opens what it needs. A failure is raised with the errno
      * text and the segment is left alone. */
-    if (ops->client_init(r, &self->ctx) < 0)
+    if (ops->client_init(r) < 0)
     {
         int e = errno;
 
@@ -210,7 +209,7 @@ ring_send(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_
     int      rc;
 
     errno = 0;
-    rc    = self->ops->post_request(r, &self->ctx, seq, RING_POST_MS);
+    rc    = self->ops->post_request(r, seq, RING_POST_MS);
     if (rc <= 0)
     {
         if (rc == 0)
@@ -241,7 +240,7 @@ ring_collect(RingObject *self)
 
     errno = 0;
     Py_BEGIN_ALLOW_THREADS;
-    rc = self->ops->wait_response(r, &self->ctx, self->seq, RING_WAIT_MS);
+    rc = self->ops->wait_response(r, self->seq, RING_WAIT_MS);
     Py_END_ALLOW_THREADS;
     if (rc <= 0)
     {
@@ -314,7 +313,7 @@ Ring_start(RingObject *self, PyObject *conn)
 
     errno = 0;
     Py_BEGIN_ALLOW_THREADS;
-    rc = self->ops->wait_ready(self->ring, &self->ctx, RING_READY_MS);
+    rc = self->ops->wait_ready(self->ring, RING_READY_MS);
     Py_END_ALLOW_THREADS;
     if (rc <= 0)
     {
@@ -418,7 +417,7 @@ Ring_stop(RingObject *self, PyObject *)
      * that into an exception. */
     uint64_t seq = __atomic_load_n(&r->req_seq, __ATOMIC_RELAXED) + 1;
 
-    if (self->ops->post_request(r, &self->ctx, seq, RING_STOP_MS) > 0)
+    if (self->ops->post_request(r, seq, RING_STOP_MS) > 0)
     {
         if (__atomic_load_n(&r->req_seq, __ATOMIC_RELAXED) < seq)
             __atomic_store_n(&r->req_seq, seq, __ATOMIC_RELEASE);
