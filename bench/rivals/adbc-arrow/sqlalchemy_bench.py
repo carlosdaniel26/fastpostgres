@@ -46,7 +46,7 @@ import numpy as np
 import pyarrow.compute as pc
 from fastpostgres import dbapi
 from fastpostgres.core import create_engine as lean_engine
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # bench/: lib
 
@@ -90,10 +90,6 @@ def open_dbapi():
 
 def open_arrow():
     return adbc.connect(ARROW_URI)
-
-
-def open_sqlalchemy():
-    return create_engine(FPG_URL)
 
 
 def open_lean():
@@ -179,17 +175,6 @@ def read_arrow_sum(conn):
     pc.sum(table["price"])
     ms = (now() - t0) * 1000
     return ms, table.num_rows
-
-
-def read_sqlalchemy(engine):
-    """The same read through SQLAlchemy CORE: `Row` objects (PATHS only)."""
-    t0 = now()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            select(Row.id, Row.sku, Row.name, Row.price, Row.stock, Row.active)
-        ).all()
-    ms = (now() - t0) * 1000
-    return ms, len(rows)
 
 
 # ---- the two headline sections -------------------------------------------
@@ -373,7 +358,6 @@ PATHS = (
     ("dbapi", "fastpostgres, DBAPI", open_dbapi, read_dbapi, close_conn, 1),
     ("stream", "fastpostgres, stream()+sum", open_dbapi, read_stream, close_conn, 1),
     ("core", "fastpostgres, core interface", open_lean, read_lean, close_engine, 1),
-    ("sqla", "fastpostgres, SQLAlchemy CORE", open_sqlalchemy, read_sqlalchemy, close_engine, 1),
     ("par", "fastpostgres, 4 processes", open_pool, read_parallel, close_pool, 4),
     ("arrow", "adbc+arrow, arrow+sum", open_arrow, read_arrow_sum, close_conn, 1),
     ("arrow_rows", "adbc+arrow, fetchall()", open_arrow, read_arrow_fetchall, close_conn, 1),
