@@ -11,7 +11,6 @@ the benchmark and the record of its threats to validity.
 | fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (2.6–3.0×) | `just bench` |
 | the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.5–3.6×) | `just bench` |
 | the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (2.9–3.2× and 3.3–3.5×) | `SHAPE=mixed just bench` |
-| SQLAlchemy's `Row` construction, not the transport, is what makes the object path expensive | PATHS table (−61…75% against the driver read) | `just bench` |
 | the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
 ## Systems under test
@@ -103,9 +102,6 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   rows with object rows; ZERO-COPY READ compares columnar with columnar. No
   table compares tuples against an Arrow table — that would price two different
   outputs rather than the two transports.
-- **SQLAlchemy is measured, not required.** The PATHS table shows it costs
-  ~570 ns/row of `Row` construction on top of the driver; the two headline
-  tables do not use it.
 - **Two shapes, not every shape.** NULLs, both varlena header sizes and
   non-ASCII text are measured (`SHAPE=mixed`); wide rows, numeric/timestamps and
   TOAST-heavy values are not — see

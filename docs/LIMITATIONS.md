@@ -63,7 +63,6 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 | four processes, DBAPI | 9.05M aggregate | one process cannot keep up |
 | `stream()` + numpy | 7.97M | you want numbers, not rows |
 | DBAPI / `core` | 3.79M | you want Python tuples |
-| SQLAlchemy CORE | 1.14M | you want SQLAlchemy's API and can pay ~570 ns/row |
 
 ## When not to use this
 

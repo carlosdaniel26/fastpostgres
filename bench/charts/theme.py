@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""The house chart theme: the LaTeX look of `chart-example.png`, in one place.
+"""The house chart theme: spines, grid, legend and caption, in one place.
 
-`chart-example.png`, in this directory, is the style reference: Computer Modern
-type on white, thin black axes with no top or right spine, a light dashed grid
-behind the data, a boxed legend inside the plot, and a small gray caption under
-the figure. Every chart script imports this module and takes its defaults from
-here, so the look is decided once instead of restated per script.
+`chart-example.png`, in this directory, is the style reference: thin black axes
+with no top or right spine, a light dashed grid behind the data, a boxed legend
+inside the plot, and a small gray caption under the figure. The type is not the
+exemplar's Computer Modern: it is matplotlib's default sans (DejaVu Sans), the
+face these charts have always been drawn in. Every chart script imports this
+module and takes its defaults from here, so the look is decided once instead of
+restated per script.
 
 Colors are deliberately not part of the theme: each chart keeps its own palette
 and its light-before/dark-after convention, because there the color carries the
@@ -17,14 +19,6 @@ reading.
     theme.legend(ax)                               # boxed, top left
     theme.footer(fig, "cpu: ... · git abc123")     # the caption
     fig.savefig(path)                              # dpi and ground already set
-
-A string containing `$` is drawn whole through mathtext, which carries fewer
-glyphs than the text face - keep math strings ASCII. And write a microsecond as
-Greek mu (U+03BC), never as the micro sign (U+00B5): cmr10's cmap claims the
-micro sign with an accent-sized mark, a font that claims a codepoint beats the
-fallback list, and STIX draws the Greek mu properly because cmr10 does not claim
-it. The rest of what these charts use (·, ×, –, —, →, ≥, ○, ●) cmr10 does not
-claim either, so the fallback covers it unasked.
 """
 import matplotlib
 
@@ -33,10 +27,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-# cmr10 first: it is the Computer Modern face of the exemplar. What it does not
-# claim (·, →, –, ≥) STIX and DejaVu draw instead, per glyph; the micro sign it
-# does claim, with the wrong mark, which is why the charts say μ and not µ.
-SERIF = ["cmr10", "STIXGeneral", "DejaVu Serif"]
+# matplotlib's bundled default: what these charts rendered in before the theme
+# existed, and what they render in again.
+FONT = "DejaVu Sans"
 
 GRID_COLOR = "#cccccc"
 GRID_DASH = (0, (4, 3))
@@ -46,11 +39,7 @@ CAPTION_COLOR = "#888888"
 def apply():
     """The matplotlib defaults the theme is made of; runs on import."""
     plt.rcParams.update({
-        "font.family": SERIF,
-        "mathtext.fontset": "cm",
-        # cmr10 wants its numbers and its minus drawn through mathtext; it is
-        # also how the tick labels get the CM face rather than a fallback.
-        "axes.formatter.use_mathtext": True,
+        "font.family": FONT,
         "font.size": 9.5,
         "axes.labelsize": 10,
         "axes.titlesize": 10.5,

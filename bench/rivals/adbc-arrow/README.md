@@ -9,7 +9,7 @@ comparison prices the transport and not two different results.
 
 | side | the code | how it reads |
 |---|---|---|
-| fastpostgres | the client itself: `python/src/fastpostgres/` | the DBAPI (typed tuples), `stream()` (zero-copy columnar batches, reduced in place with numpy), the lean `fastpostgres.core`, SQLAlchemy CORE, and a four-process read |
+| fastpostgres | the client itself: `python/src/fastpostgres/` | the DBAPI (typed tuples), `stream()` (zero-copy columnar batches, reduced in place with numpy), the lean `fastpostgres.core`, and a four-process read |
 | ADBC + Arrow | `sqlalchemy_bench.py`, `arrow_memory_bench.py` | `adbc_driver_postgresql.dbapi`, then either `to_pylist()` / `fetchall()` for the tuple comparison, `pyarrow.compute` over the Arrow table, or `fetch_record_batch()` one batch at a time |
 
 Both drivers are installed by the dev image, from PyPI, in one benchmark-only

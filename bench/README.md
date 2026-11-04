@@ -74,8 +74,8 @@ result-cache comparisons and the codec x transport matrix.
 
 `ab` - one figure per log, into `docs/assets/` by default.
 
-The look has one home: [`charts/theme.py`](charts/theme.py) sets the Computer
-Modern type, the thin axes, the dashed grid and the boxed legend, modelled on
+The look has one home: [`charts/theme.py`](charts/theme.py) sets the sans-serif
+type, the thin axes, the dashed grid and the boxed legend, modelled on
 [`charts/chart-example.png`](charts/chart-example.png) (the style reference; the
 chart itself is not from this repo). Palettes stay with each chart, because there
 the color carries the reading.

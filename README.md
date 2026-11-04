@@ -81,7 +81,6 @@ they are what decides whether this belongs in an application.
 
 | where | the number | why |
 |---|---|---|
-| through SQLAlchemy CORE | -61-75% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
 | `SELECT 1+1`, 10 connections, a published suite | 41.0K queries/s against asyncpg's 85.1K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
 | a 1000-row batched `INSERT` | 5.4/s against asyncpg's 885 | the client's libpq DML path, one row at a time; the ring is not involved |
 | `COPY` | not supported | writes are libpq, and the client has no COPY call there |
@@ -115,7 +114,6 @@ The same read also reports the rest of what FastPostgres does with its rows, aga
 | `stream()` + numpy sum | +111-114% |
 | `fastpostgres.core` (the lean interface) | level with the DBAPI |
 | four processes, DBAPI | +132-140% aggregate (the ring pool and memory bandwidth saturate) |
-| the same read through SQLAlchemy CORE | -61-75% (SQLAlchemy's `Row` construction, ~570 ns/row, not the transport) |
 | ADBC Arrow + sum, for reference | -36-41% |
 
 ### What each side holds: against Arrow under a fixed buffer

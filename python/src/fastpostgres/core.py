@@ -1,11 +1,11 @@
-"""fastpostgres.core — the SQLAlchemy CORE read path with a lean implementation.
+"""fastpostgres.core — the lean interface: a statement in, tuples out.
 
-The call shape is CORE's: a statement goes in, ``.all()`` comes out, the
-connection is a context manager, and the engine takes a URL or a conninfo. What
-is missing is everything CORE does *per row*: the result proxy, the ``Row``
-objects, the attribute mapping. ``execute()`` compiles the statement with
-SQLAlchemy's own compiler (once, and cached) and runs the SQL through the DB-API
-driver, so ``.all()`` is the driver's list of tuples.
+A statement goes in, ``.all()`` comes out, the connection is a context manager,
+and the engine takes a URL or a conninfo — the call shape SQLAlchemy users know,
+minus the per-row machinery: no result proxy, no ``Row`` objects, no attribute
+mapping. ``execute()`` compiles the statement once (SQLAlchemy's compiler, and
+cached) and runs the SQL through the DB-API driver, so ``.all()`` is the
+driver's list of tuples.
 
     from fastpostgres.core import create_engine
     engine = create_engine("host=/tmp dbname=postgres user=postgres")
