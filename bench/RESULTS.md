@@ -14,7 +14,6 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 | `fastpostgres-vs-pgcache-memory.log` | the same comparison under one memory budget on both sides | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
 | `codec-transport.log` | the codec x transport matrix: format cost and transport cost, separated | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
 | `cache-stat.log` | the host PMU's counters: decodes per row, transports per KiB | [`NOTES.md`](NOTES.md) |
-| `ab/*.log` | the before/after pairs the `improve-*` charts are drawn from | [`NOTES.md`](NOTES.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
 | `adoption-magicstack-pgbench.log` | a published suite's own seven queries and protocol, with our cell in its roster: MagicStack/pgbench, vendored at a pin | [`ADOPTION.md`](ADOPTION.md) |
 
 ## Housing rules

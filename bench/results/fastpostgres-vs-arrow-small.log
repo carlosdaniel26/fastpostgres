@@ -1,11 +1,12 @@
+bench/dispatch/rivals.sh adbc 1000
 just _run benchmarks.sh 1000
 just _image
-docker build -q --target dev -t fastpostgres-dev -f image/Dockerfile . >/dev/null
+docker build -q --target dev -t fastpostgres-dev -f docker/Dockerfile . >/dev/null
 DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e FASTPOSTGRES_OBJ_ARENA= -e SHAPE= -e BENCH_GIT_REV=2f0d97f-dirty fastpostgres-dev benchmarks.sh 1000
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=7c4fc21-dirty fastpostgres-dev benchmarks.sh 1000
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -19,40 +20,31 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: bench
-git: 2f0d97f-dirty
+git: 7c4fc21-dirty
 shm: 3.0G
 ### END ENV
-objpool: immortal cap=8192 MiB used=0 MiB objects=16929 fallbacks=0
-read_rows: 229.1 cycles/row over 4000 rows (decode 197.8, frame+desc+list 31.3)
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
-objpool: immortal cap=8192 MiB used=0 MiB objects=16929 fallbacks=0
-read_rows: 261.4 cycles/row over 4000 rows (decode 225.3, frame+desc+list 36.1)
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
-objpool: immortal cap=8192 MiB used=0 MiB objects=16929 fallbacks=0
-read_rows: 325.1 cycles/row over 4000 rows (decode 281.4, frame+desc+list 43.7)
-objpool: immortal cap=8192 MiB used=0 MiB objects=16931 fallbacks=0
-read_rows: 231.8 cycles/row over 4001 rows (decode 197.2, frame+desc+list 34.6)
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+read_rows: 395.1 cycles/row over 4000 rows (decode 351.2, frame+desc+list 43.9)
+read_rows: 384.8 cycles/row over 4000 rows (decode 352.5, frame+desc+list 32.3)
+read_rows: 406.4 cycles/row over 4000 rows (decode 364.7, frame+desc+list 41.7)
+read_rows: 383.1 cycles/row over 4001 rows (decode 341.3, frame+desc+list 41.8)
 # shape: bench — short ASCII text, no NULLs
 
 TUPLE READ (rows/s): fastpostgres adbc+tuples  vs arrow    
   (same output: ADBC's Arrow table converted column-wise with to_pylist)
-  1K              6.11M        1.16M   +427.8%  ok
-  spread: fastpostgres ±15.3%  adbc+tuples ±4.9%
+  1K              5.47M        1.23M   +345.9%  ok
+  spread: fastpostgres ±13.6%  adbc+tuples ±6.0%
 
 ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
   (same output: the columnar form each stack lands, one column summed in place)
-  1K              4.92M        1.50M   +228.4%  ok
-  spread: stream()+sum ±14.3%  arrow+sum ±2.1%
+  1K              4.01M        1.24M   +224.2%  ok
+  spread: stream()+sum ±14.8%  arrow+sum ±6.0%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  1K       fastpostgres, DBAPI                 5.36M          
-  1K       fastpostgres, stream()+sum          4.71M      -12%
-  1K       fastpostgres, core interface        2.62M      -51%
-  1K       fastpostgres, SQLAlchemy CORE       1.41M      -74%
-  1K       fastpostgres, 4 processes           1.37M      -74%
-  1K       adbc+arrow, arrow+sum               1.34M      -75%
-objpool: immortal cap=8192 MiB used=0 MiB objects=9 fallbacks=0
+  1K       fastpostgres, DBAPI                 5.24M          
+  1K       fastpostgres, stream()+sum          4.36M      -17%
+  1K       fastpostgres, core interface        2.61M      -50%
+  1K       fastpostgres, SQLAlchemy CORE       1.37M      -74%
+  1K       fastpostgres, 4 processes           1.35M      -74%
+  1K       adbc+arrow, arrow+sum               1.16M      -78%
+  1K       adbc+arrow, fetchall()              0.14M      -97%
+  1K       adbc+arrow, table+to_pylist         1.06M      -80%
