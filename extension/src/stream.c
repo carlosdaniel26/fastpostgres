@@ -1,11 +1,6 @@
 /*
- * stream.c — pull-driven batches over an SPI cursor. The cursor is a portal:
- * it lives in TopPortalContext and is dropped at COMMIT, so the ring worker
- * keeps a transaction open around the stream.
- *
- * The cursor is keyed by the stream name, the batch is published into the
- * segment the request names: two segments can then alternate, and the client can
- * decode one while the worker fills the other.
+ * stream.c — pull-driven batches over an SPI cursor (a portal in
+ * TopPortalContext). The design is documented in stream.h.
  */
 #include "postgres.h"
 
