@@ -53,6 +53,23 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)` and `fastpostgres_ring_stop(text)`. Everything else runs inside the worker, off the ring.
 
+## The two read paths
+
+A read takes one of two roads, and the choice is which cost dominates:
+
+- **Tuples** — `fetchall()`, the DBAPI default. The worker writes the row frame
+  (`FPROWS`, the executor's own tuple bytes) and the client walks it in place,
+  building a Python object per value: no setup cost, a per-row cost.
+- **Zero-copy** — `stream()`. The worker writes the columnar frame (`FPCOLUMN`)
+  and the client returns `memoryview`s over the segment: a fixed cost to open
+  the stream and map it, then nothing per row.
+
+The fixed cost is what makes the small end flip: at 1K rows `stream()` already
+wins, while the `core` interface and process fan-out — the same work with extra
+machinery — lose to a plain `fetchall`, because their fixed costs dominate a
+result that small. Pick `stream()` to reduce columns in place, `fetchall()` for
+plain rows.
+
 ## Measured results
 
 All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md).
@@ -64,7 +81,6 @@ they are what decides whether this belongs in an application.
 
 | where | the number | why |
 |---|---|---|
-| 1K rows, the `core` interface and fan-out | lose to the plain driver read | their fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
 | through SQLAlchemy CORE | -61-75% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
 | `SELECT 1+1`, 10 connections, a published suite | 41.0K queries/s against asyncpg's 85.1K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
 | a 1000-row batched `INSERT` | 5.4/s against asyncpg's 885 | the client's libpq DML path, one row at a time; the ring is not involved |

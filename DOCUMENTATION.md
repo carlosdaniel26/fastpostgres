@@ -40,7 +40,6 @@ expect, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md). The ones that shape
 how this can be used:
 
 - **Research prototype.** Not for production, multi-user, or untrusted networks.
-- **Linux, same host.** The transport is POSIX shared memory; there is no network path to benchmark or to use.
 - **The segment is the trust boundary.** `/dev/shm/<seg>` is an SQL-execution endpoint: the client creates it `0600` and the worker widens it to `0666` (`extension/src/shm.c`) so a client running as another user can map it. Treat the segment itself as the permission.
 - **Ring reads run in the worker's session.** They miss the calling connection's uncommitted writes; the driver is autocommit.
 - **`numeric` widens to `float8` on the wire.** Types whose storage is not the wire bytes (numeric, jsonb, arrays, enums) take the columnar frame, which is correct but not the zero-copy row path.

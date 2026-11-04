@@ -41,24 +41,6 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
   one shape, three sizes and three reps; it does not measure allocation *rates*,
   page faults, or a consumer that holds several results at once.
 
-## Small results: where the rankings invert
-
-At 1K rows the stack-versus-stack ranking holds — tuples 4.64M vs 1.10M rows/s,
-columnar + sum 4.74M vs 1.45M — and the paths *inside* fast-postgres invert
-against the driver read:
-
-| path at 1K rows | rows/s | vs the plain driver read |
-|---|---|---|
-| `stream()` + numpy sum | 5.15M | +51% |
-| DBAPI `fetchall` | 3.41M | — |
-| `core` interface | 1.69M | −50% |
-| four processes | 1.38M | −59% |
-
-The zero-copy `stream()` wins even at this size — the per-row Python cost the
-tuple path pays now exceeds the stream's fixed costs. The lean `core` interface
-and fan-out are still pure overhead at 1K. (Within-run spread at this size is
-±15%, so treat the ordering, not the digits.)
-
 ## Pros and cons
 
 ### fastpostgres vs ADBC + Arrow
