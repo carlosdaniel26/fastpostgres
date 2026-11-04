@@ -204,8 +204,7 @@ Four things fall out of it:
   family with the spread printed per row.
 - Of the same-budget run, specifically: the budget M covers the ring's data
   segments and, on the cache side, the container. It does **not** cover the
-  client's own memory — at 1M rows the reader's object arena held ~1.2 GB of
-  Python objects on both sides (the log's `rss_bytes` says so per cell) — nor the
+  client's own memory (the log's `rss_bytes` says so per cell) — nor the
   8 MiB control ring the client maps per stream, nor the cache's disk tier, which
   is where a cached result actually lives here (the memory budget only decides
   what may be registered). PgCache's own budget resolves to 80% of the cap by its

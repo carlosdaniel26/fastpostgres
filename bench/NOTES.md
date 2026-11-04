@@ -1,5 +1,14 @@
 # Hot path: hypotheses, not yet measured
 
+> **The immortal object arena is gone.** The `H11` experiment below built Python
+> values in an append-only arena stamped with an immortal refcount, worth ~2× on
+> the tuple decode (89.9 → 20.5 ns/row). It was removed (commit `7c4fc21`) because
+> the arena is never returned to the OS: a 10M-row read leaves ~791 MiB resident,
+> several leave ~3.9 GiB, and the 8 GiB reservation is a hard cap before it
+> silently falls back to the normal constructors. Without it the decode reads
+> ~323 cycles/row (`read_rows:` in any current log). The arena sections below are
+> that experiment's record.
+
 ## What this directory used to hold
 
 The kernel layer lived here: a CPU probe, a dispatch table, an AVX2 copy ladder,

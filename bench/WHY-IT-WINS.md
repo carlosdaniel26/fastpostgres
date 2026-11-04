@@ -180,7 +180,7 @@ Arrow IPC must go values → arrays → stream → sink, because the stream is a
 *serialization of* the arrays and the sink may be a file, a socket, or another
 process. Each hop exists so that the reader on the other side can be anyone.
 
-**Cost:** the frame cannot be reused across queries (the arena is append-only),
+**Cost:** the frame cannot be reused across queries,
 cannot be compressed, and cannot be encrypted in place. **Evidence:** 1 copy
 against 2 in the encode path; 14.3 GB/s against 6.4 GB/s.
 
@@ -401,7 +401,7 @@ store, which it did, and then removed.
 
 | mechanism | what it buys | what it costs |
 |---|---|---|
-| write once into the shipping buffer | 1 copy, 2.5× encode | no reuse across frames (append-only arena), no compression, no in-place encryption |
+| write once into the shipping buffer | 1 copy, 2.5× encode | no reuse across frames, no compression, no in-place encryption |
 | fixed layout, walked not parsed | no metadata parse, 28-byte header | version lock; unknown kinds refused; 13-kind vocabulary; reader must be compiled for the frame |
 | decode as a view | free decode, cache-warm aggregates | lifetime protocol instead of a copy; producer must wait for the consumer's ack |
 | one language boundary, not three | the per-value Python cost is paid once, on bytes already in hand | the client must be native code; Python-level conveniences cost extra |

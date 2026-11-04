@@ -25,9 +25,8 @@ Every measurement is one player per process, one at a time. Interleaving them
 measures the neighbours' cache footprint (with the Arrow rival present, the
 fast-postgres row read came out ~20% below the same read measured alone), and a
 subprocess - not a forked worker, which exits through os._exit - lets each
-player print its own objpool/read_rows report. A warm read precedes the timed
-reps; past 1M rows a single rep, because the client's 8 GiB object arena cannot
-hold several 10M-row reads in one process.
+player print its own `read_rows` report. A warm read precedes the timed
+reps; past 1M rows a single rep.
 
 Usage: python3 bench/rivals/sqlalchemy_bench.py [nrows ...]
        (default 100000 1000000 10000000)
@@ -283,7 +282,7 @@ def read_one_player(section, key, n, reps):
     """Run one player in a process of its own, one player at a time.
 
     Not a forked worker: those exit through os._exit, and the client prints its
-    objpool/read_rows report from Py_AtExit, which belongs in the log per player.
+    `read_rows` report from Py_AtExit, which belongs in the log per player.
     Returns (key, median ms, rows, fastest ms, slowest ms).
     """
     ms, count, lo, hi = spawn(["--player", section, key, str(n), str(reps)])
@@ -322,8 +321,7 @@ def measure(section, sizes):
 #
 # key, label, opener, reader, closer, rows per read. Each path is measured in a
 # process of its own, like the sections: in one shared process the first path
-# pays the ring bootstrap, the arena's first touch and the segment's page faults
-# for every path after it, and several 10M-row reads exhaust the 8 GiB arena.
+# pays the ring bootstrap and the segment's page faults for every path after it.
 
 
 def fpg_worker(_):

@@ -40,8 +40,7 @@ prints them on every run.
   out ~20% below the same read measured alone (see `sqlalchemy_bench.py`'s
   docstring).
 - **The output is checked** (the same column sum, and the same row count), and
-  past 1M rows a single rep, because the client's object arena cannot hold
-  several 10M-row reads in one process.
+  past 1M rows a single rep.
 
 ## What would flatter the rival
 

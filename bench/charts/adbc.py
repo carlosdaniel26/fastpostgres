@@ -306,39 +306,6 @@ DRIVER_KEYS = [
     ("python", "Python {}"), ("pyarrow", "pyarrow {}"), ("adbc", "ADBC {}"),
 ]
 
-# The client's one object-arena summary line: it is the reason a curve flattens
-# past a few hundred thousand rows, so it belongs next to the numbers.
-_OBJPOOL = re.compile(r"^objpool: (\S+) cap=(\d+) MiB used=(\d+) MiB objects=(\d+) fallbacks=(\d+)")
-
-
-def parse_objpool(text):
-    """The client's arena summary, one line per benchmark process: the largest
-    cap and the largest footprint, and whether any of them ran out."""
-    pools = []
-    for line in text.splitlines():
-        m = _OBJPOOL.match(line)
-        if m:
-            mode, cap, used, objects, fallbacks = m.groups()
-            pools.append({"mode": mode, "cap": int(cap), "used": int(used), "fallbacks": int(fallbacks)})
-    if not pools:
-        return None
-    return {
-        "mode": "exhausted" if any(p["mode"] == "exhausted" for p in pools) else pools[0]["mode"],
-        "cap": max(p["cap"] for p in pools),
-        "used": max(p["used"] for p in pools),
-        "fallbacks": sum(p["fallbacks"] for p in pools),
-    }
-
-
-def pool_note(pool):
-    if not pool:
-        return ""
-    if pool["mode"] == "exhausted":
-        return f"object arena exhausted at {pool['cap']} MiB"
-    if pool["cap"] >= 1024:
-        return f"object arena {pool['used'] / 1024:.1f}/{pool['cap'] / 1024:.0f} GiB"
-    return f"object arena {pool['used']}/{pool['cap']} MiB"
-
 
 def plot_drivers(text, env, scale, note=""):
     data = parse_sections(text, CHART_SECTIONS, DRIVER_ROW)
@@ -378,7 +345,7 @@ def main():
 
     print()
     env = parse_env_text(text)
-    note = pool_note(parse_objpool(text))
+    note = ""
     plot_drivers(text, env, args.scale, note)
     if args.compare:
         compare(Path(args.compare).read_text(), text, env, args.scale, note)

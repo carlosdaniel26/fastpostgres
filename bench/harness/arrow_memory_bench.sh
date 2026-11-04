@@ -76,8 +76,7 @@ if [ "$budget" -gt "$shm_bytes" ]; then
   exit 2
 fi
 
-# These players build no per-row Python objects, so the read benchmark's
-# one-rep-past-1M rule (its object arena) does not apply: three reps throughout.
+# These players build no per-row Python objects: three reps throughout.
 reps_for() {
   if [ "$quick" = 1 ]; then echo 1; else echo 3; fi
 }

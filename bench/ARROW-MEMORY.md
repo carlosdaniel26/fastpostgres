@@ -30,8 +30,7 @@ from the segment the worker itself created (a cell whose segment is not the
 asked-for 512 MiB fails the run as well), and `stream()` has no socket to fall
 back to: a ring cell that ran is a ring cell. One player per process, one at a
 time, 1M / 5M / 10M rows, three reps each — none of these three players builds
-per-row Python objects, so the read benchmark's one-rep-past-1M rule (its object
-arena) does not apply.
+per-row Python objects.
 
 ## The numbers
 

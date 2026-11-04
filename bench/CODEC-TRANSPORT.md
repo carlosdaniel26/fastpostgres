@@ -350,11 +350,7 @@ behaviour, so nothing above changes:
   transport-bound; the number says the option exists if that changes.
 
 The full write-up, with the cache counters behind both, is the cache section of
-[`NOTES.md`](NOTES.md); the before/after charts are
-`assets/improve-cache-fix.png` (the NT change: time, RFO requests, L1 misses),
-`assets/improve-codec.png`, `assets/improve-system.png` and
-`assets/improve-transport.png`, rendered by `just charts ab` from
-`bench/results/ab/improve-*.log`.
+[`NOTES.md`](NOTES.md).
 
 ## Threats to validity
 

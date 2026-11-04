@@ -8,10 +8,10 @@ the benchmark and the record of its threats to validity.
 
 | claim | evidence | command |
 |---|---|---|
-| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (5.0–5.7×) | `just bench` |
-| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.6–3.8×) | `just bench` |
-| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (4.7–6.0× and 4.1–4.3×) | `SHAPE=mixed just bench` |
-| SQLAlchemy's `Row` construction, not the transport, is what makes the object path expensive | PATHS table (−72…83% against the driver read) | `just bench` |
+| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (2.6–3.0×) | `just bench` |
+| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.5–3.6×) | `just bench` |
+| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (2.7–3.4× and 3.5–3.8×) | `SHAPE=mixed just bench` |
+| SQLAlchemy's `Row` construction, not the transport, is what makes the object path expensive | PATHS table (−61…75% against the driver read) | `just bench` |
 | the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
 ## Systems under test
@@ -19,7 +19,7 @@ the benchmark and the record of its threats to validity.
 - **fastpostgres** (this repository): a PostgreSQL 18 extension plus a Python
   client. Row path: the worker publishes the executor's own tuple bytes into
   `/dev/shm` (`FPROWS`), and the client walks them in place, building Python
-  values (typed tuples) with an immortal-object arena for those values.
+  values (typed tuples).
 - **ADBC + pyarrow**: `adbc_driver_postgresql` (Arrow Database Connectivity over
   libpq) with `pyarrow`. Results arrive as Arrow record batches; no Python
   object is built per value.
@@ -62,12 +62,11 @@ no parameters.
 - **Isolation**: one player per process, one player at a time, never side by
   side. Interleaving them measured the neighbours — with the Arrow rival
   present, the fast-postgres row read came out ~20% below the same read
-  measured alone. Each player's own report (`objpool`, `read_rows` cycles/row)
+  measured alone. Each player's own report (`read_rows` cycles/row)
   stays in the log.
 - **Warm read** before the timed ones (connections, rings, Arrow pools, plans);
   it is never timed.
-- **Repetitions**: three, median reported. Above 1M rows, a single rep: the
-  client's 8 GiB object arena cannot hold several 10M-row reads.
+- **Repetitions**: three, median reported. Above 1M rows, a single rep.
 - **Timed region**: the read call itself, including everything the consumer must
   do to hold the result — the DBAPI's `fetchall`, ADBC's `fetch_arrow_table`
   plus the conversion to tuples, `stream()` iteration plus the numpy sum.
@@ -82,9 +81,7 @@ no parameters.
 ## Environment
 
 Measured on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), inside the
-container this repository builds: Debian on `postgres:18`, `/dev/shm` 3 GiB, the
-client's object arena at its default size (half the cgroup limit, capped at
-8 GiB; `FASTPOSTGRES_OBJ_ARENA` overrides).
+container this repository builds: Debian on `postgres:18`, `/dev/shm` 3 GiB.
 
 Observed run-to-run spread on this host across repeated full runs: a few percent
 for the driver-level numbers (fast-postgres's tuples ±2%, ADBC's ±3%) and up to
@@ -98,10 +95,6 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   one container configuration. Clock frequencies drift with thermals; the TSC is
   invariant, so cycle figures are comparable across runs, but throughput is not
   portable.
-- **The arena cap at 10M rows.** The object arena is append-only, so a 10M-row
-  read allocates ~3.9 GiB of cells. One read per process keeps that under the
-  8 GiB cap (the log shows 0 fallbacks); a second read in the same process would
-  fall back to the normal allocators, which is a different path.
 - **ADBC → tuples is a conversion path.** ADBC's design output is Arrow; asking
   it for Python tuples means its Arrow conversion *plus* a column-wise
   `to_pylist`. That is the honest cost of the same output, but not the path ADBC

@@ -7,9 +7,7 @@
 #
 #   benchmarks.sh [nrows ...]    row counts default to the benchmark's own
 #
-# One process per size: the client's object arena is append-only and process-
-# scoped, so a single session that reads several sizes measures how the arena
-# filled, not the driver. A fresh process per size gives each its own.
+# One process per size, so each size is measured from a cold process.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
