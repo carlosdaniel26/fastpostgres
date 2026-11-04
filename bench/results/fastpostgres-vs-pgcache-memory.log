@@ -8,75 +8,75 @@ postgres: 18.6
 python: 3.13.5
 psycopg: 3.2.6
 sqlalchemy: 2.0.40
-fastpostgres image: fastpostgres-dev sha256:66949fd3535a
+fastpostgres image: fastpostgres-dev sha256:56c83e961111
 pgcache image: pgcache/pgcache sha256:4923257467c8
 origin: -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
 shm: 3g
 shape: bench
 rows: 1000000
 budgets: 8 MiB 64 MiB 256 MiB 1.00 GiB
-git: 7c4fc21-dirty
+git: 9281418
 ### END ENV
 
 # budget 8 MiB, segment 4 MiB x2, 1000000 rows, 3 timed rep(s) per player, one process each
 # (the ring is measured with the proxy stopped; /dev/shm is cleared first so the evidence is this budget's)
-read_rows: 802.7 cycles/row over 4000000 rows (decode 800.7, frame+desc+list 2.1)
-read_rows: 106390.5 cycles/row over 4 rows (decode 6574.0, frame+desc+list 99816.5)
-read_rows: 732.1 cycles/row over 4000000 rows (decode 730.5, frame+desc+list 1.6)
-  large    fastpostgres 3.14M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=702267392
-  small    fastpostgres 70.757 ms pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69226496
-  through  fastpostgres 3.51M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=701669376
+read_rows: 697.1 cycles/row over 4000000 rows (decode 696.1, frame+desc+list 1.0)
+read_rows: 60363.0 cycles/row over 4 rows (decode 4180.0, frame+desc+list 56183.0)
+read_rows: 683.9 cycles/row over 4000000 rows (decode 682.9, frame+desc+list 1.0)
+  large    fastpostgres 4.17M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=701997056
+  small    fastpostgres 62.516 ms pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69267456
+  through  fastpostgres 4.25M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=4194304 segments=2 pair_bytes=8388608 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=702787584
   cache    unavailable: the proxy container was OOM-killed at 8 MiB
 
 # budget 64 MiB, segment 32 MiB x2, 1000000 rows, 3 timed rep(s) per player, one process each
 # (the ring is measured with the proxy stopped; /dev/shm is cleared first so the evidence is this budget's)
-read_rows: 948.0 cycles/row over 4000000 rows (decode 945.3, frame+desc+list 2.7)
-read_rows: 105535.5 cycles/row over 4 rows (decode 10545.0, frame+desc+list 94990.5)
-read_rows: 998.9 cycles/row over 4000000 rows (decode 996.0, frame+desc+list 3.0)
-  large    fastpostgres 2.02M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=717574144
-  small    fastpostgres 107.895 ms pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69320704
-  through  fastpostgres 2.15M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
-           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718270464
+read_rows: 687.3 cycles/row over 4000000 rows (decode 686.4, frame+desc+list 0.9)
+read_rows: 66671.0 cycles/row over 4 rows (decode 5690.5, frame+desc+list 60980.5)
+read_rows: 691.5 cycles/row over 4000000 rows (decode 690.4, frame+desc+list 1.0)
+  large    fastpostgres 3.90M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718503936
+  small    fastpostgres 64.378 ms pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69234688
+  through  fastpostgres 3.94M     pgcache -          pgcache/fastpostgres -         the cache does not run at this budget (OOM-killed)
+           ring  seg_bytes=33554432 segments=2 pair_bytes=67108864 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718401536
   cache    unavailable: the proxy container was OOM-killed at 64 MiB
 
 # budget 256 MiB, segment 128 MiB x2, 1000000 rows, 3 timed rep(s) per player, one process each
 # (the ring is measured with the proxy stopped; /dev/shm is cleared first so the evidence is this budget's)
-read_rows: 947.2 cycles/row over 4000000 rows (decode 944.8, frame+desc+list 2.4)
-read_rows: 112185.5 cycles/row over 4 rows (decode 9120.0, frame+desc+list 103065.5)
-read_rows: 798.6 cycles/row over 4000000 rows (decode 796.3, frame+desc+list 2.3)
-  large    fastpostgres 2.43M     pgcache 1.50M      pgcache/fastpostgres +61.7%    warm 90 reads/120726 ms to a stable hit (90 miss), 3 reps (3 miss)
-           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=717578240
-           cache budget_bytes=214748364 used_bytes=241745920 rss_bytes=57552896 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=372803514368
-  small    fastpostgres 104.364 ms pgcache 25.718 ms  pgcache/fastpostgres -75.4%    warm 227 reads/120045 ms to a stable hit (227 miss), 3 reps (3 miss)
-           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69390336
-           cache budget_bytes=214748364 used_bytes=237731840 rss_bytes=53506048 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=372840722432
-  through  fastpostgres 3.06M     pgcache 1.76M      pgcache/fastpostgres +74.3%    forwarded (views are never cached): 1 warm miss, 3 rep miss
-           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718004224
-           cache budget_bytes=214748364 used_bytes=240586752 rss_bytes=56348672 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=372840722432
-  fill-large pgcache 557.702 ms fastpostgres 412.307 ms   (one read, cache reset)
-  fill-small pgcache 26.540 ms  fastpostgres 104.364 ms   (one read, cache reset)
+read_rows: 688.7 cycles/row over 4000000 rows (decode 687.7, frame+desc+list 1.1)
+read_rows: 66709.0 cycles/row over 4 rows (decode 5529.0, frame+desc+list 61180.0)
+read_rows: 693.6 cycles/row over 4000000 rows (decode 692.6, frame+desc+list 1.0)
+  large    fastpostgres 3.86M     pgcache 1.80M      pgcache/fastpostgres +115.0%   warm 108 reads/120032 ms to a stable hit (108 miss), 3 reps (3 miss)
+           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718090240
+           cache budget_bytes=214748364 used_bytes=246648832 rss_bytes=53473280 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=373418196992
+  small    fastpostgres 63.056 ms pgcache 29.030 ms  pgcache/fastpostgres -54.0%    warm 227 reads/120098 ms to a stable hit (227 miss), 3 reps (3 miss)
+           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69255168
+           cache budget_bytes=214748364 used_bytes=237252608 rss_bytes=47325184 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=373418663936
+  through  fastpostgres 3.82M     pgcache 1.79M      pgcache/fastpostgres +114.1%   forwarded (views are never cached): 1 warm miss, 3 rep miss
+           ring  seg_bytes=134217728 segments=2 pair_bytes=268435456 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=716931072
+           cache budget_bytes=214748364 used_bytes=239271936 rss_bytes=48279552 memo_bytes=0 memo_hits=0 registered=0 throttled=1 count_cap=0 marginal_bytes=0 disk_used_bytes=373418663936
+  fill-large pgcache 551.712 ms fastpostgres 258.884 ms   (one read, cache reset)
+  fill-small pgcache 28.101 ms  fastpostgres 63.056 ms   (one read, cache reset)
 
 # budget 1.00 GiB, segment 512 MiB x2, 1000000 rows, 3 timed rep(s) per player, one process each
 # (the ring is measured with the proxy stopped; /dev/shm is cleared first so the evidence is this budget's)
-read_rows: 682.7 cycles/row over 4000000 rows (decode 681.4, frame+desc+list 1.2)
-read_rows: 63973.0 cycles/row over 4 rows (decode 5272.5, frame+desc+list 58700.5)
-read_rows: 669.2 cycles/row over 4000000 rows (decode 668.0, frame+desc+list 1.2)
-  large    fastpostgres 3.60M     pgcache 1.44M      pgcache/fastpostgres +150.1%   warm 14 reads/17859 ms to a stable hit (11 miss), 3 reps (0 miss)
-           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=717623296
-           cache budget_bytes=858993456 used_bytes=563130368 rss_bytes=85393408 memo_bytes=0 memo_hits=0 registered=1 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=372939698176
-  small    fastpostgres 60.624 ms pgcache 1.543 ms   pgcache/fastpostgres -97.5%    warm 5 reads/2085 ms to a stable hit (0 miss), 3 reps (0 miss)
-           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=68902912
-           cache budget_bytes=858993456 used_bytes=572149760 rss_bytes=88346624 memo_bytes=0 memo_hits=0 registered=2 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=372939698176
-  through  fastpostgres 3.81M     pgcache 1.74M      pgcache/fastpostgres +119.1%   forwarded (views are never cached): 1 warm miss, 3 rep miss
-           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=718020608
-           cache budget_bytes=858993456 used_bytes=573960192 rss_bytes=89415680 memo_bytes=0 memo_hits=0 registered=2 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=372939698176
-  fill-large pgcache 784.236 ms fastpostgres 277.720 ms   (one read, cache reset)
-  fill-small pgcache 243.860 ms fastpostgres 60.624 ms   (one read, cache reset)
+read_rows: 686.7 cycles/row over 4000000 rows (decode 685.7, frame+desc+list 1.0)
+read_rows: 57912.0 cycles/row over 4 rows (decode 4303.5, frame+desc+list 53608.5)
+read_rows: 686.2 cycles/row over 4000000 rows (decode 685.2, frame+desc+list 1.0)
+  large    fastpostgres 3.87M     pgcache 1.45M      pgcache/fastpostgres +166.6%   warm 14 reads/17916 ms to a stable hit (11 miss), 3 reps (0 miss)
+           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=716578816
+           cache budget_bytes=858993456 used_bytes=556236800 rss_bytes=79286272 memo_bytes=0 memo_hits=0 registered=1 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=373494874112
+  small    fastpostgres 57.628 ms pgcache 1.229 ms   pgcache/fastpostgres -97.9%    warm 5 reads/2081 ms to a stable hit (0 miss), 3 reps (0 miss)
+           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=69087232
+           cache budget_bytes=858993456 used_bytes=567123968 rss_bytes=83169280 memo_bytes=0 memo_hits=0 registered=2 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=373494874112
+  through  fastpostgres 3.93M     pgcache 1.81M      pgcache/fastpostgres +116.9%   forwarded (views are never cached): 1 warm miss, 3 rep miss
+           ring  seg_bytes=536870912 segments=2 pair_bytes=1073741824 ctrl_bytes=8388608 shm_reads=3/3 rss_bytes=717791232
+           cache budget_bytes=858993456 used_bytes=578191360 rss_bytes=90660864 memo_bytes=0 memo_hits=0 registered=2 throttled=0 count_cap=0 marginal_bytes=0 disk_used_bytes=373514502144
+  fill-large pgcache 765.362 ms fastpostgres 258.692 ms   (one read, cache reset)
+  fill-small pgcache 233.782 ms fastpostgres 57.628 ms   (one read, cache reset)
 
 # the same output across players: ok
 # budgets the cache could not run at: 8 MiB 64 MiB (OOM-killed)

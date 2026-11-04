@@ -9,43 +9,43 @@ python: 3.13.5
 sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
-fastpostgres image: fastpostgres-dev sha256:179874db586c
+fastpostgres image: fastpostgres-dev sha256:56c83e961111
 shm: 3g
 ring budget: 512 MiB (one data segment, stream() pulls from it; +8 MiB control ring)
 shape: bench
 sizes: 1000000 5000000 10000000
 reps: 3
-git: 7c4fc21-dirty
+git: 9281418
 ### END ENV
 
 # 1000000 rows, 3 timed rep(s) per player, one process each
   player          rows/s   vs ring   spread
-  ring             7.39M         -   ±0.3%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=4975010 rss_bytes=145661952
-  arrow-batch      2.36M   +213.4%   ±0.8%
-                arrow-batch batches=4 max_batch_rows=253722 max_batch_bytes=12050789 rss_bytes=168882176
-  arrow-table      2.32M   +218.8%   ±0.7%
-                arrow-table result_bytes=47902794 chunks=4 rss_bytes=192397312
+  ring             9.45M         -   ±2.9%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=4975010 rss_bytes=145219584
+  arrow-batch      2.40M   +294.2%   ±0.1%
+                arrow-batch batches=4 max_batch_rows=253722 max_batch_bytes=12050789 rss_bytes=167858176
+  arrow-table      2.36M   +299.8%   ±0.3%
+                arrow-table result_bytes=47902794 chunks=4 rss_bytes=189083648
   sum           250000250000.000000 (ok)
 
 # 5000000 rows, 3 timed rep(s) per player, one process each
   player          rows/s   vs ring   spread
-  ring             7.99M         -   ±0.8%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175008 rss_bytes=146432000
-  arrow-batch      2.39M   +234.9%   ±0.1%
-                arrow-batch batches=21 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=172707840
-  arrow-table      2.34M   +241.0%   ±1.1%
-                arrow-table result_bytes=248402802 chunks=21 rss_bytes=407928832
+  ring             9.22M         -   ±1.8%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175008 rss_bytes=144486400
+  arrow-batch      2.40M   +283.9%   ±0.6%
+                arrow-batch batches=21 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=170700800
+  arrow-table      2.34M   +293.4%   ±0.7%
+                arrow-table result_bytes=248402802 chunks=21 rss_bytes=401416192
   sum           6250001250000.000000 (ok)
 
 # 10000000 rows, 3 timed rep(s) per player, one process each
   player          rows/s   vs ring   spread
-  ring             7.79M         -   ±1.6%
-                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175010 rss_bytes=143732736
-  arrow-batch      2.39M   +225.1%   ±0.5%
-                arrow-batch batches=41 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=171524096
-  arrow-table      2.33M   +233.8%   ±0.8%
-                arrow-table result_bytes=499027814 chunks=41 rss_bytes=690180096
+  ring            10.10M         -   ±1.2%
+                ring seg_bytes=536870912 segments=1 pair_bytes=536870912 ctrl_bytes=8388608 max_batch_rows=100000 max_batch_bytes=5175010 rss_bytes=144207872
+  arrow-batch      2.43M   +315.6%   ±0.5%
+                arrow-batch batches=41 max_batch_rows=253722 max_batch_bytes=12187794 rss_bytes=169754624
+  arrow-table      2.38M   +324.6%   ±0.9%
+                arrow-table result_bytes=499027814 chunks=41 rss_bytes=679772160
   sum           25000002500000.000000 (ok)
 
 # the same sum across players: ok

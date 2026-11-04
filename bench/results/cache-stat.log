@@ -6,19 +6,19 @@ ghz: 3.8
 l3: 32MiB(1instance)
 rows: 1000000
 reps: 3 (median per counter)
-git: 7c4fc21-dirty
+git: 9281418
 ### END CACHE-STAT
 
 --- decodes, per row (differential, R=400; payload 47.2 MiB at 1M rows) ---
 cell                      cycles/r   IPC  L1miss%   L1lds/r  L1miss/r  L2->L3/r
-fpcolumn (decode+agg)         17.3  1.26    29.00       6.7      1.95      1.23
-fprows (tuple bytes)          91.4  4.18     3.69      99.5      3.67      3.64
+fpcolumn (decode+agg)         16.7  1.31    28.89       6.7      1.95      1.23
+fprows (tuple bytes)          91.4  4.18     3.68      99.5      3.66      3.64
   (page walks are absent by construction: the differential counts repeats, and
    the payload is already faulted in by the first one)
 --- transports, per KiB of payload (same bytes, codec out of the loop) ---
 cell                      cycles/KiB   IPC  L1miss%  L1lds/KiB L1miss/KiB L2->L3/KiB walks/KiB   p50 us
-shared memory                615.4  2.86    13.95     333.4     46.52     29.96      0.68 7.7
-UNIX socket                  416.5  4.47     5.81     276.0     16.02     18.03      0.31 36.7
+shared memory                586.1  2.77    14.46     331.7     47.96     32.62      0.65 7.8
+UNIX socket                  412.4  4.50     6.16     259.6     16.00     15.55      0.30 36.3
   (per KiB, not per row: this experiment moves bytes and never decodes them.
    User-space counters only (the events carry a :u qualifier): the socket's
    kernel copy and the shared segment's page faults are outside them, which is
@@ -27,7 +27,7 @@ UNIX socket                  416.5  4.47     5.81     276.0     16.02     18.03 
 
 --- working-set sweep, fpcolumn (44 KiB / 4.6 MiB / 47 MiB of payload) ---
 rows       payload KiB  cycles/r  L1miss%  L1miss/r  L2->L3/r   reps R
-1000              42.7      10.4    23.40      1.64      1.03     2000
-100000          4641.6      10.4    29.89      1.91      1.17      400
-1000000        48367.2      17.6    28.94      1.95      1.23      400
+1000              42.7      11.6    24.30      1.69      1.07     2000
+100000          4641.6      10.1    28.34      1.88      1.15      400
+1000000        48367.2      16.5    28.98      1.95      1.23      400
   (44 KiB fits L1, 4.6 MiB fits L3, 47 MiB does not: compare L1miss% and L2->L3/r across the three)
