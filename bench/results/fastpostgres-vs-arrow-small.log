@@ -6,7 +6,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=9281418 fastpostgres-dev benchmarks.sh 1000
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=cbad493 fastpostgres-dev benchmarks.sh 1000
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -20,31 +20,29 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: bench
-git: 9281418
+git: cbad493
 shm: 3.0G
 ### END ENV
-read_rows: 470.2 cycles/row over 4000 rows (decode 430.4, frame+desc+list 39.9)
-read_rows: 417.4 cycles/row over 4000 rows (decode 385.1, frame+desc+list 32.4)
-read_rows: 398.7 cycles/row over 4000 rows (decode 362.5, frame+desc+list 36.3)
-read_rows: 364.0 cycles/row over 4001 rows (decode 330.7, frame+desc+list 33.3)
+read_rows: 366.3 cycles/row over 4000 rows (decode 336.9, frame+desc+list 29.3)
+read_rows: 377.9 cycles/row over 4000 rows (decode 343.6, frame+desc+list 34.3)
+read_rows: 398.6 cycles/row over 4000 rows (decode 366.0, frame+desc+list 32.6)
 # shape: bench — short ASCII text, no NULLs
 
 TUPLE READ (rows/s): fastpostgres adbc+tuples  vs arrow    
   (same output: ADBC's Arrow table converted column-wise with to_pylist)
-  1K              4.64M        1.10M   +322.9%  ok
-  spread: fastpostgres ±10.0%  adbc+tuples ±6.4%
+  1K              5.40M        1.22M   +343.6%  ok
+  spread: fastpostgres ±16.0%  adbc+tuples ±6.1%
 
 ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
   (same output: the columnar form each stack lands, one column summed in place)
-  1K              4.74M        1.45M   +226.3%  ok
-  spread: stream()+sum ±14.8%  arrow+sum ±11.1%
+  1K              5.08M        1.58M   +221.1%  ok
+  spread: stream()+sum ±6.5%  arrow+sum ±4.8%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  1K       fastpostgres, DBAPI                 3.41M          
-  1K       fastpostgres, stream()+sum          5.15M      +51%
-  1K       fastpostgres, core interface        1.69M      -50%
-  1K       fastpostgres, SQLAlchemy CORE       1.37M      -60%
-  1K       fastpostgres, 4 processes           1.38M      -59%
-  1K       adbc+arrow, arrow+sum               1.59M      -53%
-  1K       adbc+arrow, fetchall()              0.14M      -96%
-  1K       adbc+arrow, table+to_pylist         1.22M      -64%
+  1K       fastpostgres, DBAPI                 5.22M          
+  1K       fastpostgres, stream()+sum          5.09M       -3%
+  1K       fastpostgres, core interface        3.08M      -41%
+  1K       fastpostgres, 4 processes           1.49M      -71%
+  1K       adbc+arrow, arrow+sum               1.48M      -72%
+  1K       adbc+arrow, fetchall()              0.13M      -98%
+  1K       adbc+arrow, table+to_pylist         1.29M      -75%
