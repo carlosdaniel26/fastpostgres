@@ -3,8 +3,7 @@
 Runs inside the image. `_client.read_rows` is the exact call the SQLAlchemy
 benchmark's shm path makes (dbapi.py:572); this driver makes it directly, with
 no SQLAlchemy in the way, so callgrind's instruction counts and llvm-mca's
-region belong to the decode and not to the ORM. One shape per process: the
-object arena is append-only and process-scoped (bench/rivals/adbc-arrow/benchmarks.sh:9-20).
+region belong to the decode and not to the ORM. One shape per process.
 
   bench   the benchmark's own row shape (id, sku, name, price, stock, active),
           same expressions as its INSERT, so cycles/row and Ir/row are
@@ -12,7 +11,7 @@ object arena is append-only and process-scoped (bench/rivals/adbc-arrow/benchmar
   mixed   the same six columns with NULLs on ~10% of the values and text
           lengths on both sides of the 126-byte varlena header split, plus a
           non-ASCII value every eighth row: the null test, the alignment walk
-          and the fp_birth_text bail-out actually run, and mispredict
+          and the non-ASCII decode actually run, and mispredict
 
 A small warmup batch runs first and is decoded, so the measured batches are
 steady-state (the rdtsc totals are per process and cannot exclude it; at
@@ -23,7 +22,6 @@ Usage: python3 bench/internals/decode_driver.py [--shape bench|mixed] [rows] [ba
 
 The extension's report prints at process exit on stderr:
 
-  objpool: immortal cap=... objects=... fallbacks=...
   read_rows: <cycles/row> over <rows> rows (decode <cycles/row>, frame+desc+list <cycles/row>)
 
 `just decode-cycles` runs this and parses those lines; `just decode-ir` runs it
@@ -107,7 +105,6 @@ def main():
         print("### DECODE")
         print(f"shape: {args.shape}")
         print(f"rows: {args.rows} batches: {args.batches} warmup: {warmup}")
-        print(f"arena: {_client.objpool}")  # off/exhausted/immortal, decided at import
         print(f"fields: {', '.join(res.fields)}")
         print(f"oids: {', '.join(str(t) for t in res.field_types)}")
         print(f"query: {' '.join(query.split())}")

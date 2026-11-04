@@ -25,8 +25,7 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
   exception (it widens to float8), and types whose storage is not the wire bytes
   take the columnar frame instead. None of those shapes is measured here.
 - **Cold page cache, first touch, page faults.** The segment faults once per
-  process and the arena's pages are first-touch. The logs carry the arena state
-  (`objpool:` lines) but the benchmark does not measure fault counts.
+  process. The benchmark does not measure fault counts.
 - **Concurrency.** One stream at a time per ring; several processes are shown as
   one aggregate row, not as a latency distribution. No mixed read/write workload
   is measured.
@@ -70,8 +69,8 @@ the digits.)
 | what crosses the wire | nothing: the executor's tuple bytes are written into the reader's address space | libpq binary/text, then converted into Arrow buffers |
 | ecosystem | custom columnar frame; numpy/pandas adapters | Arrow, parquet, pandas, polars, duckdb |
 | portability | Linux, same host, server extension | any OS, any network, many databases |
-| operations | one background worker per ring, 0600 shm, arena never returned | ordinary connections |
-| failure modes | worker death loses the batch; views alias the segment (invalid after the next pull); arena exhaustion silently falls back | ordinary PostgreSQL errors |
+| operations | one background worker per ring, 0600 shm | ordinary connections |
+| failure modes | worker death loses the batch; views alias the segment (invalid after the next pull) | ordinary PostgreSQL errors |
 | maturity | research prototype, not for production | production drivers |
 
 ### The paths inside fastpostgres (1M, bench shape)

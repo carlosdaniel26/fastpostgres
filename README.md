@@ -210,7 +210,6 @@ Read-only `SELECT`s take the ring; everything else goes over libpq. The `example
 |---|---|---|
 | `FASTPOSTGRES_SHM_POOL` | sized from the machine and the server, at most 8 | how many rings (each one background worker) a process may create. `0` turns the shared-memory path off and every read stays on libpq |
 | `FASTPOSTGRES_SEGMENT_BYTES` | 1 GiB | capacity of each data segment, in bytes; clamped to 64 KiB - 1 GiB. A stream alternates two of them |
-| `FASTPOSTGRES_OBJ_ARENA` | half the cgroup limit, at most 8 GiB | arena for the Python objects a tuple read builds; `0` uses the normal constructors |
 
 On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once.
 

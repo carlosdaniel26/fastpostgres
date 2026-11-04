@@ -5,7 +5,6 @@
 # The row decode alone, on a fixed shape, in one process: the extension's own
 # rdtsc report, printed at exit on stderr -
 #
-#   objpool: immortal cap=8192 MiB used=... objects=... fallbacks=0
 #   read_rows: 159.7 cycles/row over 300000 rows (decode 79.3, frame+desc+list 80.4)
 #
 # That is the ten-minute price of a change: run it, change the decode, run it.

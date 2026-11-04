@@ -58,13 +58,13 @@ _image_profile:
 [private]
 _run *args:
     just _image
-    docker run --rm --shm-size={{shm}} -e FASTPOSTGRES_OBJ_ARENA={{env("OBJ_ARENA", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}} {{args}}
+    docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}} {{args}}
 
 # the same, in the profile image (callgrind and llvm-mca live there)
 [private]
 _run_profile *args:
     just _image_profile
-    docker run --rm --shm-size={{shm}} -e FASTPOSTGRES_OBJ_ARENA={{env("OBJ_ARENA", "")}} -e MCA_CPU={{env("MCA_CPU", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-profile {{args}}
+    docker run --rm --shm-size={{shm}} -e MCA_CPU={{env("MCA_CPU", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-profile {{args}}
 
 # both test suites: the extension's SQL surface (pg_regress) and the client's
 test:

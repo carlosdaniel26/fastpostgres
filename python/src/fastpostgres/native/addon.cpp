@@ -67,19 +67,13 @@ PyInit__client(void)
 {
     if (!fp_codec_init()) return nullptr;
     if (!fp_types_init()) return nullptr;
-    fp_objpool_init();            /* off unless the layouts verify (FASTPOSTGRES_OBJ_ARENA) */
-    Py_AtExit(fp_objpool_report); /* one line per process: how values were read */
+    Py_AtExit(fp_stats_report); /* one line per process: how the row decode cost */
 
     PyObject *m = PyModule_Create(&moduledef);
     if (!m) return nullptr;
 
     if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
         !fp_register_segment(m) || !add_kind_constants(m))
-    {
-        Py_DECREF(m);
-        return nullptr;
-    }
-    if (PyModule_AddStringConstant(m, "objpool", fp_objpool_mode()) != 0)
     {
         Py_DECREF(m);
         return nullptr;

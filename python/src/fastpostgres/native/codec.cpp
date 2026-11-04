@@ -11,8 +11,6 @@
 #include <cstring>
 #include <vector>
 
-#include <sys/mman.h>
-#include <unistd.h>
 #include <x86intrin.h>
 
 #include <datetime.h>
@@ -311,38 +309,6 @@ fp_decode_value(PGresult *res, int row, int col)
     }
 }
 
-/* ---- the immortal object pool (H11) ---------------------------------------
- *
- * Values born *in place*: instead of allocate + init + copy, a cell is carved
- * out of one arena, the CPython header is written around a value written on the
- * spot, and the object is handed out. It is measured at 89.9 ns/row -> 20.5
- * ns/row on the benchmark's row shape (the rest of the work is unchanged).
- *
- * An object built this way must never be freed, because its storage belongs to
- * the arena: the refcount is set to this build's immortal sentinel, the same
- * one the interpreter uses for None and the small ints, so Py_INCREF and
- * Py_DECREF return early and the deallocator is unreachable. For the same
- * reason the arena is append-only — a cell can never be recycled under a live
- * reference, so the memory is never returned. That is the whole price, and it
- * is a policy: FASTPOSTGRES_OBJ_ARENA=<bytes> sizes it, 0 turns it off, and
- * unset takes half of the cgroup limit (8 GiB at most).
- *
- * Every layout fact here can rot with a CPython release, so none of it is
- * assumed: the string header is *copied* from a compact-ASCII string the
- * interpreter built, the int tags are copied from longs the interpreter built,
- * and fp_objpool_init() proves the born objects behave (repr, hash, compare,
- * round-trip) and that decrefs do not move the refcount. Anything unexpected
- * leaves the pool off and every value falls back to its normal constructor.
- */
-#define FP_OBJPOOL_DEFAULT_BYTES ((size_t)512 * 1024 * 1024)
-
-static char      *g_pool_base;
-static size_t     g_pool_cap;
-static size_t     g_pool_used;
-static bool       g_pool_on;
-static bool       g_pool_exhausted;
-static Py_ssize_t g_pool_immortal;
-
 /* The row decode's cost in TSC cycles: two rdtsc per batch, free at this scale,
  * and the one number that says whether the loop is worth hand-writing (perf
  * cannot run in the container, so this stands in for it). */
@@ -350,360 +316,11 @@ static unsigned long long g_dec_cycles;
 static unsigned long long g_dec_rows;
 static unsigned long long g_read_cycles;
 static unsigned long long g_read_rows;
-static size_t             g_pool_births;
-static size_t             g_pool_fallbacks;
-static uintptr_t          g_pool_long_tag[4][2]; /* [ndigits][negative] */
-static char               g_pool_str_hdr[sizeof(PyASCIIObject)];
-static Py_ssize_t         g_pool_str_data = (Py_ssize_t)sizeof(PyASCIIObject);
 
-static inline void *
-pool_take(size_t n)
-{
-    char *p;
-
-    n = (n + 15) & ~(size_t)15;
-    if (!g_pool_on) return nullptr;
-    if (g_pool_used + n > g_pool_cap)
-    {
-        g_pool_exhausted = true; /* once full, everything falls back for good */
-        g_pool_on        = false;
-        return nullptr;
-    }
-    p = g_pool_base + g_pool_used;
-    g_pool_used += n;
-    return p;
-}
-
-static inline PyObject *
-cell_new(size_t size, PyTypeObject *tp)
-{
-    char     *cell = (char *)pool_take(size);
-    PyObject *o;
-
-    if (cell == nullptr) return nullptr;
-    o = (PyObject *)cell;
-    /* written directly: Py_SET_TYPE/Py_SET_REFCNT skip an object that already
-     * looks immortal, and a zeroed cell does not — but the header of a cell is
-     * not something to leave to what the allocator happened to hand back */
-    o->ob_type   = tp;
-    o->ob_refcnt = g_pool_immortal;
-    g_pool_births++;
-    return o;
-}
-
-static bool pool_verify(void);
-
-/* This build's immortal marker, and the proof that it works: only a value the
- * interpreter recognizes as immortal keeps the refcount still, and that is the
- * whole safety argument for handing out arena memory as an object.
- *
- * The header's own constant is tried first, but it is not enough on every
- * version: 3.13 decides immortality in Py_INCREF with a threshold stricter than
- * Py_DECREF's sign test, so a value the header calls the sentinel can still be
- * incremented (measured: 0xC0000000 becomes 0xC0000001 on 3.13.5, and the pool
- * disabled itself). The interpreter's own immortal objects carry the encoding
- * it actually recognizes, so None is the fallback — and the loser of the two is
- * caught by the decref proof rather than by a version table. */
-static bool
-pool_sentinel(void)
-{
-    Py_ssize_t candidates[2];
-    int        i;
-
-#ifdef _Py_IMMORTAL_INITIAL_REFCNT
-    candidates[0] = (Py_ssize_t)_Py_IMMORTAL_INITIAL_REFCNT;
-#else
-    candidates[0] = (Py_ssize_t)(3ULL << 30);
-#endif
-    candidates[1] = Py_REFCNT(Py_None);
-
-    for (i = 0; i < 2; i++)
-    {
-        Py_ssize_t s = candidates[i];
-
-        if (i == 1 && s == candidates[0]) break; /* the same value twice: done */
-        /* even if the build does not call it immortal, it has to be far out of
-         * decref range or the object would eventually be freed */
-        if (s == 0 || s == 1) continue;
-        if (!(s < 0 || (uint64_t)s >= (1ULL << 31))) continue;
-        g_pool_immortal = s;
-        if (pool_verify()) return true;
-    }
-    return false;
-}
-
-static bool
-pool_templates(void)
-{
-    static const long long probe[4] = {0, 12345, ((long long)1 << 30) + 7, ((long long)1 << 60) + 7};
-    PyObject              *ref;
-    const char            *ascii = "abc";
-    int                    nd, neg;
-
-    ref = PyUnicode_FromStringAndSize(ascii, 3);
-    if (ref == nullptr) return false;
-    /* the compact-ASCII form is the only one we write by hand; a non-compact
-     * build (or a different data offset) means the shortcut is not available */
-    if (!PyUnicode_IS_COMPACT_ASCII(ref) ||
-        (char *)PyUnicode_DATA(ref) - (char *)ref != (Py_ssize_t)sizeof(PyASCIIObject))
-    {
-        Py_DECREF(ref);
-        return false;
-    }
-    g_pool_str_data = (char *)PyUnicode_DATA(ref) - (char *)ref;
-    memcpy(g_pool_str_hdr, ref, sizeof(PyASCIIObject)); /* the state word comes from the interpreter */
-    Py_DECREF(ref);
-
-    for (nd = 1; nd <= 3; nd++)
-    {
-        for (neg = 0; neg <= 1; neg++)
-        {
-            long long v = neg ? -probe[nd] : probe[nd];
-            uintptr_t tag;
-
-            ref = PyLong_FromLongLong(v);
-            if (ref == nullptr) return false;
-            memcpy(&tag, (const char *)ref + offsetof(PyLongObject, long_value.lv_tag), sizeof(tag));
-            /* the digit count lives in the top bits of the tag; if that is not
-             * this build's encoding, the template is not ours to write */
-            if ((tag >> 3) != (uintptr_t)nd)
-            {
-                Py_DECREF(ref);
-                return false;
-            }
-            g_pool_long_tag[nd][neg] = tag;
-            Py_DECREF(ref);
-        }
-    }
-    return true;
-}
-
-/* Break one of each kind and check it behaves, then break the refcount rule:
- * decrefs must not move the count, or the object is one stray reference away
- * from being handed to the allocator it did not come from. */
-static bool
-pool_verify(void)
-{
-    static const long long longs[] = {
-        12345,    -12345, ((long long)1 << 30) + 7, -(((long long)1 << 30) + 7), ((long long)1 << 60) + 7,
-        1LL << 62};
-    PyObject *o;
-    size_t    i;
-
-    o = fp_birth_float(1.2345);
-    if (o == nullptr || !PyFloat_CheckExact(o)) return false;
-    if (PyFloat_AsDouble(o) != 1.2345) return false;
-    if (Py_REFCNT(o) != g_pool_immortal) return false;
-    Py_INCREF(o);
-    Py_DECREF(o);
-    Py_DECREF(o);
-    if (Py_REFCNT(o) != g_pool_immortal || PyFloat_AsDouble(o) != 1.2345) return false;
-
-    for (i = 0; i < sizeof(longs) / sizeof(longs[0]); i++)
-    {
-        PyObject *ref = PyLong_FromLongLong(longs[i]);
-        PyObject *cmp;
-
-        o = fp_birth_long(longs[i]);
-        if (o == nullptr || ref == nullptr || !PyLong_CheckExact(o)) return false;
-        if (PyLong_AsLongLong(o) != longs[i]) return false;
-        if (PyObject_RichCompareBool(o, ref, Py_EQ) != 1) return false;
-        if (PyObject_Hash(o) != PyObject_Hash(ref)) return false; /* exercises the digits */
-        cmp = PyObject_Repr(o);                                   /* the decimal conversion reads them too */
-        if (cmp == nullptr) return false;
-        Py_DECREF(cmp);
-        Py_DECREF(ref);
-        Py_INCREF(o);
-        Py_DECREF(o);
-        Py_DECREF(o);
-        if (Py_REFCNT(o) != g_pool_immortal) return false;
-    }
-
-    o = fp_birth_text("hello world", 11);
-    if (o == nullptr || !PyUnicode_CheckExact(o)) return false;
-    if (PyUnicode_GET_LENGTH(o) != 11) return false;
-    if (PyUnicode_CompareWithASCIIString(o, "hello world") != 0) return false;
-    if (PyUnicode_AsUTF8AndSize(o, nullptr) == nullptr) return false;
-    {
-        PyObject *ref  = PyUnicode_FromString("hello world");
-        int       same = ref != nullptr && PyObject_Hash(o) == PyObject_Hash(ref);
-        Py_XDECREF(ref);
-        if (!same) return false;
-    }
-    Py_INCREF(o);
-    Py_DECREF(o);
-    Py_DECREF(o);
-    if (Py_REFCNT(o) != g_pool_immortal) return false;
-    if (PyUnicode_CompareWithASCIIString(o, "hello world") != 0) return false;
-    return true;
-}
-
-/* The pool's pages are never returned — an immortal object cannot be recycled —
- * so its cap has to be a fraction of what the process may actually use: the
- * cgroup limit when there is one, physical memory otherwise. Half of it, and no
- * more than 8 GiB, so a big host does not turn one read into a memory test. */
-static size_t
-pool_default_bytes(void)
-{
-    unsigned long long limit = 0;
-    char               buf[64];
-    FILE              *f;
-
-    if ((f = fopen("/sys/fs/cgroup/memory.max", "r")) != nullptr) /* cgroup v2 */
-    {
-        if (fgets(buf, sizeof(buf), f) != nullptr && buf[0] != 'm') limit = strtoull(buf, nullptr, 10);
-        fclose(f);
-    }
-    if (limit == 0 && (f = fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r")) != nullptr) /* v1 */
-    {
-        if (fgets(buf, sizeof(buf), f) != nullptr) limit = strtoull(buf, nullptr, 10);
-        fclose(f);
-    }
-    if (limit == 0 || limit > (1ULL << 60)) /* "max", or the v1 "no limit" sentinel */
-    {
-        long pages = sysconf(_SC_PHYS_PAGES);
-        long page  = sysconf(_SC_PAGESIZE);
-
-        if (pages > 0 && page > 0) limit = (unsigned long long)pages * (unsigned long long)page;
-    }
-    if (limit == 0) return FP_OBJPOOL_DEFAULT_BYTES;
-
-    limit /= 2;
-    if (limit > (8ULL << 30)) limit = 8ULL << 30;
-    if (limit < (16ULL << 20)) limit = 16ULL << 20;
-    return (size_t)limit;
-}
-
+/* One line per process, so a benchmark log says how the decode cost broke down. */
 void
-fp_objpool_init(void)
+fp_stats_report(void)
 {
-    const char *env = getenv("FASTPOSTGRES_OBJ_ARENA");
-    size_t      cap = pool_default_bytes();
-    void       *base;
-
-    if (env != nullptr && env[0] != 0)
-    {
-        unsigned long long want = strtoull(env, nullptr, 10);
-        if (want == 0) return; /* off by request */
-        cap = (size_t)want;
-    }
-    cap &= ~(size_t)4095;
-    if (cap == 0) return;
-
-    base = mmap(nullptr, cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (base == MAP_FAILED) return;
-#ifdef MADV_HUGEPAGE
-    (void)madvise(base, cap, MADV_HUGEPAGE); /* one fault per 2 MiB, not per 4 KiB */
-#endif
-    g_pool_base = (char *)base;
-    g_pool_cap  = cap;
-    g_pool_used = 0;
-    g_pool_on   = true;
-
-    if (!pool_templates() || !pool_sentinel())
-    {
-        g_pool_on        = false;
-        g_pool_exhausted = false;
-        return;               /* the mapped arena is left alone: nothing was handed out */
-    }
-    g_pool_exhausted = false; /* the verification secs are not a real exhaustion */
-}
-
-PyObject *
-fp_birth_float(double v)
-{
-    PyObject *o = cell_new(sizeof(PyFloatObject), &PyFloat_Type);
-
-    if (o != nullptr)
-    {
-        *(double *)((char *)o + offsetof(PyFloatObject, ob_fval)) = v;
-        return o;
-    }
-    g_pool_fallbacks++;
-    return PyFloat_FromDouble(v);
-}
-
-PyObject *
-fp_birth_long(long long v)
-{
-    uint64_t  mag;
-    int       nd = 1, neg;
-    PyObject *o;
-    digit    *d;
-
-    if (v >= -5 && v <= 256) return PyLong_FromLong((long)v); /* the cache; immortal already */
-    neg = v < 0;
-    mag = neg ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v;
-    if (mag >> 30) nd = 2;
-    if (mag >> 60) nd = 3;
-
-    o = cell_new(offsetof(PyLongObject, long_value.ob_digit) + (size_t)nd * sizeof(digit), &PyLong_Type);
-    if (o == nullptr)
-    {
-        g_pool_fallbacks++;
-        return PyLong_FromLongLong(v);
-    }
-    memcpy((char *)o + offsetof(PyLongObject, long_value.lv_tag), &g_pool_long_tag[nd][neg],
-           sizeof(uintptr_t));
-    d = (digit *)((char *)o + offsetof(PyLongObject, long_value.ob_digit));
-    for (int i = 0; i < nd; i++)
-        d[i] = (digit)((mag >> (PyLong_SHIFT * i)) & (uint64_t)PyLong_MASK);
-    return o;
-}
-
-PyObject *
-fp_birth_text(const char *p, Py_ssize_t n)
-{
-    Py_ssize_t i = 0;
-    char      *cell;
-    PyObject  *o;
-
-    if (n <= 0) goto fallback; /* the empty string is the interpreter's singleton */
-    for (; i + 8 <= n; i += 8)
-    {
-        uint64_t w;
-        memcpy(&w, p + i, 8);
-        if (w & 0x8080808080808080ULL) goto fallback; /* not ASCII: the decode is the normal path's job */
-    }
-    for (; i < n; i++)
-        if (((unsigned char)p[i] & 0x80) != 0) goto fallback;
-
-    cell = (char *)pool_take((size_t)n + (size_t)g_pool_str_data + 1);
-    if (cell == nullptr) goto fallback;
-    memcpy(cell, g_pool_str_hdr, sizeof(PyASCIIObject));
-    o                                                       = (PyObject *)cell;
-    o->ob_type                                              = &PyUnicode_Type;
-    o->ob_refcnt                                            = g_pool_immortal;
-    *(Py_ssize_t *)(cell + offsetof(PyASCIIObject, length)) = n;
-    *(Py_hash_t *)(cell + offsetof(PyASCIIObject, hash))    = -1; /* computed on demand, as usual */
-    memcpy(cell + g_pool_str_data, p, (size_t)n);
-    cell[g_pool_str_data + n] = 0;
-    g_pool_births++;
-    return o;
-
-fallback:
-    g_pool_fallbacks++;
-    return nullptr;
-}
-
-/* One line per process, so a benchmark log says how it was read. */
-const char *
-fp_objpool_mode(void)
-{
-    if (g_pool_base == nullptr) return "off";
-    return g_pool_on ? "immortal" : (g_pool_exhausted ? "exhausted" : "off");
-}
-
-void
-fp_objpool_report(void)
-{
-    /* The pool line reports the pool; the cycle line reports the decode, which
-     * runs with the arena off too - that A/B is the one that prices the arena,
-     * so it must not disappear with the pool. */
-    if (g_pool_base != nullptr)
-        fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu MiB objects=%zu fallbacks=%zu%s\n",
-                fp_objpool_mode(), g_pool_cap >> 20, g_pool_used >> 20, g_pool_births, g_pool_fallbacks,
-                g_pool_on ? "" : " (values use the normal constructors)");
     if (g_read_rows != 0)
         fprintf(stderr, "read_rows: %.1f cycles/row over %llu rows (decode %.1f, frame+desc+list %.1f)\n",
                 (double)g_read_cycles / (double)g_read_rows, g_read_rows,
@@ -713,12 +330,10 @@ fp_objpool_report(void)
 
 /* ---- decoding a whole batch ----------------------------------------------
  *
- * A column's values share one kind, so the kind switch belongs outside the row
- * loop, and the births have to be visible here for the compiler to inline them
- * into the loop body. The per-value call into one generic decode(kind, row)
- * cost more than the births themselves on the benchmark's row shape (~175 of
- * 183 ns/row), which is why these loops live next to the pool rather than in
- * segment.cpp. `row_column<K>` instantiates once per wire kind.
+ * A column's values share one kind, so the kind switch sits outside the row
+ * loop: `row_column<K>` instantiates once per wire kind and the per-value
+ * constructors inline into the loop body. These loops live here rather than in
+ * segment.cpp so the compiler sees them whole.
  */
 
 /* One value, no null test: the single-value path behind Column.value_at(). */
@@ -732,27 +347,27 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
         case FASTPOSTGRES_KIND_INT16: {
             int16_t v;
             memcpy(&v, c->data + row * 2, 2);
-            return fp_birth_long(v);
+            return PyLong_FromLongLong(v);
         }
         case FASTPOSTGRES_KIND_INT32: {
             int32_t v;
             memcpy(&v, c->data + row * 4, 4);
-            return fp_birth_long(v);
+            return PyLong_FromLongLong(v);
         }
         case FASTPOSTGRES_KIND_INT64: {
             int64_t v;
             memcpy(&v, c->data + row * 8, 8);
-            return fp_birth_long(v);
+            return PyLong_FromLongLong(v);
         }
         case FASTPOSTGRES_KIND_FLOAT4: {
             float v;
             memcpy(&v, c->data + row * 4, 4);
-            return fp_birth_float((double)v);
+            return PyFloat_FromDouble((double)v);
         }
         case FASTPOSTGRES_KIND_FLOAT8: {
             double v;
             memcpy(&v, c->data + row * 8, 8);
-            return fp_birth_float(v);
+            return PyFloat_FromDouble(v);
         }
         case FASTPOSTGRES_KIND_DATE:
             return date_from_days(load_le32(c->data + row * 4));
@@ -777,9 +392,7 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
             const char    *base = (const char *)c->bytes;
             int32_t        s0   = off[row];
             int32_t        s1   = off[row + 1];
-            PyObject      *born = fp_birth_text(base + s0, (Py_ssize_t)(s1 - s0));
 
-            if (born != nullptr) return born;
             return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         }
     }
@@ -814,31 +427,31 @@ row_value(const FastpostgresColumn *c, uint64_t r)
     {
         int16_t v;
         memcpy(&v, data + r * 2, 2);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT32)
     {
         int32_t v;
         memcpy(&v, data + r * 4, 4);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT64)
     {
         int64_t v;
         memcpy(&v, data + r * 8, 8);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
     {
         float v;
         memcpy(&v, data + r * 4, 4);
-        return fp_birth_float((double)v);
+        return PyFloat_FromDouble((double)v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
     {
         double v;
         memcpy(&v, data + r * 8, 8);
-        return fp_birth_float(v);
+        return PyFloat_FromDouble(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_DATE)
         return date_from_days(load_le32(data + r * 4));
@@ -860,12 +473,7 @@ row_value(const FastpostgresColumn *c, uint64_t r)
         if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
             return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         else
-        {
-            PyObject *born = fp_birth_text(base + s0, (Py_ssize_t)(s1 - s0));
-
-            if (born != nullptr) return born;
             return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
-        }
     }
 }
 
@@ -1001,31 +609,31 @@ tuple_value(const uint8_t *p)
     {
         int16_t v;
         memcpy(&v, p, 2);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT32)
     {
         int32_t v;
         memcpy(&v, p, 4);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT64)
     {
         int64_t v;
         memcpy(&v, p, 8);
-        return fp_birth_long(v);
+        return PyLong_FromLongLong(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
     {
         float v;
         memcpy(&v, p, 4);
-        return fp_birth_float((double)v);
+        return PyFloat_FromDouble((double)v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
     {
         double v;
         memcpy(&v, p, 8);
-        return fp_birth_float(v);
+        return PyFloat_FromDouble(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_DATE)
         return date_from_days(load_le32(p));
@@ -1042,12 +650,9 @@ tuple_value(const uint8_t *p)
                                          (Py_ssize_t)fastpostgres_vardata_len(p));
     else
     {
-        const char *d    = (const char *)fastpostgres_vardata_any(p);
-        Py_ssize_t  n    = (Py_ssize_t)fastpostgres_vardata_len(p);
-        PyObject   *born = fp_birth_text(d, n);
+        const char *d = (const char *)fastpostgres_vardata_any(p);
 
-        if (born != nullptr) return born;
-        return PyUnicode_FromStringAndSize(d, n);
+        return PyUnicode_FromStringAndSize(d, (Py_ssize_t)fastpostgres_vardata_len(p));
     }
 }
 

@@ -45,7 +45,6 @@ how this can be used:
 - **Ring reads run in the worker's session.** They miss the calling connection's uncommitted writes; the driver is autocommit.
 - **`numeric` widens to `float8` on the wire.** Types whose storage is not the wire bytes (numeric, jsonb, arrays, enums) take the columnar frame, which is correct but not the zero-copy row path.
 - **One stream per ring.** The pool is sized on first use - one stream per ~1.2 hardware threads, divided by the SMT width (6 on this machine), clamped by the server's free `max_worker_processes` - and when it is exhausted the read falls back to libpq.
-- **The object arena is never returned to the OS.** A tuple read builds Python objects into it; a 10M-row read is what the benchmark's one-rep rule is about.
 
 ## Contributing
 
