@@ -36,11 +36,11 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 ## Why FastPostgres
 
-- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks are asked for the same Python tuples, that is 5.0-5.7x ADBC + Arrow, at 100K, 1M and 10M rows.
+- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks are asked for the same Python tuples, that is 2.6-3.0x ADBC + Arrow, at 100K, 1M and 10M rows.
 - **The executor's own tuples.** The row frame carries PostgreSQL's tuples as they lie, one `memcpy` per row, so every type the server can store can be sent; types whose storage is not the wire bytes take the columnar frame instead.
-- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 3.6-3.8x Arrow's `pyarrow.compute` over its own table, on the same column.
+- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 3.5-3.6x Arrow's `pyarrow.compute` over its own table, on the same column.
 - **One wire format, defined once.** Reader and writer share the same header, and the benchmark generator includes it too, so the format cannot drift between them.
-- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 51x, and the ring beats a cached large result 4.3x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
+- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 28x, and the ring beats a cached large result 4.5x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
 - **One URL.** No new query language, no annotation, no client rewrite: the same SQLAlchemy application, on a driver whose reads take a different road.
 
 ## How it works
@@ -65,9 +65,9 @@ they are what decides whether this belongs in an application.
 | where | the number | why |
 |---|---|---|
 | 1K rows, the columnar path | the plain driver read wins | the columnar path's fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
-| through SQLAlchemy CORE | -72-83% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
-| `SELECT 1+1`, 10 connections, a published suite | 42.7K queries/s against asyncpg's 82.4K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
-| a 1000-row batched `INSERT` | 5.4/s against asyncpg's 895 | the client's libpq DML path, one row at a time; the ring is not involved |
+| through SQLAlchemy CORE | -61-75% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
+| `SELECT 1+1`, 10 connections, a published suite | 41.0K queries/s against asyncpg's 85.1K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
+| a 1000-row batched `INSERT` | 5.4/s against asyncpg's 885 | the client's libpq DML path, one row at a time; the ring is not involved |
 | `COPY` | not supported | writes are libpq, and the client has no COPY call there |
 
 ### Read path: FastPostgres against ADBC + Arrow
@@ -78,29 +78,29 @@ The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreS
 
 | same output: Python tuples | 100K | 1M | 10M |
 |---|---|---|---|
-| FastPostgres (its DBAPI) | 6.42M | 7.19M | 7.25M |
-| ADBC + Arrow, `to_pylist` | 1.28M | 1.27M | 1.27M |
+| FastPostgres (its DBAPI) | 3.50M | 3.67M | 4.00M |
+| ADBC + Arrow, `to_pylist` | 1.34M | 1.32M | 1.33M |
 
 ![FastPostgres vs ADBC + Arrow: the same output, columnar, one column summed](docs/assets/zerocopy-read.png)
 
 | same output: the columnar form, one column summed in place | 100K | 1M | 10M |
 |---|---|---|---|
-| FastPostgres `stream()` + numpy | 8.20M | 8.25M | 8.32M |
-| ADBC Arrow + `pyarrow.compute` | 2.23M | 2.28M | 2.18M |
+| FastPostgres `stream()` + numpy | 8.09M | 8.25M | 8.55M |
+| ADBC Arrow + `pyarrow.compute` | 2.25M | 2.34M | 2.35M |
 
-That is **5.0-5.7x faster when both build Python tuples** and **3.6-3.8x faster when both consume columnar**. The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first - and, for tuples, converts a second time into Python objects. Comparing FastPostgres's tuples against ADBC's Arrow table would price those two different outputs, not the two transports, which is why neither table above does it.
+That is **2.6-3.0x faster when both build Python tuples** and **3.5-3.6x faster when both consume columnar**. The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first - and, for tuples, converts a second time into Python objects. Comparing FastPostgres's tuples against ADBC's Arrow table would price those two different outputs, not the two transports, which is why neither table above does it.
 
-The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the same two comparisons read **4.7-6.0x** and **4.1-4.3x**: the data slows FastPostgres ~13% and ADBC ~18%, so the ratio holds.
+The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the same two comparisons read **2.7-3.4x** and **3.5-3.8x**: the data slows FastPostgres ~13% and ADBC ~18%, so the ratio holds.
 
 The same read also reports the rest of what FastPostgres does with its rows, against its own driver read:
 
 | path (1M rows, `bench` shape) | vs the plain driver read |
 |---|---|
-| `stream()` + numpy sum | +13-21% |
+| `stream()` + numpy sum | +99-120% |
 | `fastpostgres.core` (the lean interface) | level with the DBAPI |
-| four processes, DBAPI | +84-94% aggregate at 100K/1M, +21% at 10M (the ring pool and memory bandwidth saturate) |
-| the same read through SQLAlchemy CORE | -72-83% (SQLAlchemy's `Row` construction, ~570 ns/row, not the transport) |
-| ADBC Arrow + sum, for reference | -65-69% |
+| four processes, DBAPI | +133-153% aggregate (the ring pool and memory bandwidth saturate) |
+| the same read through SQLAlchemy CORE | -61-75% (SQLAlchemy's `Row` construction, ~570 ns/row, not the transport) |
+| ADBC Arrow + sum, for reference | -36-41% |
 
 ### What each side holds: against Arrow under a fixed buffer
 
@@ -108,9 +108,9 @@ Speed is half of the comparison; memory is the other half. With the ring's trans
 
 | 1M / 5M / 10M rows | rows/s | held while it delivers |
 |---|---|---|
-| FastPostgres `stream()`, one 512 MiB segment | **9.54M / 8.90M / 8.82M** | 512 MiB reserved, ~4.9 MiB in flight per 100k-row batch, flat ~143 MiB RSS |
-| ADBC record-batch reader | 2.38M / 2.38M / 2.38M | one 11.6 MiB Arrow batch, 168-172 MiB RSS |
-| ADBC Arrow table | 2.32M / 2.32M / 2.32M | the whole result: 45.7 / 236.9 / **475.9 MiB**, 192-640 MiB RSS |
+| FastPostgres `stream()`, one 512 MiB segment | **7.39M / 7.99M / 7.79M** | 512 MiB reserved, ~4.9 MiB in flight per 100k-row batch, flat ~145 MiB RSS |
+| ADBC record-batch reader | 2.36M / 2.39M / 2.39M | one 11.6 MiB Arrow batch, 161-165 MiB RSS |
+| ADBC Arrow table | 2.32M / 2.34M / 2.33M | the whole result: 45.7 / 236.9 / **475.9 MiB**, 183-658 MiB RSS |
 
 A transfer buffer is a window: the ring's is the same 512 MiB whatever the result's size. A table is a working set: at 10M rows ADBC's holds ~476 MiB at once, one size up from the buffer the ring ever spends.
 
@@ -124,12 +124,12 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 
 | 1M rows, the same rows out | FastPostgres | PgCache (hit) |
 |---|---|---|
-| the full scan, rows/s | **6.35M** | 1.47M |
-| count/sums, ms/read | 62.533 | **1.228** |
+| the full scan, rows/s | **3.54M** | 0.79M |
+| count/sums, ms/read | 61.856 | **2.179** |
 
-A cached aggregate is 51x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 4.3x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
+A cached aggregate is 28x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 4.5x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
-Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 6.53M rows/s against the cache's 1.47M, and the aggregate 1.117 ms against 55.776 ms. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed below ~256 MiB and its registration is throttled to nothing at 256 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
+Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 3.60M rows/s against the cache's 1.44M, and the aggregate 1.543 ms cached against 60.624 ms read. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed at 8 MiB and 64 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
 
 ![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 
@@ -139,8 +139,8 @@ The fourth class runs somebody else's benchmark, on its own protocol, with
 FastPostgres added to its roster as one more cell: MagicStack's pgbench, the
 PostgreSQL driver toolbench behind asyncpg's documentation, vendored at a pinned
 commit. Seven queries over which the ring wins the reads with structure in them
-(`int[]` 2.9x asyncpg, `generate_series` 1.87x), loses the one-row statement
-(42.7K against 82.4K) and the batched `INSERT` (5.4 against 895, and that cell is
+(`int[]` 2.8x asyncpg, `generate_series` 1.72x), loses the one-row statement
+(41.0K against 85.1K) and the batched `INSERT` (5.4 against 885, and that cell is
 the client's libpq path), and cannot run `COPY` at all. The full table, the
 method and every adaptation the suite needed are in
 [`bench/ADOPTION.md`](bench/ADOPTION.md).
