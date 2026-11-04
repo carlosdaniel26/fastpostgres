@@ -95,9 +95,6 @@ class DBAPITypeObject:
     def __eq__(self, other):
         return other in self.values
 
-    def __ne__(self, other):
-        return other not in self.values
-
     def __hash__(self):
         return hash(self.values)
 
@@ -308,38 +305,24 @@ class _Result:
 
 # ---- ring pool ------------------------------------------------------------
 #
-# A ring is a worker-backed channel that serves one stream at a time, so it is
-# shared process-wide instead of being tied to a connection: a read checks one
-# out, runs open/next*/close, and hands it back. The pool bounds how many
-# workers a process can spawn, whatever the connection pool size; when it is
-# exhausted (or the extension is absent) reads fall back to libpq.
+# A ring serves one stream at a time and is shared process-wide: a read checks
+# one out, runs open/next*/close, and hands it back. When the pool is exhausted
+# (or the extension is absent) reads fall back to libpq.
 #
-# How many is "enough" is not a constant, and the numbers are measured: a stream
-# needs about 1.2 hardware threads (the client's decode is GIL-bound and takes most
-# of one, its ring worker the rest), so a machine saturates at roughly one stream
-# per core — six or seven here, not sixteen — and every ring is a background
-# worker, of which the server has max_worker_processes to give (eight, seven
-# usable). So the pool is resolved once per process, on the first read that needs
-# a ring, from the machine and from the server. FASTPOSTGRES_SHM_POOL still
-# overrides it; 0 still turns the shared-memory path off.
-#
-# FASTPOSTGRES_SEGMENT_BYTES is the other shared-memory knob and it is per ring,
-# not per pool: it sizes each of the two alternating data segments a read streams
-# through, so a stream's transfer buffer is twice it. That is the memory a budget
-# is spent through, which is why it is worth being able to set it.
+# The size is resolved once per process, from the machine and the server: a
+# stream needs ~1.2 hardware threads (a GIL-bound decode plus its ring worker),
+# and every ring is a background worker the server budgets via
+# max_worker_processes. FASTPOSTGRES_SHM_POOL overrides it; 0 disables the
+# shared-memory path. FASTPOSTGRES_SEGMENT_BYTES sizes each of the two data
+# segments per ring (0 = the worker's 1 GiB default, clamped to 64 KiB-1 GiB).
 
 _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
-# The capacity of each of the two alternating data segments, in bytes: the
-# shared memory a read streams through. Unset, the worker's own default (1 GiB)
-# applies. The 8 MiB control ring is not part of it, and the worker clamps the
-# ask to [64 KiB, 1 GiB].
 _SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
 _SEGMENT_BYTES = int(_SEGMENT_ENV) if _SEGMENT_ENV else 0
 _THREADS_PER_STREAM = 1.2
 _POOL_MAX = 8
-# The backend_type every ring worker shows in pg_stat_activity ("fastpostgres
-# ring worker", worker.c); `_server_ring_slots` counts these against the
-# server's worker budget.
+# The backend_type the ring workers show in pg_stat_activity, counted against
+# the server's worker budget by _server_ring_slots.
 _RING_BACKEND = "fastpostgres ring worker"
 
 _pool_idle = queue.Queue()

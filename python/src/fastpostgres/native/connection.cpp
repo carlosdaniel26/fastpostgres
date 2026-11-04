@@ -1,10 +1,9 @@
-/* connection.cpp — Connection(conninfo): libpq exec and COPY FROM STDIN, the
+/* connection.cpp — Connection(conninfo): the libpq control channel for the
  * statements that have no cursor to stream through. Values are decoded by type
  * OID (codec.cpp) so callers see real Python types. */
 #include "connection.hpp"
 
 #include <cstdlib>
-#include <cstring>
 
 #include "codec.hpp"
 #include "types.hpp"
@@ -128,131 +127,6 @@ Connection_exec(ConnectionObject *self, PyObject *arg)
     return out;
 }
 
-/* Stream rows with libpq's COPY protocol, retrying while it needs flushing. */
-static int
-copy_put(PGconn *pg, const char *buf, size_t n)
-{
-    size_t off = 0;
-    while (off < n)
-    {
-        size_t chunk = n - off;
-        if (chunk > (size_t)(1 << 20)) chunk = 1 << 20;
-        int rc = PQputCopyData(pg, buf + off, (int)chunk);
-        if (rc < 0) return -1;
-        if (rc == 0)
-        {
-            if (PQflush(pg) != 0) return -1;
-            continue; /* retry the same chunk */
-        }
-        off += chunk;
-    }
-    return 0;
-}
-
-/* Send one bytes-like item; returns 0, or -1 with a Python error set. */
-static int
-copy_put_object(PGconn *pg, PyObject *item)
-{
-    Py_buffer view;
-    if (PyObject_GetBuffer(item, &view, PyBUF_SIMPLE) != 0)
-    {
-        PyErr_SetString(PyExc_TypeError, "copy_from: data must be bytes-like, or a sequence of them");
-        return -1;
-    }
-    int rc = copy_put(pg, (const char *)view.buf, (size_t)view.len);
-    PyBuffer_Release(&view);
-    if (rc != 0)
-    {
-        PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(pg));
-        return -1;
-    }
-    return 0;
-}
-
-static PyObject *
-Connection_copy_from(ConnectionObject *self, PyObject *args)
-{
-    const char *sql;
-    PyObject   *data;
-    if (!PyArg_ParseTuple(args, "sO", &sql, &data)) return nullptr;
-    if (!self->pg)
-    {
-        PyErr_SetString(PyExc_ValueError, "connection is closed");
-        return nullptr;
-    }
-
-    PGresult *res = PQexec(self->pg, sql);
-    if (PQresultStatus(res) != PGRES_COPY_IN)
-    {
-        PyObject *err = fp_raise_libpq(res);
-        PQclear(res);
-        return err;
-    }
-    PQclear(res);
-
-    int rc = 0;
-    if (PyList_Check(data) || PyTuple_Check(data))
-    {
-        Py_ssize_t count = PySequence_Size(data);
-        for (Py_ssize_t i = 0; i < count && rc == 0; i++)
-        {
-            PyObject *item = PySequence_GetItem(data, i);
-            if (!item)
-            {
-                rc = -1;
-                break;
-            }
-            rc = copy_put_object(self->pg, item);
-            Py_DECREF(item);
-        }
-    }
-    else
-    {
-        rc = copy_put_object(self->pg, data);
-    }
-
-    if (rc != 0)
-    {
-        while ((res = PQgetResult(self->pg)) != nullptr)
-            PQclear(res); /* resync */
-        return nullptr;
-    }
-
-    for (;;)
-    {
-        int e = PQputCopyEnd(self->pg, nullptr);
-        if (e < 0)
-        {
-            while ((res = PQgetResult(self->pg)) != nullptr)
-                PQclear(res);
-            PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(self->pg));
-            return nullptr;
-        }
-        if (e > 0) break;
-        if (PQflush(self->pg) != 0)
-        {
-            while ((res = PQgetResult(self->pg)) != nullptr)
-                PQclear(res);
-            PyErr_Format(PyExc_RuntimeError, "libpq: %s", PQerrorMessage(self->pg));
-            return nullptr;
-        }
-    }
-
-    res = PQgetResult(self->pg);
-    if (res == nullptr || PQresultStatus(res) != PGRES_COMMAND_OK)
-    {
-        PyObject *err = fp_raise_libpq(res);
-        if (res) PQclear(res);
-        while ((res = PQgetResult(self->pg)) != nullptr)
-            PQclear(res);
-        return err;
-    }
-    PQclear(res);
-    while ((res = PQgetResult(self->pg)) != nullptr)
-        PQclear(res);
-    Py_RETURN_NONE;
-}
-
 static PyObject *
 Connection_close(ConnectionObject *self, PyObject *)
 {
@@ -266,7 +140,6 @@ Connection_close(ConnectionObject *self, PyObject *)
 
 static PyMethodDef Connection_methods[] = {
     {"exec", (PyCFunction)Connection_exec, METH_O, "exec(sql) -> Result"},
-    {"copy_from", (PyCFunction)Connection_copy_from, METH_VARARGS, "copy_from(sql, data): COPY FROM STDIN"},
     {"close", (PyCFunction)Connection_close, METH_NOARGS, "close()"},
     {nullptr},
 };
