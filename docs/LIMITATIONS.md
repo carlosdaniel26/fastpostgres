@@ -43,20 +43,21 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 ## Small results: where the rankings invert
 
-At 1K rows the stack-versus-stack ranking holds — tuples 6.11M vs 1.16M rows/s,
-columnar + sum 4.92M vs 1.50M — but the paths *inside* fast-postgres invert:
+At 1K rows the stack-versus-stack ranking holds — tuples 4.64M vs 1.10M rows/s,
+columnar + sum 4.74M vs 1.45M — and the paths *inside* fast-postgres invert
+against the driver read:
 
 | path at 1K rows | rows/s | vs the plain driver read |
 |---|---|---|
-| DBAPI `fetchall` | 5.36M | — |
-| `stream()` + numpy sum | 4.71M | −12% |
-| `core` interface | 2.62M | −51% |
-| four processes | 1.37M | −74% |
+| `stream()` + numpy sum | 5.15M | +51% |
+| DBAPI `fetchall` | 3.41M | — |
+| `core` interface | 1.69M | −50% |
+| four processes | 1.38M | −59% |
 
-The sum costs more than it saves on a small batch, the lean interface's fixed
-costs dominate, and fan-out is pure overhead. For small results, use the plain
-driver read. (Within-run spread at this size is ±15%, so treat the ordering, not
-the digits.)
+The zero-copy `stream()` wins even at this size — the per-row Python cost the
+tuple path pays now exceeds the stream's fixed costs. The lean `core` interface
+and fan-out are still pure overhead at 1K. (Within-run spread at this size is
+±15%, so treat the ordering, not the digits.)
 
 ## Pros and cons
 
@@ -64,8 +65,8 @@ the digits.)
 
 | | fastpostgres | ADBC + Arrow |
 |---|---|---|
-| Python rows, 100K–10M | 5.0–5.7× faster | baseline (Arrow → `to_pylist`) |
-| columnar + one sum | 3.6–3.8× faster | Arrow record batches |
+| Python rows, 100K–10M | 2.6–3.0× faster | baseline (Arrow → `to_pylist`) |
+| columnar + one sum | 3.5–3.6× faster | Arrow record batches |
 | what crosses the wire | nothing: the executor's tuple bytes are written into the reader's address space | libpq binary/text, then converted into Arrow buffers |
 | ecosystem | custom columnar frame; numpy/pandas adapters | Arrow, parquet, pandas, polars, duckdb |
 | portability | Linux, same host, server extension | any OS, any network, many databases |
@@ -77,10 +78,10 @@ the digits.)
 
 | path | rows/s | use it when |
 |---|---|---|
-| four processes, DBAPI | 13.4M aggregate | one process cannot keep up |
-| `stream()` + numpy | 8.3M | you want numbers, not rows |
-| DBAPI / `core` | 7.2M | you want Python tuples |
-| SQLAlchemy CORE | 1.4M | you want SQLAlchemy's API and can pay ~570 ns/row |
+| four processes, DBAPI | 9.05M aggregate | one process cannot keep up |
+| `stream()` + numpy | 7.97M | you want numbers, not rows |
+| DBAPI / `core` | 3.79M | you want Python tuples |
+| SQLAlchemy CORE | 1.14M | you want SQLAlchemy's API and can pay ~570 ns/row |
 
 ## When not to use this
 
@@ -106,7 +107,7 @@ roughly 10×, so the comparison uses the generous one, not the convenient one.
 Both are in the PATHS table of every run. The route ADBC is designed for is the
 columnar one, and that comparison is reported beside it.
 
-**"5× on six narrow columns proves nothing."** The mixed shape is the answer:
+**"3× on six narrow columns proves nothing."** The mixed shape is the answer:
 with NULLs, both varlena header sizes and non-ASCII text, the rank holds and
 ADBC loses relatively more (about −18% throughput at 1M, against −13% for
 fast-postgres on tuples and −7% on the columnar path), so the ratio does not
@@ -130,9 +131,9 @@ clean stamp.
 repeated queries; this removes *delivery* on every query, and the two rank by
 workload shape. Measured against PgCache, a CDC-maintained result cache, in
 [`fastpostgres-vs-pgcache.log`](../bench/results/fastpostgres-vs-pgcache.log): a cached aggregate
-is 51× faster than the ring at 1M rows — the executor is the cost, and no
-transport fixes that. A cached 1M-row result is the other way round: 1.47M rows/s
-against 6.35M on the ring, and a hit costs what its cold fill costs, because a hit
+is 56× faster than the ring at 1M rows — the executor is the cost, and no
+transport fixes that. A cached 1M-row result is the other way round: 1.42M rows/s
+against 3.79M on the ring, and a hit costs what its cold fill costs, because a hit
 still ships every row through the socket and builds every Python object, while
 this path never builds them twice. Method and caveats in
 [`PG-CACHE.md`](../bench/PG-CACHE.md).
@@ -142,11 +143,10 @@ this path never builds them twice. Method and caveats in
 [`fastpostgres-vs-pgcache-memory.log`](../bench/results/fastpostgres-vs-pgcache-memory.log)): one
 budget M on both sides, the ring's transfer buffer against the cache's own
 memory. Where the cache fits, the ranking is the same — at 1 GiB, the aggregate
-is 1.117 ms against the ring's 55.776 ms and the scan 1.47M against 6.53M rows/s.
+is 1.229 ms against the ring's 57.628 ms and the scan 1.45M against 3.87M rows/s.
 What the budget bought the ring above ~one batch is nothing (its numbers are flat
 from an 8 MiB budget up, and its segments grow 128× across the sweep), while
-below ~256 MiB the cache's container is OOM-killed before it can serve, and at
-256 MiB its registration is throttled to nothing.
+the cache's container is OOM-killed at 8 MiB and 64 MiB before it can serve.
 
 **"Which numbers should I quote?"** The committed logs, not the README:
 `bench/results/fastpostgres-vs-arrow*.log`.

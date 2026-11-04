@@ -64,7 +64,7 @@ they are what decides whether this belongs in an application.
 
 | where | the number | why |
 |---|---|---|
-| 1K rows, the columnar path | the plain driver read wins | the columnar path's fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
+| 1K rows, the `core` interface and fan-out | lose to the plain driver read | their fixed costs dominate at that size ([`docs/LIMITATIONS.md`](docs/LIMITATIONS.md#small-results-where-the-rankings-invert)) |
 | through SQLAlchemy CORE | -61-75% against the plain driver read | SQLAlchemy's `Row` construction (~570 ns/row), not the transport |
 | `SELECT 1+1`, 10 connections, a published suite | 41.0K queries/s against asyncpg's 85.1K | one row per statement: a stream opened and closed, against a prepared pipeline ([`bench/ADOPTION.md`](bench/ADOPTION.md)) |
 | a 1000-row batched `INSERT` | 5.4/s against asyncpg's 885 | the client's libpq DML path, one row at a time; the ring is not involved |
