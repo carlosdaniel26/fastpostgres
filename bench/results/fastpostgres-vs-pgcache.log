@@ -8,32 +8,32 @@ postgres: 18.6
 python: 3.13.5
 psycopg: 3.2.6
 sqlalchemy: 2.0.40
-fastpostgres image: fastpostgres-dev sha256:56c83e961111
+fastpostgres image: fastpostgres-dev sha256:dce11c433b23
 pgcache image: pgcache/pgcache sha256:4923257467c8
 origin: -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
 shape: bench
 sizes: 100000 1000000
-git: 9281418
+git: daa1e5e-dirty
 ### END ENV
 
 # 100000 rows, 3 timed rep(s) per player, one process each
-read_rows: 675.1 cycles/row over 400000 rows (decode 673.3, frame+desc+list 1.7)
-read_rows: 41391.5 cycles/row over 4 rows (decode 2166.0, frame+desc+list 39225.5)
-read_rows: 655.1 cycles/row over 400000 rows (decode 653.5, frame+desc+list 1.6)
-  large    fastpostgres 3.52M     pgcache 1.41M      pgcache/fastpostgres +148.6%   warm 7 reads/3891 ms to a stable hit (2 miss), 3 reps (0 miss)
-  small    fastpostgres 6.635 ms  pgcache 0.977 ms   pgcache/fastpostgres -85.3%    warm 5 reads/2043 ms to a stable hit (0 miss), 3 reps (0 miss)
-  through  fastpostgres 3.55M     pgcache 1.78M      pgcache/fastpostgres +99.8%    forwarded (views are never cached): 1 warm miss, 3 rep miss
-  fill-large pgcache 71.139 ms  fastpostgres 28.443 ms   (one read, cache reset)
-  fill-small pgcache 116.007 ms fastpostgres 6.635 ms   (one read, cache reset)
+read_rows: 667.4 cycles/row over 400000 rows (decode 665.3, frame+desc+list 2.1)
+read_rows: 44146.5 cycles/row over 4 rows (decode 3002.0, frame+desc+list 41144.5)
+read_rows: 666.5 cycles/row over 400000 rows (decode 664.9, frame+desc+list 1.6)
+  large    fastpostgres 3.51M     pgcache 1.38M      pgcache/fastpostgres 254.2%    warm 7 reads/3941 ms to a stable hit (2 miss), 3 reps (0 miss)
+  small    fastpostgres 6.156 ms  pgcache 1.278 ms   pgcache/fastpostgres 20.8%     warm 5 reads/2045 ms to a stable hit (0 miss), 3 reps (0 miss)
+  through  fastpostgres 3.48M     pgcache 1.78M      pgcache/fastpostgres 196.1%    forwarded (views are never cached): 1 warm miss, 3 rep miss
+  fill-large pgcache 70.793 ms  fastpostgres 28.489 ms   (one read, cache reset)
+  fill-small pgcache 124.135 ms fastpostgres 6.156 ms   (one read, cache reset)
 
 # 1000000 rows, 3 timed rep(s) per player, one process each
-read_rows: 691.8 cycles/row over 4000000 rows (decode 690.9, frame+desc+list 1.0)
-read_rows: 63716.5 cycles/row over 4 rows (decode 4655.0, frame+desc+list 59061.5)
-read_rows: 681.7 cycles/row over 4000000 rows (decode 680.8, frame+desc+list 1.0)
-  large    fastpostgres 3.79M     pgcache 1.42M      pgcache/fastpostgres +166.3%   warm 18 reads/23359 ms to a stable hit (15 miss), 3 reps (0 miss)
-  small    fastpostgres 62.326 ms pgcache 1.103 ms   pgcache/fastpostgres -98.2%    warm 5 reads/2086 ms to a stable hit (0 miss), 3 reps (0 miss)
-  through  fastpostgres 3.94M     pgcache 1.77M      pgcache/fastpostgres +122.6%   forwarded (views are never cached): 1 warm miss, 3 rep miss
-  fill-large pgcache 597.299 ms fastpostgres 263.655 ms   (one read, cache reset)
-  fill-small pgcache 192.691 ms fastpostgres 62.326 ms   (one read, cache reset)
+read_rows: 688.4 cycles/row over 4000000 rows (decode 687.3, frame+desc+list 1.1)
+read_rows: 77396.5 cycles/row over 4 rows (decode 4113.5, frame+desc+list 73283.0)
+read_rows: 681.3 cycles/row over 4000000 rows (decode 680.4, frame+desc+list 1.0)
+  large    fastpostgres 3.81M     pgcache 1.44M      pgcache/fastpostgres 264.6%    warm 18 reads/23309 ms to a stable hit (15 miss), 3 reps (0 miss)
+  small    fastpostgres 67.458 ms pgcache 1.099 ms   pgcache/fastpostgres 1.6%      warm 5 reads/2087 ms to a stable hit (0 miss), 3 reps (0 miss)
+  through  fastpostgres 3.90M     pgcache 1.76M      pgcache/fastpostgres 221.7%    forwarded (views are never cached): 1 warm miss, 3 rep miss
+  fill-large pgcache 605.312 ms fastpostgres 262.429 ms   (one read, cache reset)
+  fill-small pgcache 186.889 ms fastpostgres 67.458 ms   (one read, cache reset)
 
 # the same output across players: ok
