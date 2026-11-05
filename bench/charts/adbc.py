@@ -180,6 +180,7 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
         ax.yaxis.set_minor_formatter(NullFormatter())
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_rate))
     theme.declutter(ax)
+    theme.ticks(ax)
     ax.margins(y=0.22)  # room for the second label line
     return handles
 

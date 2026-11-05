@@ -164,13 +164,10 @@ def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
     ax.set_ylabel(ylabel)
     if log_y:
         ax.set_yscale("log")
-        # 1-2-5 per decade: the measured values sit inside one decade, where the
-        # decade-only locator leaves no labels at all
-        ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0), numticks=12))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: f"{v:g}"))
-        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     ax.margins(y=0.24)
     theme.declutter(ax)
+    theme.ticks(ax, log=log_y)
     return handles
 
 

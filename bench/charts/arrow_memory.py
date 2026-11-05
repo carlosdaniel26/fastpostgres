@@ -104,14 +104,15 @@ def style(ax, ticks, ylabel, log_y=False):
     ax.set_ylabel(ylabel)
     if log_y:
         ax.set_yscale("log")
-        # binary buffer sizes: what the lines are read against are MiB figures
-        ax.yaxis.set_major_locator(mticker.FixedLocator([2**i * 1048576 for i in range(0, 12)]))
+        # a handful of binary buffer sizes, not every power of two
+        ax.yaxis.set_major_locator(mticker.FixedLocator(
+            [8 * 2**20, 32 * 2**20, 128 * 2**20, 512 * 2**20]))
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_bytes))
         ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     else:
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
     ax.margins(y=0.26, x=0.12)
-    theme.declutter(ax, grid="x")
+    theme.declutter(ax)
 
 
 def main():
@@ -162,7 +163,8 @@ def main():
     ax_rate.set_xlim(-0.5 - pad, len(rows) - 0.5 + pad)
     if peak:
         ax_rate.set_ylim(0, peak * 1.18)
-    theme.declutter(ax_rate, grid="y")
+    theme.declutter(ax_rate)
+    theme.ticks(ax_rate)
     ax_rate.set_title("the same read, same output, same rows", fontsize=9.5)
 
     # the ring's fixed budget first: the rule the bars are read against
@@ -193,8 +195,13 @@ def main():
         smallest = min([smallest or peak] + values)
         ax_bytes.bar(xs, values, slot * 0.9, color=color, zorder=3)
         for x, value in zip(xs, values):
+            # a bar that reaches the rule keeps its label inside: above the bar
+            # the label would run into the dashed transfer line
+            inside = bool(budget) and value > budget / 1.15
             ax_bytes.annotate(fmt_bytes(value), (x, value), textcoords="offset points",
-                              xytext=(0, 5), ha="center", fontsize=6.5, color=color, zorder=5)
+                              xytext=(0, -6 if inside else 5), ha="center",
+                              va="top" if inside else "bottom", fontsize=6.5,
+                              color="white" if inside else color, zorder=5)
     ax_bytes.set_xticks(range(len(rows)))
     ax_bytes.set_xticklabels([fmt_rows(n) for n in rows], fontsize=8.5)
     ax_bytes.set_xlabel("rows read")

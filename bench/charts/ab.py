@@ -336,7 +336,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
             ax_i.set_ylabel("GB/s over the payload")
             ax_i.set_title("shared memory: overlapping the two sides", fontsize=9.5)
             ax_i.set_ylim(0, max(gb) * 1.45)
-            theme.declutter(ax_i, grid="x")
+            theme.declutter(ax_i)
         else:
             ax_i.axis("off")
     else:

@@ -140,6 +140,7 @@ def plot_format(formats, meta):
     ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.20)
     ax_t.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_t)
+    theme.ticks(ax_t)
 
     rss = [c["rss_kb"] / 1024 for c in formats]
     ax_m.bar(xs, rss, width=0.30, color=colors, zorder=3)
@@ -153,6 +154,7 @@ def plot_format(formats, meta):
     ax_m.set_ylim(0, max(rss) * 1.30)
     ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
+    theme.ticks(ax_m)
 
     fig.suptitle("Format cost: the same rows, encoded and decoded", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one process, no transport"))
@@ -205,6 +207,7 @@ def plot_transport(pairs, meta):
     ax_r.set_xlim(-0.8, len(payloads) - 0.2)
     theme.legend(ax_r, loc="upper right", fontsize=8)
     theme.declutter(ax_r)
+    theme.ticks(ax_r)
 
     # latency: two bars per cell (p50 solid, p99 faded), log axis - the range is
     # ~100x, and on a bar chart the two bars are read against the same baseline
@@ -234,6 +237,7 @@ def plot_transport(pairs, meta):
     ax_l.set_title("latency: p50 solid, p99 faded", fontsize=9.5)
     ax_l.margins(y=0.24)
     theme.declutter(ax_l)
+    theme.ticks(ax_l, log=True)
 
     fig.suptitle("Transport cost: identical payload bytes, producer → consumer", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one chunk in flight"))
@@ -270,6 +274,7 @@ def plot_footprint(formats, meta):
     ax_m.set_ylim(0, max(rss) * 1.30)
     ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
+    theme.ticks(ax_m)
 
     # copies by stage: one row per (cell, stage), zero counts annotated
     rows = [(c["cell"], stage, n) for c in formats
@@ -288,6 +293,7 @@ def plot_footprint(formats, meta):
     ax_c.set_xlim(0, max((n for _c, _s, n in rows), default=1) + 0.9)
     ax_c.set_title("where the copies happen", fontsize=9.5)
     theme.declutter(ax_c)
+    theme.ticks(ax_c, axis="x")
 
     fig.suptitle("Footprint of each approach: memory and copies", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one process, no transport"))
@@ -327,6 +333,7 @@ def plot_who_pays(pairs, meta):
     ax_cpu.set_xlim(0, max(p + c for p, c in zip(prod, cons)) * 1.30)
     ax_cpu.set_title("CPU, ms", fontsize=9.5)
     theme.declutter(ax_cpu)
+    theme.ticks(ax_cpu, axis="x")
 
     # memory per side
     p_rss = [cell[r].get("producer_rss_kb", 0) / 1024 for r in rows]
@@ -342,6 +349,7 @@ def plot_who_pays(pairs, meta):
     ax_mem.set_xlim(0, max(max(p, c) for p, c in zip(p_rss, c_rss)) * 1.55)
     ax_mem.set_title("peak RSS, MB", fontsize=9.5)
     theme.declutter(ax_mem)
+    theme.ticks(ax_mem, axis="x")
 
     # latency: p50 and p99 per cell, horizontal bars like the panels above
     p50 = [cell[r]["p50_ms"] * 1e3 for r in rows]
@@ -363,7 +371,8 @@ def plot_who_pays(pairs, meta):
     ax_lat.xaxis.set_minor_formatter(NullFormatter())
     ax_lat.set_xlabel("p50 / p99, μs")
     ax_lat.set_title("per-chunk latency, μs (log)", fontsize=9.5)
-    theme.declutter(ax_lat, grid="x")
+    theme.declutter(ax_lat)
+    theme.ticks(ax_lat, axis="x", log=True)
 
     fig.suptitle("Who pays: CPU, memory and latency per side", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(

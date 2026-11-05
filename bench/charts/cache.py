@@ -135,6 +135,7 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
         ax.yaxis.set_minor_formatter(NullFormatter())
     ax.yaxis.set_major_formatter(FuncFormatter(fmt))
     theme.declutter(ax)
+    theme.ticks(ax, log=log)
     ax.margins(y=0.24)
     return handles
 
