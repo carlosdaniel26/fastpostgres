@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Render fast-postgres vs PgCache from the comparison log.
 
-One image, two panels, two bars per size, because the answer depends on the
-shape of the result:
+One image, two panels, two bars, because the answer depends on the shape of the
+result (the largest size in the log; the smaller one tells the same relation):
 
     left   the full scan, rows/s     delivery-bound: the ring wins, and a cache
                                      hit pays to ship the rows again
@@ -103,7 +103,7 @@ def fmt_ms(v, _pos=None):
 
 
 def bars(ax, data, workload, fmt, ylabel, log=False):
-    sizes = sorted(data)
+    sizes = [max(data)]  # the largest size: the smaller one tells the same relation
     labels = [f"{n // 1000000}M" if n >= 1e6 else f"{n // 1000}K" for n in sizes]
     width = 0.8 / len(SERIES)
     xs = list(range(len(sizes)))

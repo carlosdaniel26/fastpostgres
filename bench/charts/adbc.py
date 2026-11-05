@@ -6,8 +6,9 @@ measures:
 
     zerocopy-read.png                 the zero-copy paths, summed in place
 
-Each bar carries its rate; the accent bar (fast-postgres) also carries its
-improvement over the rival it is measured against.
+One load, the largest the log has: the smaller ones carry the same relation,
+so a single bar pair says it without repeating it. Each bar carries its rate;
+the accent bar (fast-postgres) also carries the rival's share of it.
 
 `--compare LOG` also prints the before/after deltas for the same loads and
 writes those sections again, each load as a before/after bar pair:
@@ -179,6 +180,14 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
     return handles
 
 
+def largest(data):
+    """The biggest load only: the smaller sizes carry the same relation."""
+    if not data:
+        return data
+    top = max(data, key=num_rows)
+    return {top: data[top]}
+
+
 def figure(section, data, series, colors, labels, title, headline, footer, scale, delta_vs=0):
     fig, ax = plt.subplots(figsize=(7.8, 5.9))
     handles = bars(ax, data, series, colors, labels, scale, delta_vs)
@@ -195,7 +204,7 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
 def save(fig, path, points):
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"wrote {path}  ({points} loads)")
+    print(f"wrote {path}  ({points} group{'s' if points != 1 else ''})")
 
 
 def skip(path, section):
@@ -212,13 +221,13 @@ def paired(before, after, names):
     """{f'{load}\\n{name}': (before, after)} for the loads both logs ran, so one
     x tick is one bar pair rather than one bar."""
     data = {}
-    for load in sorted(before, key=num_rows):
-        if load not in after:
-            continue
+    loads = sorted((load for load in before if load in after), key=num_rows)
+    for load in loads:
         for i, name in enumerate(names):
             was = before[load][i]
             if was > 0:
-                data[f"{load}\n{name}"] = (was, after[load][i])
+                key = f"{load}\n{name}" if len(loads) > 1 else name
+                data[key] = (was, after[load][i])
     return data
 
 
@@ -243,7 +252,7 @@ def plot_compare(db, da, env, scale, note=""):
         footer += " · " + note
 
     for section, (filename, subtitle) in CHARTS.items():
-        bp, ap = db[section], da[section]
+        bp, ap = largest(db[section]), largest(da[section])
         shared = min([len(v) for v in (*bp.values(), *ap.values())], default=0)
         data = paired(bp, ap, PLAYERS[:shared])
         path = OUT / filename.replace(".png", "-compare.png")
@@ -308,7 +317,7 @@ def plot_drivers(text, env, scale, note=""):
         footer += " · " + note
     for section, (filename, subtitle) in CHARTS.items():
         path = OUT / filename
-        rows = data[section]
+        rows = largest(data[section])
         if not rows:
             skip(path, section)
             continue

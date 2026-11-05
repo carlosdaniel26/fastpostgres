@@ -68,8 +68,9 @@ multiset. The log prints `ok` or `MISMATCH`; the run exits non-zero on a mismatc
 ## The numbers
 
 The chart above has rows/s for the two row-returning workloads and ms/read for
-the aggregate, median of 3 reps (1 above 1M rows), at 100K and 1M rows,
-`bench` shape. The two regimes, in one line each:
+the aggregate at 1M rows (median of 3 reps, `bench` shape) — the largest size,
+since the smaller one tells the same relation; its 100K cells are in the log.
+The two regimes, in one line each:
 
 - **A large result does not want a cache.** A cache hit still ships the cached
   rows from the cache database through the proxy to the client, and the client
