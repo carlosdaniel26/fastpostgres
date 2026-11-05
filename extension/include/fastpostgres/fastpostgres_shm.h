@@ -649,6 +649,73 @@ fastpostgres_rows_reserve(FastpostgresRowsWrite *w, uint32_t len, const char *en
 }
 
 /* ---------------------------------------------------------------------------
+ * FPREDUCE — an aggregate result, computed by the worker and never the rows.
+ *
+ * A reduce request names a plan (op + column) and the worker accumulates over
+ * the fetched batch itself; what lands in the segment is one slot per op, not
+ * the batch. The frame is tiny (32 + 16*nops bytes) and identical on both
+ * sides, like the columnar and row frames above.
+ *
+ * Payload:
+ *   magic[8] "FPREDUCE", version u32, flags u32, nops u32, pad u32, nrows u64,
+ *   per op: is_null u8, is_float u8, pad[2], value u64 (int64 or double bits).
+ *
+ * nrows is the batch's row count, so COUNT_ALL needs no slot of its own; the
+ * slot is still emitted (the client's plan is positional). `is_null` is what
+ * an empty MIN/MAX carries; SUM/COUNT write their identity instead.
+ * ------------------------------------------------------------------------- */
+#define FASTPOSTGRES_REDUCE_MAGIC   "FPREDUCE"
+#define FASTPOSTGRES_REDUCE_VERSION 1
+#define FASTPOSTGRES_REDUCE_FRAME   (8u + 4u + 4u + 4u + 4u + 8u)
+#define FASTPOSTGRES_REDUCE_SLOT    12u /* 4-byte header + 8-byte value */
+#define FASTPOSTGRES_REDUCE_MAX_OPS 64
+
+typedef struct FastpostgresReduceSlot {
+    uint8_t  is_null;
+    uint8_t  is_float;
+    uint64_t bits; /* int64 bits, or the IEEE double's bits */
+} FastpostgresReduceSlot;
+
+typedef struct FastpostgresReduceReader {
+    const uint8_t *p;
+    const uint8_t *end;
+    uint32_t       nops;
+    uint64_t       nrows;
+} FastpostgresReduceReader;
+
+static inline int
+fastpostgres_reduce_init(FastpostgresReduceReader *r, const void *payload, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)payload;
+
+    if (len < FASTPOSTGRES_REDUCE_FRAME || memcmp(p, FASTPOSTGRES_REDUCE_MAGIC, 8) != 0) return 0;
+    p += 8;
+    if (fastpostgres_rd_u32(&p) != FASTPOSTGRES_REDUCE_VERSION) return 0;
+    (void)fastpostgres_rd_u32(&p); /* flags */
+    r->nops = fastpostgres_rd_u32(&p);
+    (void)fastpostgres_rd_u32(&p); /* pad */
+    r->nrows = fastpostgres_rd_u64(&p);
+    r->end   = (const uint8_t *)payload + len;
+    if (r->nops > FASTPOSTGRES_REDUCE_MAX_OPS ||
+        (uint64_t)(r->end - p) < (uint64_t)r->nops * FASTPOSTGRES_REDUCE_SLOT)
+        return 0;
+    r->p = p;
+    return 1;
+}
+
+static inline int
+fastpostgres_reduce_next(FastpostgresReduceReader *r, FastpostgresReduceSlot *s)
+{
+    if (r->p == NULL || (uint64_t)(r->end - r->p) < FASTPOSTGRES_REDUCE_SLOT) return 0;
+    s->is_null  = *r->p++;
+    s->is_float = *r->p++;
+    r->p += 2; /* pad */
+    memcpy(&s->bits, r->p, 8);
+    r->p += 8;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
  * FPCOLUMN writer — the frame emitted by the extension (from tuples) and by the
  * client's generators (from synthetic arrays). Both fill only the column data;
  * the layout, the padding and the backpatched data_len live here once.

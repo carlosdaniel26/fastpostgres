@@ -10,6 +10,7 @@
 #include "nodes/parsenodes.h"
 
 #include "columnar.h"
+#include "reduce.h"
 #include "rows.h"
 #include "shm.h"
 #include "stream.h"
@@ -121,6 +122,40 @@ fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch, 
     }
 
     nrows = fastpostgres_rows_fetch(portal, td, path, batch, capacity);
+    SPI_finish();
+    return nrows;
+}
+
+/* The batch reduced where the tuples are: the worker fetches, accumulates and
+ * publishes a scalar frame, so neither the columnar encoder nor the client ever
+ * sees the rows. The plan resolves against this cursor's descriptor. */
+uint64
+fastpostgres_stream_next_reduce(const char *stream, const char *seg, int64 batch, size_t capacity,
+                                const char *plan)
+{
+    char      *path = fastpostgres_shm_path(seg);
+    char      *name = cursor_name(stream);
+    Portal     portal;
+    TupleDesc  td;
+    HeapTuple *tuples;
+    uint64     nrows;
+
+    if (batch <= 0) elog(ERROR, "fastpostgres_stream_next_reduce: batch must be > 0");
+
+    if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_next_reduce: SPI_connect failed");
+
+    portal = SPI_cursor_find(name);
+    if (portal == NULL)
+    {
+        SPI_finish();
+        elog(ERROR, "fastpostgres_stream_next_reduce: no open stream \"%s\"", stream);
+    }
+
+    SPI_cursor_fetch(portal, true, (long)batch);
+    nrows  = SPI_processed;
+    td     = SPI_tuptable ? SPI_tuptable->tupdesc : portal->tupDesc;
+    tuples = SPI_tuptable ? SPI_tuptable->vals : NULL;
+    fastpostgres_reduce_publish(path, td, tuples, nrows, plan, capacity);
     SPI_finish();
     return nrows;
 }

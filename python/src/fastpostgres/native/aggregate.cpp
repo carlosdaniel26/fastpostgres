@@ -14,10 +14,17 @@
  * care (the wire types top out at int64 anyway).
  *
  *     _client.reduce(seg, [(AGG_SUM, 1), (AGG_COUNT_ALL, -1)])
+ *
+ * That is the fallback and the reference. The default path is the worker's
+ * FASTPOSTGRES_OP_REDUCE: it accumulates the same plan over the batch and
+ * publishes an FPREDUCE frame, which _client.read_reduce(seg) turns into the
+ * same handful of scalars. Both produce values the DB-API combines per batch,
+ * so the semantics below are shared by construction.
  */
 #include <Python.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "fastpostgres/fastpostgres_shm.h"
@@ -324,9 +331,67 @@ aggregate_reduce(PyObject *, PyObject *args)
     return out;
 }
 
+/* read_reduce(seg) -> [value, ...] in plan order: the worker's FPREDUCE frame,
+ * one slot per planned op. The whole point of the frame is that it is tiny, so
+ * this is a handful of Python objects per batch, not per row. */
+static PyObject *
+aggregate_read_reduce(PyObject *, PyObject *args)
+{
+    const char *name;
+
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    FastpostgresReduceReader rd;
+    if (!fastpostgres_reduce_init(&rd, payload, payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres reduce payload");
+        return nullptr;
+    }
+
+    PyObject *out = PyList_New((Py_ssize_t)rd.nops);
+    if (out == nullptr) return nullptr;
+
+    for (uint32_t k = 0; k < rd.nops; k++)
+    {
+        FastpostgresReduceSlot slot;
+        PyObject             *v;
+
+        if (!fastpostgres_reduce_next(&rd, &slot))
+        {
+            Py_DECREF(out);
+            PyErr_SetString(PyExc_ValueError, "truncated reduce payload");
+            return nullptr;
+        }
+        if (slot.is_null)
+            v = Py_NewRef(Py_None);
+        else if (slot.is_float)
+        {
+            double d;
+
+            memcpy(&d, &slot.bits, sizeof(d));
+            v = PyFloat_FromDouble(d);
+        }
+        else
+            v = PyLong_FromLongLong((long long)slot.bits);
+        if (v == nullptr)
+        {
+            Py_DECREF(out);
+            return nullptr;
+        }
+        PyList_SET_ITEM(out, (Py_ssize_t)k, v);
+    }
+    return out;
+}
+
 static PyMethodDef aggregate_methods[] = {
     {"reduce", aggregate_reduce, METH_VARARGS,
      "reduce(seg, [(agg_op, column_index), ...]) -> list of scalars (no Python objects per row)"},
+    {"read_reduce", aggregate_read_reduce, METH_VARARGS,
+     "read_reduce(seg) -> list of scalars from the worker's FPREDUCE frame"},
     {nullptr},
 };
 

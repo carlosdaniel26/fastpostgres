@@ -1,0 +1,71 @@
+# team-programming A/B — server-side associative reduce pushdown
+#
+# Same command, same script, same machine, one player at a time under the shared
+# lock. The baseline image predates bench/jobs/aggregate-pushdown.py, so the
+# script is bind-mounted into both runs; the driver API it calls is unchanged.
+#
+# command (baseline):
+#   flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=baseline -v "$PWD/bench/jobs/aggregate-pushdown.py:/src/bench/jobs/aggregate-pushdown.py:ro" fpq-baseline python3 /src/bench/jobs/aggregate-pushdown.py'
+# command (change):
+#   flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=programming -v "$PWD/bench/jobs/aggregate-pushdown.py:/src/bench/jobs/aggregate-pushdown.py:ro" fpq-programming python3 /src/bench/jobs/aggregate-pushdown.py'
+#
+# What it runs: Cursor.aggregate("SELECT price FROM fp_agg_bench",
+# {"price_sum": ("sum", "price"), "rows": ("count_all", None)}, size=batch) over
+# 2,000,000 rows, checked against the server's SELECT sum(price), count(*).
+# "B shipped" is the sum of the data segment's published payload_size over the
+# frames the reduce actually consumed; "max" is the largest single frame. Time is
+# the median of 5 timed calls after a warm one, and excludes the untimed byte
+# measurement. The change's frame count includes the terminal empty scalar frame
+# (56 B) that closes the stream; the baseline writes its terminal empty NEXT but
+# the loop breaks before reading it.
+#
+# --- baseline: main@7e3d2e6, client-side reduce (FPCOLUMN batch + C++ walk) ---
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+
+AGGREGATE (sum(int8) + count_all): 2000000 rows through Cursor.aggregate
+    2000000    100000    206.73 ms     9.67M rows/s    16251040 B shipped in 20  frames (max   812552 B)  ±2.8%  ok
+    2000000   2000000    162.91 ms    12.28M rows/s    16250056 B shipped in 1   frames (max 16250056 B)  ±1.9%  ok
+  result: price_sum=999000000 rows=2000000 (server 999000000, 2000000)
+
+# --- change: team/programming, worker-side reduce (FPREDUCE scalar frame) ---
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: programming
+shm: 3.0G
+### END ENV
+
+AGGREGATE (sum(int8) + count_all): 2000000 rows through Cursor.aggregate
+    2000000    100000    184.03 ms    10.87M rows/s        1176 B shipped in 21  frames (max       56 B)  ±3.0%  ok
+    2000000   2000000    155.59 ms    12.85M rows/s         112 B shipped in 2   frames (max       56 B)  ±5.0%  ok
+  result: price_sum=999000000 rows=2000000 (server 999000000, 2000000)
+
+### AB
+# batch=100000 (driver default): 206.73 -> 184.03 ms (-11.0%, 1.123x faster;
+# 9.67 -> 10.87M rows/s, +12.4%); bytes shipped 16,251,040 -> 1,176 B (-99.9928%,
+# 13,818x less; the 20 data frames alone are 16,251,040 -> 1,120 B, 14,510x less;
+# max frame 812,552 -> 56 B). Same 2,000,000 rows, same scalar result, ok.
+# batch=2000000 (one request): 162.91 -> 155.59 ms (-4.5%, 1.047x faster;
+# 12.28 -> 12.85M rows/s, +4.6%); bytes 16,250,056 -> 112 B (-99.9993%,
+# 145,090x less; one data frame is 16,250,056 -> 56 B). ok.

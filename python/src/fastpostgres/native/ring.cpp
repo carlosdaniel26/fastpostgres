@@ -467,6 +467,23 @@ Ring_next_rows(RingObject *self, PyObject *args)
     return PyLong_FromLongLong(n);
 }
 
+/* The same pull, answered with the scalar frame: the worker accumulates the
+ * plan over the batch and publishes one value per op, not the rows. `seg` is
+ * both the stream and the data segment, as with next(). */
+static PyObject *
+Ring_reduce(RingObject *self, PyObject *args)
+{
+    const char *seg, *plan;
+    long long   batch = 100000;
+
+    if (!PyArg_ParseTuple(args, "ss|L", &seg, &plan, &batch)) return nullptr;
+    if (batch <= 0) batch = 100000;
+    if (ring_own(self, "reducing the next batch") < 0) return nullptr;
+    long long n = ring_request(self, FASTPOSTGRES_OP_REDUCE, seg, plan, (uint32_t)batch);
+    if (n < 0) return nullptr;
+    return PyLong_FromLongLong(n);
+}
+
 /* Send a NEXT for `seg` without waiting: the worker fills that segment while the
  * caller decodes the previous batch, and wait() collects the answer. One request
  * is in flight at a time, so the caller must wait before posting the next. */
@@ -554,6 +571,8 @@ static PyMethodDef Ring_methods[] = {
     {"next", (PyCFunction)Ring_next, METH_VARARGS, "next(batch=100000) -> int rows (the columnar frame)"},
     {"next_rows", (PyCFunction)Ring_next_rows, METH_VARARGS,
      "next_rows(batch=100000) -> int rows (the row frame; falls back to columnar)"},
+    {"reduce", (PyCFunction)Ring_reduce, METH_VARARGS,
+     "reduce(seg, plan, batch=100000) -> int rows (the scalar frame, reduced in the worker)"},
     {"post_rows", (PyCFunction)Ring_post_rows, METH_VARARGS,
      "post_rows(seg, batch=100000): ask for a batch into seg, do not wait"},
     {"wait", (PyCFunction)Ring_wait, METH_NOARGS, "wait() -> int rows for the request last sent"},
