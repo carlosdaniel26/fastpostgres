@@ -8,9 +8,8 @@ the benchmark and the record of its threats to validity.
 
 | claim | evidence | command |
 |---|---|---|
-| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (2.7–3.1×) | `just bench` |
-| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.7–3.8×) | `just bench` |
-| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (2.8–3.4× and 3.2–4.0×) | `SHAPE=mixed just bench` |
+| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.6–3.8×) | `just rivals adbc` |
+| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | ZERO-COPY READ in `bench/results/fastpostgres-vs-arrow-mixed.log` (3.6–4.1×) | `SHAPE=mixed just rivals adbc` |
 | the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
 ## Systems under test
@@ -67,8 +66,9 @@ no parameters.
   it is never timed.
 - **Repetitions**: three, median reported. Above 1M rows, a single rep.
 - **Timed region**: the read call itself, including everything the consumer must
-  do to hold the result — the DBAPI's `fetchall`, ADBC's `fetch_arrow_table`
-  plus the conversion to tuples, `stream()` iteration plus the numpy sum.
+  do to hold the result — `stream()` iteration plus the numpy sum in the headline
+  section; the database call plus `fetchall`, or `fetch_arrow_table` plus
+  `pyarrow.compute.sum`, for the paths table.
 - **Verification**: every read's row count is checked against `n`; a mismatch
   prints `MISMATCH` and fails the run (the `ok` column).
 - **Dispersion**: the log prints the spread over the reps (`±`, half the
@@ -83,7 +83,7 @@ Measured on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), inside the
 container this repository builds: Debian on `postgres:18`, `/dev/shm` 3 GiB.
 
 Observed run-to-run spread on this host across repeated full runs: a few percent
-for the driver-level numbers (fast-postgres's tuples ±2%, ADBC's ±3%) and up to
+for the driver-level numbers (fast-postgres's `stream()` ±1.6–3.2%, ADBC's table path ±0.6–0.7%) and up to
 about ±10% for `stream()`, whose rate depends on the state of the shm segment's
 pages. The `±` lines in each log show the *within-run* spread: typically under
 2%, up to ~6% at the smallest size.
@@ -94,14 +94,11 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   one container configuration. Clock frequencies drift with thermals; the TSC is
   invariant, so cycle figures are comparable across runs, but throughput is not
   portable.
-- **ADBC → tuples is a conversion path.** ADBC's design output is Arrow; asking
-  it for Python tuples means its Arrow conversion *plus* a column-wise
-  `to_pylist`. That is the honest cost of the same output, but not the path ADBC
-  is optimised for.
-- **Comparable outputs, not comparable internals.** TUPLE READ compares object
-  rows with object rows; ZERO-COPY READ compares columnar with columnar. No
-  table compares tuples against an Arrow table — that would price two different
-  outputs rather than the two transports.
+- **The comparison is columnar against columnar.** Both sides land the same
+  columnar form and one column is summed in place, so the numbers price the
+  transport rather than the object model. The DB-API's tuple read is the
+  compatibility interface — an application that wants Python objects pays for
+  them on either stack — and it is a path in the log, not a headline.
 - **Two shapes, not every shape.** NULLs, both varlena header sizes and
   non-ASCII text are measured (`SHAPE=mixed`); wide rows, numeric/timestamps and
   TOAST-heavy values are not — see

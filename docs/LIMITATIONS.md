@@ -62,8 +62,7 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 | | fastpostgres | ADBC + Arrow |
 |---|---|---|
-| Python rows, 100K–10M | 2.7–3.1× faster | baseline (Arrow → `to_pylist`) |
-| columnar + one sum | 3.7–3.8× faster | Arrow record batches |
+| columnar + one sum | 3.6–3.8× faster | Arrow record batches |
 | what crosses the wire | nothing: the executor's tuple bytes are written into the reader's address space | libpq binary/text, then converted into Arrow buffers |
 | ecosystem | custom columnar frame; numpy/pandas adapters | Arrow, parquet, pandas, polars, duckdb |
 | portability | Linux, same host, server extension | any OS, any network, many databases |
@@ -75,9 +74,9 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 | path | rows/s | use it when |
 |---|---|---|
-| four processes, DBAPI | 9.66M aggregate | one process cannot keep up |
-| `stream()` + numpy | 8.71M | you want numbers, not rows |
-| DBAPI / `core` | 4.10M | you want Python tuples |
+| four processes, DBAPI | 9.42M aggregate | one process cannot keep up |
+| `stream()` + numpy | 8.75M | you want numbers, not rows |
+| DBAPI / `core` | 4.01M | a wrapper expects DB-API rows |
 
 ## When not to use this
 
@@ -94,20 +93,9 @@ nothing and parses nothing; the server memcpys the executor's tuple into the
 segment. The claim is "no serialization on the wire, no parse on the client",
 not "no memory movement at all".
 
-**"ADBC → `to_pylist` is a straw man."** It was the fair worry, so it is now
-measured rather than argued. ADBC's DBAPI can also hand back Python rows itself
-with `fetchall()` — the plainest DBAPI call there is — and on the same 1M rows it
-runs at **0.14M rows/s**, against **1.34M** for the `to_pylist` route the harness
-uses. The column-wise `to_pylist` is the *faster* of ADBC's two row routes by
-roughly 10×, so the comparison uses the generous one, not the convenient one.
-Both are in the PATHS table of every run. The route ADBC is designed for is the
-columnar one, and that comparison is reported beside it.
-
 **"3× on six narrow columns proves nothing."** The mixed shape is the answer:
-with NULLs, both varlena header sizes and non-ASCII text, the rank holds and
-ADBC loses relatively more (about −18% throughput at 1M, against −13% for
-fast-postgres on tuples and −7% on the columnar path), so the ratio does not
-shrink.
+with NULLs, both varlena header sizes and non-ASCII text, the columnar comparison
+still reads 3.6–4.1×, so the rank holds.
 
 **"You benchmarked your extension against a general-purpose driver."** Yes, and
 ADBC is the strongest general-purpose answer to the same question. Same

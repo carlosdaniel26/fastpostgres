@@ -22,8 +22,8 @@ Rules every class follows, because a measurement that breaks them is not one:
 - **One player per process, one at a time.** Interleaving players measures the
   neighbours' cache footprint (see [`METHODOLOGY.md`](METHODOLOGY.md)).
 - **The same output, checked.** Every comparison defines what "the same" means -
-  Python tuples for tuples, one column summed in place for columnar, a digest
-  over the rows - and fails the run when it disagrees.
+  one column summed in place on both sides, a digest over the rows - and fails
+  the run when it disagrees.
 - **Evidence per cell.** A player says how its work actually travelled: reads
   served by the ring against reads issued, the ring pool, the bytes it mapped,
   its peak RSS, the transfer segment it was given. A fallback to libpq that the

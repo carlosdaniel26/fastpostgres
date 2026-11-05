@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run the fast-postgres vs ADBC + Arrow benchmark and render the charts — one shot.
 
-Builds the container, runs the benchmark, then writes two images, one per
-head-to-head the harness measures:
+Builds the container, runs the benchmark, then writes the image the harness
+measures:
 
-    tuples-read.png                   each stack's own DBAPI (same output: Python tuples)
     zerocopy-read.png                 the zero-copy paths, summed in place
 
 Each bar carries its rate; the accent bar (fast-postgres) also carries its
@@ -13,7 +12,7 @@ improvement over the rival it is measured against.
 `--compare LOG` also prints the before/after deltas for the same loads and
 writes those sections again, each load as a before/after bar pair:
 
-    tuples-read-compare.png / zerocopy-read-compare.png
+    zerocopy-read-compare.png
 
 Usage:
     just charts arrow [nrows ...]   (default: the benchmark's own)
@@ -85,20 +84,15 @@ def parse_sections(text, sections, row_re):
 
 # The two head-to-head sections the benchmark prints, and the players in its
 # column order: fast-postgres takes the accent, the Arrow rival is grey. Each
-# section compares the same output (tuples, then columnar), so each gets its own
+# section compares the same output (columnar), so it gets its own
 # pair of labels.
-CHART_SECTIONS = {"TUPLE READ": "tuples", "ZERO-COPY READ": "zerocopy"}
+CHART_SECTIONS = {"ZERO-COPY READ": "zerocopy"}
 PLAYERS = ("fastpostgres", "adbc+arrow")
 CHART_LABELS = {
-    "tuples": ("fast-postgres (typed tuples)", "ADBC + Arrow → tuples"),
     "zerocopy": ("fast-postgres (stream + numpy)", "ADBC Arrow + pyarrow.compute"),
 }
 COLORS = (ACCENT, GREY[1])
 CHARTS = {
-    "tuples": (
-        "tuples-read.png",
-        "the same output — Python tuples — from each stack",
-    ),
     "zerocopy": (
         "zerocopy-read.png",
         "the same output — columnar, one column summed in place",

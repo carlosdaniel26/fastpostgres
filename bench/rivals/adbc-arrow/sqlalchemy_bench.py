@@ -1,21 +1,18 @@
 """fast-postgres vs ADBC + Arrow: the same reads from both, across load sizes.
 
-Two players, because the fair rival for a typed shared-memory transport is the
-Arrow ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose
+Two players, because the fair rival for a shared-memory transport is the Arrow
+ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose
 results arrive as Arrow record batches - and the socket's text protocol is no
 longer in the comparison:
 
-  TUPLE READ      the same output from both: Python tuples. fast-postgres's own
-                  DBAPI returns them directly; ADBC always converts the wire
-                  data into Arrow buffers, so its column pays that conversion
-                  plus a per-column to_pylist
   ZERO-COPY READ  the same output from both: the columnar form each stack lands,
                   with one column summed in place - stream()'s numpy view over
                   the shm bytes, ADBC's pyarrow.compute over its Arrow table
 
-Both sections compare like with like: the first against object rows, the second
-against columnar rows. Comparing fast-postgres's tuples against ADBC's Arrow
-table would price the two different outputs, not the two transports.
+Both sides land the same columnar output, so the comparison prices the transport
+rather than the object model. The DB-API's tuple read is not compared: building
+Python objects is what an application pays on either stack, and no transport
+changes it.
 
 Then a PATHS table puts everything else fast-postgres can do with those rows
 next to its own driver read - through SQLAlchemy, the lean core interface, four
@@ -125,9 +122,9 @@ def fetch_arrow(conn):
 def read_arrow_tuples(conn):
     """ADBC's Arrow table turned into Python tuples, column by column.
 
-    The like-for-like rival for the DBAPI's typed tuples: ADBC always converts
-    the wire data into Arrow buffers first, so asking it for rows means paying
-    that conversion and then the per-column `to_pylist`.
+    One of the two row routes ADBC offers, kept for the paths table: ADBC
+    converts the wire data into Arrow buffers first, so asking it for rows means
+    paying that conversion and then the per-column `to_pylist`.
     """
     t0 = now()
     table = fetch_arrow(conn)
@@ -139,10 +136,10 @@ def read_arrow_tuples(conn):
 def read_arrow_fetchall(conn):
     """ADBC's own DBAPI rows: `fetchall()`.
 
-    The plainest way any DBAPI hands back Python tuples, and the comparison the
-    TUPLE READ section's rival was missing: ADBC does its own row conversion
-    instead of this harness making a column-wise `to_pylist` in Python. Same
-    output as the to_pylist route and as this repo's DBAPI read.
+    The plainest way any DBAPI hands back Python tuples: ADBC does its own row
+    conversion instead of this harness making a column-wise `to_pylist` in
+    Python. Same output as the to_pylist route and as this repo's DBAPI read;
+    it is a path in the inventory, not a headline comparison.
     """
     cur = conn.cursor()
     t0 = now()
@@ -177,21 +174,12 @@ def read_arrow_sum(conn):
     return ms, table.num_rows
 
 
-# ---- the two headline sections -------------------------------------------
+# ---- the headline section ------------------------------------------------
 #
 # key, column label, handle opener, reader. One entry per player, in column
 # order; the row's comparison column is the second player against the first.
 
 SECTIONS = {
-    "tuples": {
-        "title": "TUPLE READ (rows/s)",
-        "note": "same output: ADBC's Arrow table converted column-wise with to_pylist",
-        "players": (
-            (FPG, "fastpostgres", open_dbapi, read_dbapi),
-            (ARROW, "adbc+tuples", open_arrow, read_arrow_tuples),
-        ),
-        "ratio": "vs arrow",
-    },
     "zerocopy": {
         "title": "ZERO-COPY READ (rows/s)",
         "note": "same output: the columnar form each stack lands, one column summed in place",
@@ -426,7 +414,6 @@ def main():
         raise SystemExit(f"SHAPE={SHAPE!r}: choose one of {', '.join(SHAPES)}")
 
     print(f"# shape: {SHAPE} — {SHAPES[SHAPE][0]}")
-    measure("tuples", sizes)
     measure("zerocopy", sizes)
     measure_paths(sizes)
 

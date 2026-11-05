@@ -28,24 +28,14 @@ this design gives up in exchange is in [`LIMITATIONS.md`](../docs/LIMITATIONS.md
 
 ## 1. The numbers, so the rest of the document has an anchor
 
-**Query level, same output on both sides** (Python tuples on the left column, an
-Arrow table converted with `to_pylist` on the right — the harness's `TUPLE READ`
-rows):
+**Query level, the same columnar output on both sides** (one column summed in
+place — the harness's `ZERO-COPY READ` rows):
 
 | rows | this repo | ADBC + Arrow | difference |
 |---|---|---|---|
-| 100K | 3.70M rows/s | 1.36M rows/s | **+172%** |
-| 1M | 4.07M rows/s | 1.33M rows/s | **+206%** |
-| 10M | 4.06M rows/s | 1.32M rows/s | **+208%** |
-
-**Query level, columnar output, no Python objects on either side** (one column
-summed in place — the `ZERO-COPY READ` rows):
-
-| rows | this repo | ADBC + Arrow | difference |
-|---|---|---|---|
-| 100K | 8.78M rows/s | 2.35M rows/s | **+274%** |
-| 1M | 8.77M rows/s | 2.32M rows/s | **+278%** |
-| 10M | 8.60M rows/s | 2.35M rows/s | **+266%** |
+| 100K | 8.54M rows/s | 2.34M rows/s | **+266%** |
+| 1M | 8.53M rows/s | 2.35M rows/s | **+264%** |
+| 10M | 8.90M rows/s | 2.34M rows/s | **+280%** |
 
 **Format only**, 1M rows, transport held out entirely, one process
 (the `fpcolumn` vs `arrow-ipc` cells):
@@ -69,7 +59,7 @@ summed in place — the `ZERO-COPY READ` rows):
 | CPU, producer + consumer | **4.6 / 4.6 ms** | 7.0 / 7.4 ms |
 | copies | **1** | 2 |
 
-Read together: at the query level the gap is 2.7–3.8×, at the format level it is
+Read together: at the query level the gap is 3.6–3.8×, at the format level it is
 1.9×, and at the transport level it is 1.5–1.6× on throughput and 8–9× on median
 latency. The factors multiply rather than overlap — which is what the isolation
 matrix was built to show, and what the rest of this document explains
@@ -244,25 +234,22 @@ protocol working as designed.
 
 ### 4.4 There is one language boundary, not three
 
-The fair, same-output comparison is the `TUPLE READ` row: both stacks produce
-Python rows. ADBC gets there by building an Arrow table and then calling
-`to_pylist` — allocation, refcounting and the GIL for every value. That is
-ADBC's public API, not Arrow's format, and the document would be dishonest
-without saying so.
+The comparison removes the Python layer on both sides — both stacks land the same
+columnar form — and the gap is still 3.6× (8.53M against 2.35M rows/s), so what
+it prices is the transport and the frame, not the object model. The DB-API's
+tuple read is the compatibility interface, not the headline: it pays CPython's
+per-object cost (`read_rows: 309 cycles/row over 400000 rows`, about 81 ns per
+row at 3.8 GHz for six columns, i.e. ~13 ns per value for the object, its
+refcount and its tuple slot), and an application that wants Python rows pays
+that on either stack.
 
-The columnar comparison removes the Python layer on both sides and the gap is
-still 3.8× (8.77M against 2.32M rows/s). Two numbers explain it, both from this
-repository's own pricer: `read_rows: 309 cycles/row over 400000 rows (decode
-307.0, frame+desc+list 2.0)` — about 81 ns per row at 3.8 GHz for six columns,
-i.e. ~13 ns per value, which is the cost of *allocating and filling one Python
-object* in CPython (the object, its refcount and its tuple slot). So the tuple
-path does not escape the language boundary — it pays the same per-object cost
-everyone pays — but it pays it once, on a pointer it already holds, where the
-rival pays it after two other layers (wire bytes → Arrow arrays → Python objects)
-have each done a pass of their own. `frame+desc+list` at 2 cycles/row says there
-is nothing left to squeeze around it: of the ~139 ns a delivered row costs at
-query level, ~81 ns is the decode and the rest is the query and the server-side
-frame build.
+Where the boundary does separate the two designs is *how many times* the bytes
+change hands before the object exists. The frame's row is decoded from the
+pointer the reader already holds; a driver that converts on the way out pays the
+wire bytes → Arrow arrays → Python objects chain, each layer a pass of its own.
+`frame+desc+list` at 2 cycles/row says there is nothing left to squeeze around
+the decode: of the ~139 ns a delivered row costs at query level, ~81 ns is the
+object and the rest is the query and the server-side frame build.
 
 ### 4.5 Shared memory instead of a pipe
 
