@@ -102,7 +102,7 @@ measure() {  # <player> <n> <segment bytes|-> <reps>
 }
 
 fmt_rate() { awk -v n="$1" -v ms="$2" 'BEGIN{printf "%.2fM", n / (ms / 1000) / 1e6}'; }
-vs_ring() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%+.1f%%", (b / a - 1) * 100}'; }
+vs_ring() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f%%", b / a * 100}'; }
 spread_of() {
   awk -v lo="$1" -v hi="$2" -v reps="$3" 'BEGIN{
     if (reps < 2 || lo == hi) { print "n=1"; exit }

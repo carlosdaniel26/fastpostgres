@@ -11,8 +11,6 @@ The measurement is `just arrow-memory-bench`, the record is
 rival is the same one the read benchmark uses: ADBC's PostgreSQL driver, whose
 results arrive as Arrow record batches, consumed with pyarrow.
 
-![fast-postgres against Arrow under a fixed 512 MiB buffer](../docs/assets/arrow-memory.png)
-
 (`just arrow-memory-charts` renders it from the log.)
 
 ## What is being compared

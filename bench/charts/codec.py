@@ -4,11 +4,11 @@
 Reads the log the matrix runner writes (`bench/results/codec-transport.log` by default)
 and renders four figures:
 
-    codec_chart-format.png      encode + decode time and peak RSS per format
-    codec_chart-footprint.png   memory held on top of the payload, and every
+    codec-format.png            encode + decode time and peak RSS per format
+    codec-footprint.png         memory held on top of the payload, and every
                                 named copy stage per format
-    codec_chart-transport.png   throughput and p50/p99 latency per transport
-    codec_chart-who-pays.png    CPU and memory per side, and the whole
+    transport.png               throughput and p50/p99 latency per transport
+    codec-who-pays.png          CPU and memory per side, and the whole
                                 min->p50->p99->max spread, per transport
 
 Same palette as `bench/charts/adbc.py`; the type and the layout come from
@@ -38,7 +38,8 @@ except ImportError:
 
 import theme  # noqa: E402
 
-OUT = Path.cwd()
+ROOT = Path(__file__).resolve().parents[2]
+OUT = ROOT / "docs" / "assets"
 
 # Strategic colour, as in bench/charts/adbc.py: mute the baseline, spend the accent on
 # the thing this repository owns.
@@ -424,10 +425,10 @@ def main():
               f"{c['gb_per_s']:>7.2f} {c['p50_ms'] * 1e3:>8.1f} {c['p99_ms'] * 1e3:>8.1f} "
               f"{cpu:>7.1f} {c['copies']:>7}")
 
-    save(plot_format(formats, meta), OUT / "codec_chart-format.png")
-    save(plot_footprint(formats, meta), OUT / "codec_chart-footprint.png")
-    save(plot_transport(pairs, meta), OUT / "codec_chart-transport.png")
-    save(plot_who_pays(pairs, meta), OUT / "codec_chart-who-pays.png")
+    save(plot_format(formats, meta), OUT / "codec-format.png")
+    save(plot_footprint(formats, meta), OUT / "codec-footprint.png")
+    save(plot_transport(pairs, meta), OUT / "transport.png")
+    save(plot_who_pays(pairs, meta), OUT / "codec-who-pays.png")
 
 
 if __name__ == "__main__":

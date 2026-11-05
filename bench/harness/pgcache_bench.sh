@@ -98,7 +98,7 @@ measure() {  # player workload n reps [--cold]
 }
 
 fmt_rows() { awk -v n="$1" -v ms="$2" 'BEGIN{printf "%.2fM", n / (ms / 1000) / 1e6}'; }
-vs_fpg() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%+.1f%%", (b / a - 1) * 100}'; }
+vs_fpg() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f%%", b / a * 100}'; }
 ms_of() { echo "$1" | awk '{printf "%.3f ms", $1}'; }
 
 # ---- the run -------------------------------------------------------------

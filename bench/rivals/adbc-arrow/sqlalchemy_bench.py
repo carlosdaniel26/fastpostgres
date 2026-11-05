@@ -212,8 +212,9 @@ def header(section):
 
 
 def pct(ratio):
-    """Improvement over the reference, in percent (the ratio is ref time / this time)."""
-    return f"{(ratio - 1) * 100:+.1f}%"
+    """The reference as a multiple of the baseline, in percent (ref time / this
+    time, so 400% means the ring is four times as fast)."""
+    return f"{ratio * 100:.1f}%"
 
 
 def row(load, medians, counts, section):
@@ -398,7 +399,7 @@ def measure_paths(sizes):
         for key, label, *_ in PATHS:
             ms, count = results[key]
             rate = count / (ms / 1000) / 1e6
-            delta = "" if key == "dbapi" else f"{(rate / driver_rate - 1) * 100:+.0f}%"
+            delta = "" if key == "dbapi" else f"{rate / driver_rate * 100:.0f}%"
             print("  " + col(fmt(n), 8, False) + " " + col(label, 30, False)
                   + col(f"{rate:.2f}M", 11, True) + " " + col(delta, 9, True))
 

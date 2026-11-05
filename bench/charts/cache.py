@@ -117,9 +117,9 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
         for size, v in zip(sizes, values):
             text = fmt(v)
             if player == "pgcache":
-                # the log's own column: what the cache bought or cost against the ring
-                delta = (v / data[size][workload]["fastpostgres"] - 1) * 100
-                text += f"\n{delta:+.0f}%"
+                # the cache's value as a share of the ring's
+                pct = v / data[size][workload]["fastpostgres"] * 100
+                text += f"\n{pct:.0f}%"
             texts.append(text)
         ax.bar_label(drawn, labels=texts, fontsize=6.8, padding=2)
 

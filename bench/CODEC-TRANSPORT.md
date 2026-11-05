@@ -193,16 +193,12 @@ writable. The recipe below avoids the situation by running as the invoking user.
 The committed run, verbatim in [`codec-transport.log`](results/codec-transport.log);
 charts rendered from it by `just charts codec` ([`bench/charts/codec.py`](charts/codec.py)).
 
-![format cost](../docs/assets/codec-format.png)
-
 **Experiment 1 — format, transport held out**
 
 | cell | payload | rows/s | encode ms | decode ms | copies | peak RSS |
 |---|---|---|---|---|---|---|
 | `fpcolumn` | 47.2 MiB | **192.03M** | **3.5** | **1.8** | **1** | **99 MB** |
 | `arrow-ipc` | 45.7 MiB | 107.06M | 7.5 | 1.9 | 6 | 383 MB |
-
-![transport cost](../docs/assets/transport.png)
 
 **Experiment 2 — transport, codec held out**
 
@@ -228,8 +224,6 @@ Three readings:
    transport is where the *bytes move* cheaper, and the query-level benchmark is
    what happens when both are in the path. Nothing here is measured together with
    the PostgreSQL worker; that is the caveat in the threats section.
-
-![footprint of each approach](../docs/assets/codec-footprint.png)
 
 **What the Arrow cell is not measuring: Arrow in memory.** Both cells here
 serialize, because that is the question a frame that crosses a process boundary
@@ -273,8 +267,6 @@ which is the part of Arrow that *is* zero-copy. The 8.4× peak RSS is the same
 story in memory rather than time: dataset, Arrow buffers, IPC stream and kernel
 temporaries are all alive at once, where the frame is built into the buffer it
 ships.
-
-![who pays on the transport](../docs/assets/codec-who-pays.png)
 
 **Per side, on the transport**
 

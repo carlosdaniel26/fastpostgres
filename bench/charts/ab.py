@@ -128,9 +128,8 @@ def plot_codec(before, after, nt, meta_text):
                       fontsize=7.6)
     # the deltas belong in the title: under the bars they collided with the ticks
     deltas = ", ".join(
-        f"{FORMAT_LABELS.get(n, n)} {100 * ((after[n]['encode_ms'] + after[n]['decode_ms'])
-                                          - (before[n]['encode_ms'] + before[n]['decode_ms']))
-                                 / (before[n]['encode_ms'] + before[n]['decode_ms']):+.0f}%"
+        f"{FORMAT_LABELS.get(n, n)} {100 * (after[n]['encode_ms'] + after[n]['decode_ms'])
+                                  / (before[n]['encode_ms'] + before[n]['decode_ms']):.0f}%"
         for n in names
     )
     ax_t.set_xticks(xs)
@@ -161,8 +160,8 @@ def plot_codec(before, after, nt, meta_text):
             dec_plain = sorted(c["decode_ms"] for c in plain)[len(plain) // 2]
             dec_new = sorted(c["decode_ms"] for c in stream)[len(stream) // 2]
             ax_nt.set_title(
-                f"non-temporal stores: encode {100 * (new - base) / base:+.0f}%, "
-                f"decode {100 * (dec_new - dec_plain) / dec_plain:+.0f}%",
+                f"non-temporal stores: encode {100 * new / base:.0f}%, "
+                f"decode {100 * dec_new / dec_plain:.0f}%",
                 fontsize=9.5,
             )
         ax_nt.set_xticks([0, 1])
@@ -207,7 +206,7 @@ def plot_system(before, after, cycles_before, cycles_after, meta_text):
             ax_r.text(x + off, value, f"{value:.2f}", ha="center", va="bottom", fontsize=7.0)
         ax_r.text(x + 0.34, max(ad_b, ad_a) / 2, "ADBC\ncontrol", ha="center", va="center",
                   fontsize=6.4, color="#555555")
-    deltas = ", ".join(f"{dict(labels)[k]}: {100 * (after[k][0] - before[k][0]) / before[k][0]:+.0f}%"
+    deltas = ", ".join(f"{dict(labels)[k]}: {100 * after[k][0] / before[k][0]:.0f}%"
                        for k in present)
     ax_r.set_xticks(xs)
     ax_r.set_xticklabels([label for k, label in labels if k in present], fontsize=8)
@@ -228,7 +227,7 @@ def plot_system(before, after, cycles_before, cycles_after, meta_text):
         ax_c.set_xticklabels(["before", "after"])
         ax_c.set_ylabel("cycles/row (client pricer)")
         ax_c.set_title(
-            f"the client's row decode: {100 * (cycles_after - cycles_before) / cycles_before:+.0f}%",
+            f"the client's row decode: {100 * cycles_after / cycles_before:.0f}%",
             fontsize=9.5,
         )
         ax_c.set_ylim(0, max(cycles_before, cycles_after) * 1.22)
@@ -325,7 +324,7 @@ def plot_transport(before_list, after_list, before, after, inflight, meta_text):
             for idx, (point, value, p) in enumerate(zip(ns, gb, p50)):
                 # alternate above/below: five three-line labels in a row collided
                 up = idx % 2 == 0
-                ax_i.annotate(f"{value:.1f} GB/s\n({100 * (value - base) / base:+.0f}%)\n"
+                ax_i.annotate(f"{value:.1f} GB/s\n({100 * value / base:.0f}%)\n"
                               f"p50 {p:,.0f} μs",
                               (point, value), textcoords="offset points",
                               xytext=(0, 10 if up else -10), ha="center",
@@ -399,8 +398,8 @@ def plot_cache_fix(nt, counters, meta_text):
     ax_t.set_xticks(xs)
     ax_t.set_xticklabels([g[0] for g in groups])
     ax_t.set_ylabel("ms per 1M rows")
-    ax_t.set_title(f"the time: encode {100 * (enc[1] - enc[0]) / enc[0]:+.0f}%, "
-                   f"pair {100 * ((enc[1] + dec[1]) - (enc[0] + dec[0])) / (enc[0] + dec[0]):+.0f}%",
+    ax_t.set_title(f"the time: encode {100 * enc[1] / enc[0]:.0f}%, "
+                   f"pair {100 * (enc[1] + dec[1]) / (enc[0] + dec[0]):.0f}%",
                    fontsize=9.5)
     ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.25)
     ax_t.margins(x=0.3)
@@ -422,7 +421,7 @@ def plot_cache_fix(nt, counters, meta_text):
     ax_c.set_xticklabels([g[0] for g in groups])
     ax_c.set_ylabel("requests per row")
     ax_c.set_title(f"the mechanism: RFO "
-                   f"{100 * (n['rfo_requests_per_row'] - p['rfo_requests_per_row']) / p['rfo_requests_per_row']:+.0f}%"
+                   f"{100 * n['rfo_requests_per_row'] / p['rfo_requests_per_row']:.0f}%"
                    f" (solid), L2 reads (faded)", fontsize=9.5)
     ax_c.set_ylim(0, max(p["rfo_requests_per_row"], p["l2_reads_per_row"]) * 1.30)
     ax_c.margins(x=0.3)
@@ -437,7 +436,7 @@ def plot_cache_fix(nt, counters, meta_text):
     ax_m.set_ylabel("L1 miss rate, %")
     ax_m.set_xticks(xs)
     ax_m.set_xticklabels([g[0] for g in groups], fontsize=8)
-    ax_m.set_title(f"L1 misses {100 * (n['l1_miss_pct'] - p['l1_miss_pct']) / p['l1_miss_pct']:+.0f}%; "
+    ax_m.set_title(f"L1 misses {100 * n['l1_miss_pct'] / p['l1_miss_pct']:.0f}%; "
                    f"cycles/row {p['cycles_per_row']:.1f} → {n['cycles_per_row']:.1f}",
                    fontsize=9.5)
     ax_m.set_ylim(0, max(p["l1_miss_pct"], n["l1_miss_pct"]) * 1.25)

@@ -14,8 +14,6 @@ budget** instead of their own defaults, are measured in
 where the cache fits, and below its own footprint the cache stops existing while
 the ring keeps reading.
 
-![fast-postgres vs PgCache: the full scan against the aggregate](../docs/assets/pgcache-read.png)
-
 (`just pgcache-charts` renders it from the log.)
 
 ## What is being compared
@@ -117,8 +115,6 @@ The two regimes, in one line each:
   1.80M rows/s against 5.86M on the ring at 1M rows.
 
 ## The same memory budget on both sides
-
-![fast-postgres vs PgCache under one budget: the sweep](../docs/assets/pgcache-memory.png)
 
 (`just pgcache-memory-charts` renders it from the log.)
 

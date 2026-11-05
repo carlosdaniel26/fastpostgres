@@ -4,8 +4,8 @@
 Builds the container, runs the benchmark, then writes two images, one per
 head-to-head the harness measures:
 
-    fastpostgres_chart-driver.png     each stack's own DBAPI
-    fastpostgres_chart-zerocopy.png   the zero-copy paths, summed in place
+    tuples-read.png                   each stack's own DBAPI (same output: Python tuples)
+    zerocopy-read.png                 the zero-copy paths, summed in place
 
 Each bar carries its rate; the accent bar (fast-postgres) also carries its
 improvement over the rival it is measured against.
@@ -13,7 +13,7 @@ improvement over the rival it is measured against.
 `--compare LOG` also prints the before/after deltas for the same loads and
 writes those sections again, each load as a before/after bar pair:
 
-    fastpostgres_chart-driver-compare.png / fastpostgres_chart-zerocopy-compare.png
+    tuples-read-compare.png / zerocopy-read-compare.png
 
 Usage:
     just charts arrow [nrows ...]   (default: the benchmark's own)
@@ -96,11 +96,11 @@ CHART_LABELS = {
 COLORS = (ACCENT, GREY[1])
 CHARTS = {
     "tuples": (
-        "fastpostgres_chart-tuples.png",
+        "tuples-read.png",
         "the same output — Python tuples — from each stack",
     ),
     "zerocopy": (
-        "fastpostgres_chart-zerocopy.png",
+        "zerocopy-read.png",
         "the same output — columnar, one column summed in place",
     ),
 }
@@ -108,7 +108,7 @@ CHARTS = {
 # A row is: load, one rate per player ("1.36M"), the comparison column, then
 # ok/MISMATCH.
 _RATE = r"[\d.]+M"
-_RATIO = r"(?:[\d.]+x|[+-][\d.]+%)"
+_RATIO = r"(?:[\d.]+x|[+-]?[\d.]+%)"
 DRIVER_ROW = re.compile(rf"^\s*(\d+)([KM])\s+({_RATE}(?:\s+{_RATE})*)\s+({_RATIO}(?:\s+{_RATIO})*)\s+\S+\s*$")
 
 
@@ -132,12 +132,12 @@ def fmt_rate(v, _pos=None):
 
 
 def fmt_pct(now, base):
-    """Improvement over a reference, for a bar label. One decimal below 10% so a
-    real but small change is not rounded away, whole numbers above it."""
+    """The value as a share of a reference, for a bar label. One decimal below
+    10% so a real but small change is not rounded away, whole numbers above."""
     if base <= 0:
         return ""
-    pct = (now / base - 1) * 100
-    return f"{pct:+.1f}%" if abs(pct) < 10 else f"{pct:+.0f}%"
+    pct = now / base * 100
+    return f"{pct:.1f}%" if abs(pct - 100) < 10 else f"{pct:.0f}%"
 
 
 def bars(ax, data, series, colors, labels, scale, delta_vs=0):
@@ -229,14 +229,14 @@ def paired(before, after, names):
 
 
 def headline_compare(prefix, data, target):
-    """Headline the change on the series the accent marks ("target")."""
-    gains = [now / was - 1 for key, (was, now) in data.items()
-             if key.endswith(f"\n{target}") and was > 0]
-    best, worst = max(gains, default=0.0), min(gains, default=0.0)
-    if best >= 0.005:
-        return f"{prefix} — up to {best * 100:.0f}% faster than before"
-    if worst <= -0.005:
-        return f"{prefix} — up to {abs(worst) * 100:.0f}% slower than before"
+    """Headline the value on the series the accent marks, as a share of before."""
+    shares = [now / was for key, (was, now) in data.items()
+              if key.endswith(f"\n{target}") and was > 0]
+    best, worst = max(shares, default=1.0), min(shares, default=1.0)
+    if best >= 1.005:
+        return f"{prefix} — up to {best * 100:.0f}% of before"
+    if worst <= 0.995:
+        return f"{prefix} — down to {worst * 100:.0f}% of before"
     return f"{prefix} — unchanged before vs after"
 
 
@@ -285,7 +285,7 @@ def compare(before_text, after_text, env=None, scale="auto", note=""):
             cells = []
             for i, name in enumerate(PLAYERS[:shared]):
                 was, now = db[section][load][i], da[section][load][i]
-                delta = f"{(now / was - 1) * 100:+.1f}%" if was else "n/a"
+                delta = f"{now / was * 100:.1f}%" if was else "n/a"
                 cells.append(f"{name} {was:.2f} -> {now:.2f} ({delta})")
             print(f"  {section:<8} {load:>4}: " + "   ".join(cells))
 
@@ -320,8 +320,8 @@ def plot_drivers(text, env, scale, note=""):
             continue
         # the accent bar carries the comparison (the rival is the baseline), and
         # the headline takes the best load
-        gain = max((v[0] / v[1] - 1 for v in rows.values() if v[1] > 0), default=0.0)
-        headline = f"fast-postgres up to {gain * 100:.0f}% faster than ADBC + Arrow"
+        gain = max((v[0] / v[1] for v in rows.values() if v[1] > 0), default=1.0)
+        headline = f"fast-postgres up to {gain * 100:.0f}% of ADBC + Arrow"
         fig = figure(section, rows, PLAYERS, COLORS, CHART_LABELS[section], subtitle,
                      headline, footer, scale, delta_vs=1)
         save(fig, path, len(rows))
