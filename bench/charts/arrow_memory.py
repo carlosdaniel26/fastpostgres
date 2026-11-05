@@ -137,14 +137,14 @@ def main():
     # categorical on x and its grid runs on y; the bytes panel stays lines, where
     # the ring's flat window against the table's working set is the point.
     players = (("ring", ACCENT), ("arrow-batch", GREEN), ("arrow-table", ORANGE))
-    slot = 0.8 / len(players)
+    slot = min(0.8 / len(players), 0.24)  # a bar keeps a bar's width
     peak = 0.0
     for index, (player, color) in enumerate(players):
         xs, values = [], []
         for position, n in enumerate(rows):
             if player not in data[n]:
                 continue
-            xs.append(position - 0.4 + slot * (index + 0.5))
+            xs.append(position + (index - (len(players) - 1) / 2) * slot)
             values.append(data[n][player])
         if not xs:
             continue
@@ -158,7 +158,8 @@ def main():
     ax_rate.set_xlabel("rows read")
     ax_rate.set_ylabel("rows/s")
     ax_rate.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
-    ax_rate.set_xlim(-0.6, len(rows) - 0.4)
+    pad = 1.2 if len(rows) == 1 else 0.0
+    ax_rate.set_xlim(-0.5 - pad, len(rows) - 0.5 + pad)
     if peak:
         ax_rate.set_ylim(0, peak * 1.18)
     theme.declutter(ax_rate, grid="y")
@@ -174,7 +175,7 @@ def main():
                           textcoords="offset points", xytext=(4, -12),
                           fontsize=7, color="#888888", zorder=4)
 
-    slot = 0.8 / len(players)
+    slot = min(0.8 / len(players), 0.24)  # a bar keeps a bar's width
     smallest = None
     peak = 0.0
     for index, (player, color) in enumerate(players):
@@ -184,7 +185,7 @@ def main():
             value = carried.get(n, {}).get(player, {}).get(key)
             if not value:
                 continue
-            xs.append(position - 0.4 + slot * (index + 0.5))
+            xs.append(position + (index - (len(players) - 1) / 2) * slot)
             values.append(value)
         if not xs:
             continue
@@ -197,7 +198,7 @@ def main():
     ax_bytes.set_xticks(range(len(rows)))
     ax_bytes.set_xticklabels([fmt_rows(n) for n in rows], fontsize=8.5)
     ax_bytes.set_xlabel("rows read")
-    ax_bytes.set_xlim(-0.6, len(rows) - 0.4)
+    ax_bytes.set_xlim(-0.5 - pad, len(rows) - 0.5 + pad)
     ax_bytes.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_bytes))
     if peak and smallest:
         ax_bytes.set_ylim(smallest * 0.5, peak * 2.2)  # bars on a log axis

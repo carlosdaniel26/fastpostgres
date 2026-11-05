@@ -148,12 +148,14 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
         vals = [v for tup in data.values() for v in tup if v > 0]
         scale = "log" if vals and max(vals) / min(vals) >= 20 else "linear"
 
-    width = 0.8 / len(series)
+    # a bar keeps a bar's width: the axis grows around a single group rather
+    # than the group filling the panel
+    width = min(0.8 / len(series), 0.26)
     xs = list(range(len(loads)))
     handles = []
     for i, name in enumerate(series):
         vals = [data[load][i] for load in loads]
-        pos = [x - 0.4 + (i + 0.5) * width for x in xs]
+        pos = [x + (i - (len(series) - 1) / 2) * width for x in xs]
         drawn = ax.bar(pos, vals, width=width, color=colors[i], label=labels[i], zorder=3)
         handles.append(drawn[0])
 
@@ -170,6 +172,8 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
     ax.set_xticks(xs)
     ax.set_xticklabels(loads)
     ax.set_xlabel("rows")
+    pad = 1.6 if len(xs) == 1 else 0.0
+    ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
     ax.set_ylabel("rows/s")
     if scale == "log":
         ax.set_yscale("log")

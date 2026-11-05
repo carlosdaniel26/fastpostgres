@@ -105,12 +105,13 @@ def fmt_ms(v, _pos=None):
 def bars(ax, data, workload, fmt, ylabel, log=False):
     sizes = [max(data)]  # the largest size: the smaller one tells the same relation
     labels = [f"{n // 1000000}M" if n >= 1e6 else f"{n // 1000}K" for n in sizes]
-    width = 0.8 / len(SERIES)
+    # a bar keeps a bar's width: the axis grows around a single group
+    width = min(0.8 / len(SERIES), 0.26)
     xs = list(range(len(sizes)))
     handles = []
     for i, (player, color, label) in enumerate(SERIES):
         values = [data[n][workload][player] for n in sizes]
-        pos = [x - 0.4 + (i + 0.5) * width for x in xs]
+        pos = [x + (i - (len(SERIES) - 1) / 2) * width for x in xs]
         drawn = ax.bar(pos, values, width=width, color=color, label=label, zorder=3)
         handles.append(drawn[0])
         texts = []
@@ -126,6 +127,8 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
     ax.set_xticks(xs)
     ax.set_xticklabels(labels)
     ax.set_xlabel("rows")
+    pad = 1.6 if len(xs) == 1 else 0.0
+    ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
     ax.set_ylabel(ylabel)
     if log:
         ax.set_yscale("log")

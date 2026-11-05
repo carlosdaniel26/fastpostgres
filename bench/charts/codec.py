@@ -126,27 +126,23 @@ def plot_format(formats, meta):
     enc = [c["encode_ms"] for c in formats]
     dec = [c["decode_ms"] for c in formats]
 
-    ax_t.bar(xs, enc, width=0.52, color=colors, zorder=3)
-    ax_t.bar(xs, dec, width=0.52, bottom=enc, color=colors, alpha=FADED, zorder=3)
+    ax_t.bar(xs, enc, width=0.30, color=colors, zorder=3)
+    ax_t.bar(xs, dec, width=0.30, bottom=enc, color=colors, alpha=FADED, zorder=3)
     for x, e, d in zip(xs, enc, dec):
-        if e > max(enc) * 0.18:
-            ax_t.text(x, e / 2, f"encode {e:,.1f}", ha="center", va="center",
-                      fontsize=7.5, color="white")
-        else:
-            ax_t.text(x + 0.28, e / 2, f"encode {e:,.1f}", ha="left", va="center", fontsize=7.5)
-        ax_t.text(x, e + d / 2, f"decode {d:,.1f}", ha="center", va="center", fontsize=7.5)
-        ax_t.text(x, e + d, f"{e + d:,.1f} ms", ha="center", va="bottom",
-                  fontsize=8.5)
+        # beside the bar, not inside it: a bar this slim has no room for text
+        ax_t.text(x + 0.17, e / 2, f"encode {e:,.1f}", ha="left", va="center", fontsize=7.4)
+        ax_t.text(x + 0.17, e + d / 2, f"decode {d:,.1f}", ha="left", va="center", fontsize=7.4)
+        ax_t.text(x, e + d, f"{e + d:,.1f} ms", ha="center", va="bottom", fontsize=8.5)
     ax_t.set_xticks(xs)
     ax_t.set_xticklabels(labels)
     ax_t.set_ylabel("ms per 1M rows")
     ax_t.set_title("encode + decode, transport held out (lower is better)", fontsize=9.5)
     ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.20)
-    ax_t.margins(x=0.12)
+    ax_t.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_t)
 
     rss = [c["rss_kb"] / 1024 for c in formats]
-    ax_m.bar(xs, rss, width=0.52, color=colors, zorder=3)
+    ax_m.bar(xs, rss, width=0.30, color=colors, zorder=3)
     for x, c, value in zip(xs, formats, rss):
         ax_m.text(x, value, f"{value:,.0f} MB\ncopies {c['copies']}", ha="center",
                   va="bottom", fontsize=8, linespacing=1.25)
@@ -155,7 +151,7 @@ def plot_format(formats, meta):
     ax_m.set_ylabel("peak RSS, MB")
     ax_m.set_title("memory and copies", fontsize=9.5)
     ax_m.set_ylim(0, max(rss) * 1.30)
-    ax_m.margins(x=0.15)
+    ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
 
     fig.suptitle("Format cost: the same rows, encoded and decoded", fontsize=12.5, y=0.975)
@@ -182,7 +178,7 @@ def plot_transport(pairs, meta):
 
     # throughput: one group per payload, one bar per transport
     xs = list(range(len(payloads)))
-    width = 0.36
+    width = 0.30
     cpu = {t: [cell(p, t).get("cpu_user_ms", 0) + cell(p, t).get("cpu_sys_ms", 0)
                for p in payloads] for t in transports}
     for i, transport in enumerate(transports):
@@ -194,7 +190,7 @@ def plot_transport(pairs, meta):
         for px, value in zip(pos, values):
             ax_r.text(px, value, f"{value:.2f} GB/s", ha="center", va="bottom", fontsize=8)
     ax_r.set_xticks(xs)
-    ax_r.set_xticklabels([FORMAT_LABELS.get(p, p) + " payload" for p in payloads])
+    ax_r.set_xticklabels([FORMAT_LABELS.get(p, p) + "\npayload" for p in payloads])
     ax_r.set_ylabel("GB/s")
     # CPU goes in the title: a per-bar third line collided with the neighbouring bar
     cpu_note = " · ".join(
@@ -206,7 +202,7 @@ def plot_transport(pairs, meta):
         fontsize=9.5,
     )
     ax_r.set_ylim(0, max(cell(p, t)["gb_per_s"] for p in payloads for t in transports) * 1.18)
-    ax_r.margins(x=0.14)
+    ax_r.set_xlim(-0.8, len(payloads) - 0.2)
     theme.legend(ax_r, loc="upper right", fontsize=8)
     theme.declutter(ax_r)
 
@@ -262,8 +258,8 @@ def plot_footprint(formats, meta):
     payload = [c["payload_bytes"] / 2**20 for c in formats]
     rss = [c["rss_kb"] / 1024 for c in formats]
     extra = [max(r - p, 0.0) for r, p in zip(rss, payload)]
-    ax_m.bar(xs, payload, width=0.5, color=colors, zorder=3)
-    ax_m.bar(xs, extra, width=0.5, bottom=payload, color=colors, alpha=FADED, zorder=3)
+    ax_m.bar(xs, payload, width=0.30, color=colors, zorder=3)
+    ax_m.bar(xs, extra, width=0.30, bottom=payload, color=colors, alpha=FADED, zorder=3)
     for x, p, r in zip(xs, payload, rss):
         ax_m.text(x, r, f"{r:,.0f} MB\n{r / p:.1f}× the payload", ha="center",
                   va="bottom", fontsize=8, linespacing=1.25)
@@ -272,7 +268,7 @@ def plot_footprint(formats, meta):
     ax_m.set_ylabel("peak RSS, MB")
     ax_m.set_title("solid = payload, faded = held on top of it", fontsize=9.5)
     ax_m.set_ylim(0, max(rss) * 1.30)
-    ax_m.margins(x=0.18)
+    ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
 
     # copies by stage: one row per (cell, stage), zero counts annotated
@@ -295,7 +291,7 @@ def plot_footprint(formats, meta):
 
     fig.suptitle("Footprint of each approach: memory and copies", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one process, no transport"))
-    fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.14, wspace=0.55)
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.20, wspace=0.55)
     return fig
 
 
