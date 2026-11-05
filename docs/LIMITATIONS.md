@@ -62,8 +62,8 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 | | fastpostgres | ADBC + Arrow |
 |---|---|---|
-| Python rows, 100K–10M | 2.6–3.0× faster | baseline (Arrow → `to_pylist`) |
-| columnar + one sum | 3.5–3.6× faster | Arrow record batches |
+| Python rows, 100K–10M | 2.7–3.1× faster | baseline (Arrow → `to_pylist`) |
+| columnar + one sum | 3.7–3.8× faster | Arrow record batches |
 | what crosses the wire | nothing: the executor's tuple bytes are written into the reader's address space | libpq binary/text, then converted into Arrow buffers |
 | ecosystem | custom columnar frame; numpy/pandas adapters | Arrow, parquet, pandas, polars, duckdb |
 | portability | Linux, same host, server extension | any OS, any network, many databases |
@@ -75,9 +75,9 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 | path | rows/s | use it when |
 |---|---|---|
-| four processes, DBAPI | 9.05M aggregate | one process cannot keep up |
-| `stream()` + numpy | 7.97M | you want numbers, not rows |
-| DBAPI / `core` | 3.79M | you want Python tuples |
+| four processes, DBAPI | 9.66M aggregate | one process cannot keep up |
+| `stream()` + numpy | 8.71M | you want numbers, not rows |
+| DBAPI / `core` | 4.10M | you want Python tuples |
 
 ## When not to use this
 
@@ -127,9 +127,9 @@ clean stamp.
 repeated queries; this removes *delivery* on every query, and the two rank by
 workload shape. Measured against PgCache, a CDC-maintained result cache, in
 [`fastpostgres-vs-pgcache.log`](../bench/results/fastpostgres-vs-pgcache.log): a cached aggregate
-is 56× faster than the ring at 1M rows — the executor is the cost, and no
-transport fixes that. A cached 1M-row result is the other way round: 1.42M rows/s
-against 3.79M on the ring, and a hit costs what its cold fill costs, because a hit
+is 61× faster than the ring at 1M rows — the executor is the cost, and no
+transport fixes that. A cached 1M-row result is the other way round: 1.44M rows/s
+against 3.81M on the ring, and a hit costs what its cold fill costs, because a hit
 still ships every row through the socket and builds every Python object, while
 this path never builds them twice. Method and caveats in
 [`PG-CACHE.md`](../bench/PG-CACHE.md).
@@ -139,7 +139,7 @@ this path never builds them twice. Method and caveats in
 [`fastpostgres-vs-pgcache-memory.log`](../bench/results/fastpostgres-vs-pgcache-memory.log)): one
 budget M on both sides, the ring's transfer buffer against the cache's own
 memory. Where the cache fits, the ranking is the same — at 1 GiB, the aggregate
-is 1.229 ms against the ring's 57.628 ms and the scan 1.45M against 3.87M rows/s.
+is 1.177 ms against the ring's 57.403 ms and the scan 1.47M against 3.89M rows/s.
 What the budget bought the ring above ~one batch is nothing (its numbers are flat
 from an 8 MiB budget up, and its segments grow 128× across the sweep), while
 the cache's container is OOM-killed at 8 MiB and 64 MiB before it can serve.

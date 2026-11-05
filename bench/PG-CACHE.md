@@ -70,49 +70,49 @@ Rows/s for the two row-returning workloads, ms/read for the aggregate, median of
 
 | 100K | fastpostgres | pgcache (hit) |
 |---|---|---|
-| large, rows/s | **5.81M** | 1.42M |
-| small, ms/read | 6.256 | **1.186** |
-| through, rows/s | **5.74M** | 1.87M |
+| large, rows/s | **3.51M** | 1.38M |
+| small, ms/read | 6.156 | **1.278** |
+| through, rows/s | **3.48M** | 1.78M |
 
 | 1M | fastpostgres | pgcache (hit) |
 |---|---|---|
-| large, rows/s | **6.35M** | 1.47M |
-| small, ms/read | 62.533 | **1.228** |
-| through, rows/s | **5.86M** | 1.80M |
+| large, rows/s | **3.81M** | 1.44M |
+| small, ms/read | 67.458 | **1.099** |
+| through, rows/s | **3.90M** | 1.76M |
 
 The two regimes, in one line each:
 
 - **A large result does not want a cache.** A cache hit still ships the cached
   rows from the cache database through the proxy to the client, and the client
   still parses them and builds the same Python tuples; the ring never crosses a
-  socket. At 1M rows the hit is **1.47M rows/s against 6.35M on the ring** — 4.3×
-  slower — and it costs what the cold fill costs (680 ms against the 620.8 ms
+  socket. At 1M rows the hit is **1.44M rows/s against 3.81M on the ring** — 2.6×
+  slower — and it costs what the cold fill costs (694 ms against the 605.3 ms
   below): the cache pays to ship the rows either way, so on a large result it is
   slower than not caching at all. Forwarding the same rows uncached is faster
-  still: 1.80M rows/s.
+  still: 1.76M rows/s.
 - **A small expensive result wants the cache and nothing else.** The aggregate
-  hit is a materialized result: **1.228 ms against 62.533 ms** on the ring at 1M
-  rows, and the gap widens with n — 5.3× at 100K. This is the workload a result
+  hit is a materialized result: **1.099 ms against 67.458 ms** on the ring at 1M
+  rows, and the gap widens with n — 4.8× at 100K. This is the workload a result
   cache exists for, and no transport fixes it — the executor is the cost.
 
 ## What the cache costs
 
 | 1M rows, one read | pgcache | fastpostgres |
 |---|---|---|
-| fill, large (cold cache) | 620.820 ms | **157.565 ms** |
-| fill, small (cold cache) | 162.371 ms | **62.533 ms** |
-| warm-up to a stable hit, large | 17 reads / 21.9 s | — |
+| fill, large (cold cache) | 605.312 ms | **262.429 ms** |
+| fill, small (cold cache) | 186.889 ms | **67.458 ms** |
+| warm-up to a stable hit, large | 18 reads / 23.3 s | — |
 | warm-up to a stable hit, small | 5 reads / 2.1 s | — |
 
-- **A cold miss on the aggregate costs ~2.6× the ring read** at 1M rows — 30× at
+- **A cold miss on the aggregate costs ~2.8× the ring read** at 1M rows — 20× at
   100K: the proxy forwards *and* populates the cache, so the first reader pays
   for both.
-- **The large workload's cache never pays back.** Its fill (620.8 ms) is already
-  at its hit (~680 ms), and both are ~4× the ring.
-- **Populating 1M rows took 17 reads and 21.9 s** before the hit held still —
+- **The large workload's cache never pays back.** Its fill (605.3 ms) is already
+  at its hit (~694 ms), and both are ~2.3–2.6× the ring.
+- **Populating 1M rows took 18 reads and 23.3 s** before the hit held still —
   population plus the replication stream settling on a table that was just built.
 - **The pass-through tax is the hop and the socket.** Views are never cached:
-  1.80M rows/s against 5.86M on the ring at 1M rows.
+  1.76M rows/s against 3.90M on the ring at 1M rows.
 
 ## The same memory budget on both sides
 
@@ -138,15 +138,15 @@ using, what is registered, whether registration is throttled. The record is
 
 | 1M rows, one read | ring, segments of M/2 | pgcache, capped at M |
 |---|---|---|
-| M = 8 MiB | scan 7.65M rows/s, aggregate 64.170 ms | **does not run**: the container is OOM-killed |
-| M = 64 MiB | scan 6.78M rows/s, aggregate 61.546 ms | **does not run**: the container is OOM-killed |
-| M = 256 MiB | scan 6.74M rows/s, aggregate 61.638 ms | scan 1.85M rows/s, aggregate 27.727 ms — budget 204.8 MiB, using 245.9 MB, registered 0, throttled 1, every rep a miss |
-| M = 1 GiB | scan 6.53M rows/s, aggregate 55.776 ms | scan 1.47M rows/s, aggregate 1.117 ms — budget 819.2 MiB, using 566 MB, registered 2, throttled 0, a hit |
+| M = 8 MiB | scan 4.25M rows/s, aggregate 64.355 ms | **does not run**: the container is OOM-killed |
+| M = 64 MiB | scan 3.84M rows/s, aggregate 63.903 ms | **does not run**: the container is OOM-killed |
+| M = 256 MiB | scan 3.75M rows/s, aggregate 63.678 ms | scan 1.75M rows/s, aggregate 26.921 ms — budget 204.8 MiB, using 251.1 MB, registered 0, throttled 1, every rep a miss |
+| M = 1 GiB | scan 3.89M rows/s, aggregate 57.403 ms | scan 1.47M rows/s, aggregate 1.177 ms — budget 819.2 MiB, using 571.8 MB, registered 2, throttled 0, a hit |
 
 Four things fall out of it:
 
 - **A transfer buffer is a window; a cache budget is a working set.** The ring's
-  numbers move −15% across the whole sweep — 7.65M to 6.53M rows/s on the scan —
+  numbers move −8% across the whole sweep — 4.25M to 3.89M rows/s on the scan —
   and that is cross-cell drift, not the buffer: the segment grows 4 MiB → 512 MiB
   (128×) and every cell lands inside the run's own spread. One batch of this shape
   is ~6–11 MB, and past a batch the ring is the executor's speed. The cache's
@@ -155,18 +155,18 @@ Four things fall out of it:
 - **Below its own footprint, the cache does not exist.** PgCache is a proxy plus
   an embedded PostgreSQL: at 8 and 64 MiB the container is OOM-killed before it
   can serve anything. At 256 MiB it runs, but the budget it resolves (204.8 MiB,
-  80% of the cap by its own design) is under what it is already using (245.9 MB),
+  80% of the cap by its own design) is under what it is already using (251.1 MB),
   so registration is throttled, nothing registers, the warm phase never settles
-  (111 reads / 121 s on the scan, 228 / 120 s on the aggregate) and every timed
+  (106 reads / 120 s on the scan, 227 / 120 s on the aggregate) and every timed
   rep is a miss. The ring, handed the same bytes, is unchanged.
 - **Where the cache fits, the ranking is the one above.** At 1 GiB the cache
   reproduces the default-knob run: the scan at 1.47M rows/s against the ring's
-  6.53M — the same 4.3–4.4× — and the aggregate at 1.117 ms against 55.776 ms,
-  ~50×, matching the 1.228/62.533 of the committed log. Budget does not change
+  3.89M — the same 2.6× — and the aggregate at 1.177 ms against 57.403 ms,
+  ~49×, matching the 1.099/67.458 of the committed log. Budget does not change
   which side wins which shape; it changes whether the cache can play.
 - **Even starved, the proxy's miss path is not the ring's execution.** At 256 MiB
-  every rep is counted a *miss*, yet the aggregate comes back at 27.727 ms against
-  the ring's 61.638 ms for the same SQL. The log records what the counters said and
+  every rep is counted a *miss*, yet the aggregate comes back at 26.921 ms against
+  the ring's 63.678 ms for the same SQL. The log records what the counters said and
   what the clock said; why a miss beats the ring's worker (the proxy's forward
   path, the plan the origin picks when it is reached that way) is PgCache's to
   explain, not this log's.
@@ -182,7 +182,7 @@ Four things fall out of it:
   PgCache has no shared-memory or unix-socket transport (its shared memory is the
   extension's invalidation index in the cache PostgreSQL, not a way to hand bytes
   to the client). The repo's own transport matrix prices the best case a socket
-  could reach: 11.18 GB/s over shm against 6.93 GB/s over a unix socket.
+  could reach: 11.04 GB/s over shm against 7.14 GB/s over a unix socket.
 - No plain-socket baseline: the cache is measured against the ring, which is the
   fastest read this host has, not against a driver.
 - **The cache is client-dependent.** With this pinned image, an Arrow client
@@ -210,7 +210,7 @@ Four things fall out of it:
   nothing in any of them (`memo_bytes` 0, `memo_hits` 0): the hits measured here
   are served from the cache database, so the memo never became a factor.
 - The sweep is four budgets, one shape, 1M rows, three reps per cell, one run.
-  The ring's own line drifts ~15% from the first cell to the last (7.65M → 6.53M
+  The ring's own line drifts ~8% from the first cell to the last (4.25M → 3.89M
   rows/s on the scan) — the page cache's state differs between the cell before
   the proxy ever ran and the ones after it populated a 1M-row copy — so read the
   ranking, not the digits. The cache's floor is bracketed by the ladder, not

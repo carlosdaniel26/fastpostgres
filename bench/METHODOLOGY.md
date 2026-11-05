@@ -8,9 +8,9 @@ the benchmark and the record of its threats to validity.
 
 | claim | evidence | command |
 |---|---|---|
-| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (2.6–3.0×) | `just bench` |
-| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.5–3.6×) | `just bench` |
-| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (2.9–3.2× and 3.3–3.5×) | `SHAPE=mixed just bench` |
+| fast-postgres returns Python rows faster than ADBC + Arrow does | TUPLE READ in `bench/results/fastpostgres-vs-arrow.log` (2.7–3.1×) | `just bench` |
+| the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.7–3.8×) | `just bench` |
+| the ranking survives a harder data shape (NULLs, long text, non-ASCII) | the same two sections in `bench/results/fastpostgres-vs-arrow-mixed.log` (2.8–3.4× and 3.2–4.0×) | `SHAPE=mixed just bench` |
 | the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
 ## Systems under test

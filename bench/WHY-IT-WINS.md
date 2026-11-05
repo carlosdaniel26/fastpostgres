@@ -34,18 +34,18 @@ rows):
 
 | rows | this repo | ADBC + Arrow | difference |
 |---|---|---|---|
-| 100K | 6.42M rows/s | 1.28M rows/s | **+401%** |
-| 1M | 7.19M rows/s | 1.27M rows/s | **+467%** |
-| 10M | 7.25M rows/s | 1.27M rows/s | **+472%** |
+| 100K | 3.70M rows/s | 1.36M rows/s | **+172%** |
+| 1M | 4.07M rows/s | 1.33M rows/s | **+206%** |
+| 10M | 4.06M rows/s | 1.32M rows/s | **+208%** |
 
 **Query level, columnar output, no Python objects on either side** (one column
 summed in place — the `ZERO-COPY READ` rows):
 
 | rows | this repo | ADBC + Arrow | difference |
 |---|---|---|---|
-| 100K | 8.20M rows/s | 2.23M rows/s | **+269%** |
-| 1M | 8.25M rows/s | 2.28M rows/s | **+261%** |
-| 10M | 8.32M rows/s | 2.18M rows/s | **+281%** |
+| 100K | 8.78M rows/s | 2.35M rows/s | **+274%** |
+| 1M | 8.77M rows/s | 2.32M rows/s | **+278%** |
+| 10M | 8.60M rows/s | 2.35M rows/s | **+266%** |
 
 **Format only**, 1M rows, transport held out entirely, one process
 (the `fpcolumn` vs `arrow-ipc` cells):
@@ -53,24 +53,24 @@ summed in place — the `ZERO-COPY READ` rows):
 | | this repo | Arrow IPC |
 |---|---|---|
 | payload | 47.2 MiB | 45.7 MiB |
-| encode | **3.5 ms** (14.3 GB/s) | 7.5 ms (6.4 GB/s) |
-| decode + six aggregates | **1.8 ms** | 1.9 ms |
-| encode + decode | **5.2 ms** | 9.3 ms |
+| encode | **3.3 ms** (15.0 GB/s) | 7.7 ms (6.2 GB/s) |
+| decode + six aggregates | **1.8 ms** | 1.8 ms |
+| encode + decode | **5.1 ms** | 9.5 ms |
 | copies of the payload | **1** | 6 |
-| peak RSS | **99 MB** (2.1× the payload) | 383 MB (8.4×) |
+| peak RSS | **101 MB** (2.1× the payload) | 399 MB (8.7×) |
 
 **Transport only**, the *same payload bytes*, codec out of the loop:
 
 | | shared memory | UNIX socket |
 |---|---|---|
-| throughput | **11.00 / 10.62 GB/s** | 6.81 / 7.01 GB/s |
-| median latency | **3.5 µs** | 31.8 / 31.8 µs |
-| p99 latency | **6.0 / 6.2 µs** | 404.6 / 393.9 µs |
-| CPU, producer + consumer | **4.6 / 4.6 ms** | 7.3 / 6.9 ms |
+| throughput | **11.04 / 10.54 GB/s** | 7.14 / 6.51 GB/s |
+| median latency | **3.6 / 4.5 µs** | 32.0 / 36.5 µs |
+| p99 latency | **6.5 / 8.6 µs** | 367.2 / 383.2 µs |
+| CPU, producer + consumer | **4.6 / 4.6 ms** | 7.0 / 7.4 ms |
 | copies | **1** | 2 |
 
-Read together: at the query level the gap is 3.6–5.7×, at the format level it is
-1.8×, and at the transport level it is 1.5–1.6× on throughput and ~9× on median
+Read together: at the query level the gap is 2.7–3.8×, at the format level it is
+1.9×, and at the transport level it is 1.5–1.6× on throughput and 8–9× on median
 latency. The factors multiply rather than overlap — which is what the isolation
 matrix was built to show, and what the rest of this document explains
 mechanism by mechanism.
@@ -125,7 +125,7 @@ aggregates / Python objects
 ```
 
 Copies of the payload in the codec cell: **6** — 2 in the encode path, 1 to the
-sink, 3 for the aggregate kernels' temporaries. Peak RSS **8.4× the payload**,
+sink, 3 for the aggregate kernels' temporaries. Peak RSS **8.7× the payload**,
 because dataset, Arrow buffers, IPC stream and kernel temporaries are alive at
 once, where the frame is built into the buffer it ships.
 
@@ -141,12 +141,12 @@ Splitting the format column, per 1M rows:
 
 | stage | this repo | Arrow IPC | why |
 |---|---|---|---|
-| encode | 3.5 ms | 7.5 ms | **this is the real format gap**: 2.2× |
-| decode | 1.8 ms | 1.9 ms | a scan; both are memory-bound, 6% apart |
+| encode | 3.3 ms | 7.7 ms | **this is the real format gap**: 2.3× |
+| decode | 1.8 ms | 1.8 ms | a scan; both are memory-bound, level |
 
 The decode is *not* where the formats separate, and saying otherwise would be
 dishonest: both sides read ~25 MB of numeric columns and offset tables and are
-within 6% of each other. The separation is in encode (writing the bytes out)
+within 1% of each other. The separation is in encode (writing the bytes out)
 and, at query level, in the transport (moving them).
 
 That 2.2× encode gap is worth dwelling on, because the project found it the hard
@@ -161,7 +161,7 @@ investigation showed the harness, not the formats, was responsible:
 
 Both are fixed. Arrow's numbers barely moved (7.3 → 7.5 ms). That asymmetry is
 the evidence: the gap was on this side of the harness, and once removed, the
-remaining 2.2× is the format's own structure — three copies of the same bytes
+remaining 2.3× is the format's own structure — three copies of the same bytes
 (arrays, stream, sink) against one write into the buffer that ships.
 
 ---
@@ -182,7 +182,7 @@ process. Each hop exists so that the reader on the other side can be anyone.
 
 **Cost:** the frame cannot be reused across queries,
 cannot be compressed, and cannot be encrypted in place. **Evidence:** 1 copy
-against 2 in the encode path; 14.3 GB/s against 6.4 GB/s.
+against 2 in the encode path; 15.0 GB/s against 6.2 GB/s.
 
 ### 4.2 The layout is fixed and known on both ends, so the reader walks it
 
@@ -222,7 +222,7 @@ memory-shaped (a stream); the row frame is instruction-shaped (a walk).
 
 What the cache counters do **not** support is the flattering version of the
 story. Sweeping the payload across L1, L3 and 1.5× L3 sizes (44 KiB → 47 MiB,
-a 1133× range) moves the columnar path from 11.4 to 17.2 cycles/row: it is a
+a 1133× range) moves the columnar path from 10.5 to 16.7 cycles/row: it is a
 sequential stream the prefetcher keeps fed, not a working set that fits in cache.
 At 1M rows about 1.2 lines per row come from L3 or beyond, and it still
 costs 17 cycles — the flatness is the result, not residency. The meter is
@@ -251,7 +251,7 @@ ADBC's public API, not Arrow's format, and the document would be dishonest
 without saying so.
 
 The columnar comparison removes the Python layer on both sides and the gap is
-still 3.6× (8.25M against 2.28M rows/s). Two numbers explain it, both from this
+still 3.8× (8.77M against 2.32M rows/s). Two numbers explain it, both from this
 repository's own pricer: `read_rows: 309 cycles/row over 400000 rows (decode
 307.0, frame+desc+list 2.0)` — about 81 ns per row at 3.8 GHz for six columns,
 i.e. ~13 ns per value, which is the cost of *allocating and filling one Python
@@ -275,9 +275,9 @@ is a semaphore doorbell pair (publish, ack — the ring's own mechanism, see
 `transport_bench.cpp`) plus the `seq` counter in the segment header. Both
 transports pay for wakeups; only one pays the kernel for every byte.
 
-Measured on identical bytes: **11.18 against 6.93 GB/s**, **3.6 against 32.8 µs
-median**, **6.1 against 411 µs p99**, **1 copy against 2**, and the socket's cost
-lands mostly on the consumer (**4.5 against 2.3 ms of CPU** — the copy plus the
+Measured on identical bytes: **11.04 against 7.14 GB/s**, **3.6 against 32.0 µs
+median**, **6.5 against 367 µs p99**, **1 copy against 2**, and the socket's cost
+lands mostly on the consumer (**4.2 against 2.4 ms of CPU** — the copy plus the
 wakeups to drain the kernel buffer). The cache counters are worth quoting here for
 the opposite reason: they cannot see this advantage at all, because the socket's
 copy happens in the kernel where user-space events do not reach. That blind spot
@@ -285,9 +285,9 @@ is itself the finding — user space sees shared memory touch the bytes twice an
 the socket once, and the second touch is the copy.
 
 The tail deserves its own sentence, because it is easy to misread as noise.
-`p99 == max` in every transport cell, and the socket's median (32.8 µs) sits far
-below its mean (41.1 µs): half the chunks arrive in 14–33 µs and the other half
-wait ~410 µs. That is *one chunk in flight* working as designed — a chunk that
+`p99 == max` in every transport cell, and the socket's median (32 µs) sits far
+below its mean (46 µs): half the chunks arrive in 13–32 µs and the other half
+wait hundreds of microseconds. That is *one chunk in flight* working as designed — a chunk that
 arrives while the consumer is busy waits for the consumer. It is the price of the
 ack protocol from 4.3, and it is why the shared-memory number is not just "the
 socket with a faster copy".
@@ -401,11 +401,11 @@ store, which it did, and then removed.
 
 | mechanism | what it buys | what it costs |
 |---|---|---|
-| write once into the shipping buffer | 1 copy, 2.5× encode | no reuse across frames, no compression, no in-place encryption |
+| write once into the shipping buffer | 1 copy, 2.3× encode | no reuse across frames, no compression, no in-place encryption |
 | fixed layout, walked not parsed | no metadata parse, 28-byte header | version lock; unknown kinds refused; 13-kind vocabulary; reader must be compiled for the frame |
 | decode as a view | free decode, cache-warm aggregates | lifetime protocol instead of a copy; producer must wait for the consumer's ack |
 | one language boundary, not three | the per-value Python cost is paid once, on bytes already in hand | the client must be native code; Python-level conveniences cost extra |
-| shared memory transport | 1.6× throughput, 9× median, 1 copy | same host only; the segment is the interface, so its permissions are the boundary; crash/lifetime handling is yours; not a public surface |
+| shared memory transport | 1.5–1.6× throughput, 8–9× median, 1 copy | same host only; the segment is the interface, so its permissions are the boundary; crash/lifetime handling is yours; not a public surface |
 | producer inside the server | no conversion at all | extension install; per-major-version OID pinning; per-version testing |
 
 The complete list of what is deliberately not supported — remote clients,
@@ -446,7 +446,7 @@ method and the "what the first run was actually measuring" section,
 The predictions that would falsify this document, in order of how easy they are
 to test:
 
-1. **Make the consumer slow** (add work per chunk). The socket's ~410 µs second
+1. **Make the consumer slow** (add work per chunk). The socket's ~370 µs second
    mode should grow faster than shared memory's, because every socket chunk pays
    a kernel copy of its bytes into the reader's buffer and shared memory's pays
    only the doorbell.

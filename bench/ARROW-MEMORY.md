@@ -34,9 +34,9 @@ per-row Python objects.
 
 | rows/s | 1M | 5M | 10M |
 |---|---|---|---|
-| `ring` (`stream()` + numpy) | **9.54M** | **8.90M** | **8.82M** |
-| `arrow-batch` (reader + `compute`) | 2.38M | 2.38M | 2.38M |
-| `arrow-table` (table + `compute`) | 2.32M | 2.32M | 2.32M |
+| `ring` (`stream()` + numpy) | **8.18M** | **7.35M** | **7.39M** |
+| `arrow-batch` (reader + `compute`) | 2.30M | 2.37M | 2.37M |
+| `arrow-table` (table + `compute`) | 2.30M | 2.33M | 2.31M |
 
 | bytes held while the read runs | 1M | 5M | 10M |
 |---|---|---|---|
@@ -47,39 +47,39 @@ per-row Python objects.
 
 | peak RSS of the reader's own process | 1M | 5M | 10M |
 |---|---|---|---|
-| `ring` | 143 MiB | 143 MiB | 143 MiB |
-| `arrow-batch` | 168 MiB | 173 MiB | 172 MiB |
-| `arrow-table` | 192 MiB | 390 MiB | 640 MiB |
+| `ring` | 139 MiB | 137 MiB | 138 MiB |
+| `arrow-batch` | 161 MiB | 166 MiB | 167 MiB |
+| `arrow-table` | 182 MiB | 386 MiB | 637 MiB |
 
 ## What it says
 
 - **The ring pays the same bytes for 1M rows and for 10M.** Its segment is
   512 MiB in every cell of the log and the batch it pulls is ~4.8 MiB per 100k
-  rows, so the process's peak RSS is flat at ~143 MiB: nothing in the read grows
+  rows, so the process's peak RSS is flat at ~138 MiB: nothing in the read grows
   with the result. The buffer is *reserved*, not resident (see below), but the
   reservation is what makes the read one fixed window instead of a growing one.
 - **Arrow's streaming path is bounded too — at the driver's batch size.** The
   record-batch reader holds one batch of 253,722 rows (~11.6 MiB) whatever the
-  result's size, and its RSS moves 168 → 172 MiB across a 10× range of rows.
+  result's size, and its RSS moves 161 → 167 MiB across a 10× range of rows.
 - **Arrow's table path pays the result's size.** 45.7 MiB at 1M rows, 236.9 MiB
-  at 5M, 475.9 MiB at 10M — and its process's peak RSS grows with it (192 → 390 →
-  640 MiB). At 10M rows the table holds ~476 MiB *at once*: the same order as the
+  at 5M, 475.9 MiB at 10M — and its process's peak RSS grows with it (182 → 386 →
+  637 MiB). At 10M rows the table holds ~476 MiB *at once*: the same order as the
   512 MiB the ring reserves for the whole stream and uses ~5 MiB of at a time,
   and one size up it would need more buffer than the ring's budget.
 - **Per row, the two columnar forms cost about the same bytes** — 4.7–4.9 MiB
   per 100k rows on the ring against 4.75–4.8 MiB per 100k rows through ADBC's
   batches, each measured by its own accounting. What this benchmark prices is not
   the format's density but *when* the bytes are held.
-- **The ranking does not move with the row count.** The ring is 3.7–4.0× the two
-  Arrow paths here, in the same range as the 3.6–3.8× the read benchmark
+- **The ranking does not move with the row count.** The ring is 3.1–3.6× the two
+  Arrow paths here, in the same range as the 3.7–3.8× the read benchmark
   publishes at its own defaults: fixing the ring's buffer at 512 MiB, a quarter of
   its default, changes nothing about who wins.
 
 ## What this does not say
 
 - One host, one shape (`bench`), three sizes, three reps, one run; the spread is
-  printed per row in the log (±0.2–1.2%). Two runs of this benchmark put the ring
-  at 8.4M and 9.5M rows/s at 1M rows — a ~10% run-to-run swing on this host — so
+  printed per row in the log (±0.2–3.3%). Two runs of this benchmark put the ring
+  at 8.2M and 9.5M rows/s at 1M rows — a ~15% run-to-run swing on this host — so
   quote the ranking, and the committed log's digits with it.
 - The 512 MiB is **reserved, not resident**: the segment is `ftruncate`d and
   `mmap`'d, and tmpfs allocates only the pages that get written, so what a read

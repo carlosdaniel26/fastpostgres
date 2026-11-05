@@ -36,11 +36,11 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 ## Why FastPostgres
 
-- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks are asked for the same Python tuples, that is 2.6-3.0x ADBC + Arrow, at 100K, 1M and 10M rows.
+- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks are asked for the same Python tuples, that is 2.7-3.1x ADBC + Arrow, at 100K, 1M and 10M rows.
 - **The executor's own tuples.** The row frame carries PostgreSQL's tuples as they lie, one `memcpy` per row, so every type the server can store can be sent; types whose storage is not the wire bytes take the columnar frame instead.
-- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 3.5-3.6x Arrow's `pyarrow.compute` over its own table, on the same column.
+- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 3.7-3.8x Arrow's `pyarrow.compute` over its own table, on the same column.
 - **One wire format, defined once.** Reader and writer share the same header, and the benchmark generator includes it too, so the format cannot drift between them.
-- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 56x, and the ring beats a cached large result 2.7x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
+- **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 61x, and the ring beats a cached large result 2.6x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
 - **One URL.** No new query language, no annotation, no client rewrite: the same SQLAlchemy application, on a driver whose reads take a different road.
 
 ## How it works
@@ -91,26 +91,26 @@ The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreS
 
 | same output: Python tuples | 100K | 1M | 10M |
 |---|---|---|---|
-| FastPostgres (its DBAPI) | 3.61M | 3.99M | 4.02M |
-| ADBC + Arrow, `to_pylist` | 1.37M | 1.31M | 1.31M |
+| FastPostgres (its DBAPI) | 3.70M | 4.07M | 4.06M |
+| ADBC + Arrow, `to_pylist` | 1.36M | 1.33M | 1.32M |
 
 | same output: the columnar form, one column summed in place | 100K | 1M | 10M |
 |---|---|---|---|
-| FastPostgres `stream()` + numpy | 8.11M | 8.23M | 8.07M |
-| ADBC Arrow + `pyarrow.compute` | 2.27M | 2.38M | 2.31M |
+| FastPostgres `stream()` + numpy | 8.78M | 8.77M | 8.60M |
+| ADBC Arrow + `pyarrow.compute` | 2.35M | 2.32M | 2.35M |
 
-That is **2.6-3.0x faster when both build Python tuples** and **3.5-3.6x faster when both consume columnar**. The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first - and, for tuples, converts a second time into Python objects. Comparing FastPostgres's tuples against ADBC's Arrow table would price those two different outputs, not the two transports, which is why neither table above does it.
+That is **2.7-3.1x faster when both build Python tuples** and **3.7-3.8x faster when both consume columnar**. The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first - and, for tuples, converts a second time into Python objects. Comparing FastPostgres's tuples against ADBC's Arrow table would price those two different outputs, not the two transports, which is why neither table above does it.
 
-The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the same two comparisons read **2.9-3.2x** and **3.3-3.5x**: the data slows FastPostgres ~13% and ADBC ~18%, so the ratio holds.
+The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the same two comparisons read **2.8-3.4x** and **3.2-4.0x**: the data slows FastPostgres ~11-15% and ADBC ~17-22%, so the ratio holds.
 
 The same read also reports the rest of what FastPostgres does with its rows, against its own driver read:
 
 | path (1M rows, `bench` shape) | vs the plain driver read |
 |---|---|
-| `stream()` + numpy sum | +111-114% |
+| `stream()` + numpy sum | +113-144% |
 | `fastpostgres.core` (the lean interface) | level with the DBAPI |
-| four processes, DBAPI | +132-140% aggregate (the ring pool and memory bandwidth saturate) |
-| ADBC Arrow + sum, for reference | -36-41% |
+| four processes, DBAPI | +136-150% aggregate (the ring pool and memory bandwidth saturate) |
+| ADBC Arrow + sum, for reference | -35-44% |
 
 ### What each side holds: against Arrow under a fixed buffer
 
@@ -118,9 +118,9 @@ Speed is half of the comparison; memory is the other half. With the ring's trans
 
 | 1M / 5M / 10M rows | rows/s | held while it delivers |
 |---|---|---|
-| FastPostgres `stream()`, one 512 MiB segment | **9.45M / 9.22M / 10.10M** | 512 MiB reserved, ~4.9 MiB in flight per 100k-row batch, flat ~138 MiB RSS |
-| ADBC record-batch reader | 2.40M / 2.40M / 2.43M | one 11.6 MiB Arrow batch, 161-165 MiB RSS |
-| ADBC Arrow table | 2.36M / 2.34M / 2.38M | the whole result: 45.7 / 236.9 / **475.9 MiB**, 183-658 MiB RSS |
+| FastPostgres `stream()`, one 512 MiB segment | **8.18M / 7.35M / 7.39M** | 512 MiB reserved, ~4.8 MiB in flight per 100k-row batch, flat ~138 MiB RSS |
+| ADBC record-batch reader | 2.30M / 2.37M / 2.37M | one 11.5-11.6 MiB Arrow batch, 161-167 MiB RSS |
+| ADBC Arrow table | 2.30M / 2.33M / 2.31M | the whole result: 45.7 / 236.9 / **475.9 MiB**, 182-637 MiB RSS |
 
 A transfer buffer is a window: the ring's is the same 512 MiB whatever the result's size. A table is a working set: at 10M rows ADBC's holds ~476 MiB at once, one size up from the buffer the ring ever spends.
 
@@ -130,12 +130,12 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 
 | 1M rows, the same rows out | FastPostgres | PgCache (hit) |
 |---|---|---|
-| the full scan, rows/s | **3.79M** | 1.42M |
-| count/sums, ms/read | 62.326 | **1.103** |
+| the full scan, rows/s | **3.81M** | 1.44M |
+| count/sums, ms/read | 67.458 | **1.099** |
 
 A cached aggregate is 56x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 2.7x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
-Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 3.87M rows/s against the cache's 1.45M, and the aggregate 1.229 ms cached against 57.628 ms read. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed at 8 MiB and 64 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
+Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 3.89M rows/s against the cache's 1.47M, and the aggregate 1.177 ms cached against 57.403 ms read. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed at 8 MiB and 64 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
 
 ### A published suite's own terms
 
