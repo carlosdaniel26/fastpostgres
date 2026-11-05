@@ -33,14 +33,15 @@ echo "--- reading the table ---"
 cat <<'EOF'
 serial is one connection, back to back: the same road the modes take, so that row
 sits next to their n=1 rows. Each mode is compared against its own n=1 row:
-  threads    the dbapi row path; the decode holds the GIL, so this buys a few
-             percent, not a multiple (bench/NOTES.md: +6..12%)
-  asyncio    the same work with the event loop free and a tier thread per
-             connection — it tracks threads and never blocks the loop
-  columnar   stream() batches reduced with numpy, whose loops release the GIL:
-             N threads on N partitions genuinely run in parallel here
-  processes  one process per worker, separate GILs: the tuple path parallelized
-             the other way, at the price of `workers` background-worker slots
-Every mode accounts for every read — the row paths' `shm` column (reads/reads),
-the columnar mode's cross-worker sum — and `libpq_reads=0` says nothing fell back.
+  columnar   stream() batches reduced with numpy: the array path
+  threads    Cursor.aggregate: sum/count walked in C++ over the segment, no
+             Python object per row — the path that parallelizes on any interpreter
+  asyncio    the same consumption with the event loop free and a tier thread per
+             connection
+  processes  one process per worker, separate GILs, at the price of `workers`
+             background-worker slots
+Tuple reads (execute + fetchall) are deliberately not measured: that is the
+DB-API compatibility path, not how a result is consumed in a hot path.
+Every aggregate read is accounted for by the `shm` column (reads/reads), the
+columnar mode by the cross-worker sum, and `libpq_reads=0` says nothing fell back.
 EOF

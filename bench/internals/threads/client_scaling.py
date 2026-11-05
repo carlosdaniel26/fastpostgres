@@ -1,27 +1,32 @@
-"""The client's own scaling: threads, asyncio and processes, one partition per worker.
+"""The client's own scaling, on the paths a result is actually consumed by.
 
-Runs inside the image, against the entrypoint's PostgreSQL. It measures only
-this client — the same table read, driven five ways:
+Runs inside the image, against the entrypoint's PostgreSQL. One table, five
+settings, each with N workers and one ring (one partition of the shared memory)
+per worker:
 
-  serial    one connection, the reads back to back: the baseline
-  threads   one connection and one thread per worker, the dbapi path; the pool
-            hands each thread its own ring (its own partition of shared memory)
-  asyncio   one AsyncConnection per task on one event loop; each connection's
-            tier thread drives its own ring, so the loop is never blocked
-  columnar  the same threads over the zero-copy path: stream() batches reduced
-            with numpy, whose loops release the GIL — this is where N threads on
-            N partitions run in parallel instead of queueing on the decode
-  processes one process per worker, each with its own rings and its own GIL
+  serial     one connection, back to back: the baseline
+  columnar   N threads, stream() batches reduced with numpy — the array path
+  threads    N threads, Cursor.aggregate: stream + sum/count inside the
+             extension, no Python object per row (the C++ reduce)
+  asyncio    N AsyncConnections on one event loop, await aggregate — the loop
+             stays free while each connection's tier thread drives its own ring
+  processes  one process per worker, each with its own rings and its own GIL
 
-The unit is a read: execute + fetchall of `--rows` rows for the row paths, a
-streamed reduction for the columnar one. Each worker runs `--reads` of them, and
-the timed region is the workers' own loops — the connections are made, warmed and
-closed outside it. Every worker's row count, and every columnar worker's sum,
-must match what the table promises, and the row paths' `shm` column must account
-for every read: a silent libpq fallback would show up there first.
+Python-tuple materialization (`execute` + `fetchall`) is deliberately not
+measured: it is the DB-API compatibility path, not how a result is consumed in a
+hot path, and it is GIL-bound, so it competes on ergonomics rather than
+throughput. The historical numbers are in `bench/NOTES.md`, where they explain
+why the free-threaded build exists.
+
+The unit is one read of `--rows` rows, reduced either by numpy or by the C++
+aggregate; each worker runs `--reads` of them and the timed region is the
+workers' own loops. Every worker must have counted the whole table and every
+worker's sum must agree, and every aggregate read must have been served by the
+ring (`libpq_reads=0`): a silent fallback would show up in the `shm` column.
 
 Usage: python3 bench/internals/threads/client_scaling.py [--rows 100000]
-           [--reads 5] [--max-workers 6] [--mode threads|asyncio|columnar|processes|serial|all]
+           [--reads 5] [--max-workers 6]
+           [--mode threads|asyncio|columnar|processes|serial|all]
 """
 import argparse
 import asyncio
@@ -43,12 +48,14 @@ BENCH_ROW = (
     "g::int4 AS id, ('SKU-' || g)::text AS sku, ('Product ' || g)::text AS name, "
     "(g * 0.5)::float8 AS price, (g % 500)::int4 AS stock, (g % 2 = 0)::bool AS active"
 )
+# The reduction every aggregate-mode run applies: whole-table count and sum.
+PLAN = {"n": ("count_all", None), "s": ("sum", "price")}
 
 
 def build_table(rows):
     """The benchmark's six-column row, in a table: the reads must cost the
-    transport and the decode, not the executor's per-row work — the same table
-    shape the rival benchmark reads, so these rates sit next to NOTES.md's."""
+    transport and the consumption, not the executor's per-row work — the same
+    table shape the rival benchmark reads, so these rates sit next to NOTES.md's."""
     conn = dbapi.connect(CONNINFO)
     try:
         cur = conn.cursor()
@@ -67,66 +74,44 @@ def drop_table():
         conn.close()
 
 
-def read_all(cur, sql, reads):
-    """`reads` sequential reads on one cursor: (rows, first id, last id)."""
+def reduce_reads(cur, sql, reads, size):
+    """`reads` C++ reductions on one cursor: (rows counted, last sum)."""
     total = 0
-    first = last = None
+    last = None
     for _ in range(reads):
-        cur.execute(sql)
-        rows = cur.fetchall()
-        total += len(rows)
-        if rows:
-            first = rows[0][0]
-            last = rows[-1][0]
-    return total, first, last
+        got = cur.aggregate(sql, PLAN, size=size)
+        total += got["n"]
+        last = got["s"]
+    return total, last
 
 
-def cpu_model():
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if line.startswith("model name"):
-                    return line.split(":", 1)[1].strip()
-    except OSError:
-        pass
-    return "unknown"
-
-
-def cpu_ghz():
-    try:
-        with open("/proc/cpuinfo") as f:
-            values = [float(line.split(":", 1)[1]) for line in f if line.startswith("cpu MHz")]
-        return round(max(values) / 1000, 1) if values else "unknown"
-    except (OSError, ValueError):
-        return "unknown"
-
-
-def check(what, total, first, last, served, reads, rows):
-    """Every worker must have read the whole table, on the ring."""
+def check(what, total, last, served, reads, rows):
+    """Every worker must have counted the whole table, on the ring."""
     if total != reads * rows:
-        raise SystemExit(f"{what}: read {total} rows, expected {reads * rows}")
-    if (first, last) != (1, rows):
-        raise SystemExit(f"{what}: read id {first}..{last}, expected 1..{rows}")
+        raise SystemExit(f"{what}: counted {total} rows, expected {reads * rows}")
     if served is not None and served != reads:
         raise SystemExit(f"{what}: {served}/{reads} reads served by the ring (libpq fallback?)")
+    if last is None:
+        raise SystemExit(f"{what}: no batch arrived")
 
 
-def measure_serial(sql, reads, rows):
+def measure_serial(sql, reads, rows, size):
     conn = dbapi.connect(CONNINFO)
     try:
         cur = conn.cursor()
         before = conn.shm_reads
         start = time.perf_counter()
-        total, first, last = read_all(cur, sql, reads)
+        total, last = reduce_reads(cur, sql, reads, size)
         elapsed = time.perf_counter() - start
         served = conn.shm_reads - before
     finally:
         conn.close()
-    check("serial", total, first, last, served, reads, rows)
-    return elapsed
+    check("serial", total, last, served, reads, rows)
+    return elapsed, last
 
 
-def measure_threads(sql, workers, reads, rows):
+def _threaded(what, workers, reads, rows, reduce_one):
+    """`workers` threads, one connection each; `reduce_one(conn)` does the reads."""
     barrier = threading.Barrier(workers + 1)
     results = [None] * workers
     errors = []
@@ -135,16 +120,8 @@ def measure_threads(sql, workers, reads, rows):
         try:
             conn = dbapi.connect(CONNINFO)
             try:
-                cur = conn.cursor()
-                barrier.wait()
-                # timed inside the worker: the barrier's release races a start
-                # stamp the launcher takes, and one read slipping out of the
-                # window is 20% of a five-read setting
-                before = conn.shm_reads
-                start = time.perf_counter()
-                total, first, last = read_all(cur, sql, reads)
-                elapsed = time.perf_counter() - start
-                results[i] = (total, first, last, conn.shm_reads - before, elapsed)
+                barrier.wait()  # one start gun; the timing happens inside the worker
+                results[i] = reduce_one(conn)
             finally:
                 conn.close()
         except BaseException as exc:
@@ -157,18 +134,56 @@ def measure_threads(sql, workers, reads, rows):
     threads = [threading.Thread(target=work, args=(i,)) for i in range(workers)]
     for t in threads:
         t.start()
-    barrier.wait()  # all workers up: one start gun for the timed region
+    barrier.wait()
     for t in threads:
         t.join()
 
     if errors:
-        raise SystemExit("threads: " + "; ".join(errors))
-    for i, (total, first, last, served, _elapsed) in enumerate(results):
-        check(f"threads n={workers} worker {i}", total, first, last, served, reads, rows)
-    return max(r[4] for r in results)  # the slowest worker: the run's wall time
+        raise SystemExit(f"{what}: " + "; ".join(errors))
+    for i, (total, last, served, _elapsed) in enumerate(results):
+        check(f"{what} worker {i}", total, last, served, reads, rows)
+    sums = {round(r[1], 3) for r in results}
+    if len(sums) != 1:
+        raise SystemExit(f"{what}: the workers' sums disagree: {sorted(sums)}")
+    return max(r[3] for r in results)
 
 
-async def measure_asyncio(sql, workers, reads, rows):
+def aggregate_worker(sql, reads, size):
+    """The timed body of a worker: (rows, sum, shm reads, seconds)."""
+
+    def run(conn):
+        cur = conn.cursor()
+        before = conn.shm_reads
+        start = time.perf_counter()
+        total, last = reduce_reads(cur, sql, reads, size)
+        return total, last, conn.shm_reads - before, time.perf_counter() - start
+
+    return run
+
+
+def measure_threads(sql, workers, reads, rows, size):
+    return _threaded("threads", workers, reads, rows, aggregate_worker(sql, reads, size))
+
+
+def measure_columnar(sql, workers, reads, rows, size):
+    """The array path: stream() + a numpy reduction, whose loops release the GIL."""
+
+    def run(conn):
+        cur = conn.cursor()
+        start = time.perf_counter()
+        total = 0
+        last = None
+        for _ in range(reads):
+            for batch in cur.stream(sql, size=size):
+                prices = np.asarray(batch.columns[3])  # the float8 column, no NULLs
+                total += prices.size
+                last = float(prices.sum())
+        return total, last, None, time.perf_counter() - start
+
+    return _threaded("columnar", workers, reads, rows, run)
+
+
+async def measure_asyncio(sql, workers, reads, rows, size):
     conns = [await aio.connect(CONNINFO) for _ in range(workers)]
     ready = asyncio.Barrier(workers + 1)
     results = [None] * workers
@@ -180,16 +195,13 @@ async def measure_asyncio(sql, workers, reads, rows):
             before = conns[i].stats()["shm_reads"]
             start = time.perf_counter()
             total = 0
-            first = last = None
+            last = None
             for _ in range(reads):
-                await cur.execute(sql)
-                got = await cur.fetchall()
-                total += len(got)
-                if got:
-                    first = got[0][0]
-                    last = got[-1][0]
-            elapsed = time.perf_counter() - start
-            results[i] = (total, first, last, conns[i].stats()["shm_reads"] - before, elapsed)
+                got = await cur.aggregate(sql, PLAN, size=size)
+                total += got["n"]
+                last = got["s"]
+            results[i] = (total, last, conns[i].stats()["shm_reads"] - before,
+                          time.perf_counter() - start)
         except BaseException:
             ready.abort()
             raise
@@ -202,67 +214,15 @@ async def measure_asyncio(sql, workers, reads, rows):
         for conn in conns:
             await conn.close()
 
-    for i, (total, first, last, served, _elapsed) in enumerate(results):
-        check(f"asyncio n={workers} worker {i}", total, first, last, served, reads, rows)
-    return max(r[4] for r in results)
-
-
-def measure_columnar(sql, workers, reads, rows, size):
-    """The zero-copy path: stream() batches reduced with numpy, which releases the GIL.
-
-    Same N-partitions shape as the thread mode; only the consumption changes.
-    Python-object decode queues on the GIL, a numpy loop does not, so this is the
-    row that shows the partitions themselves scale.
-    """
-    barrier = threading.Barrier(workers + 1)
-    results = [None] * workers
-    errors = []
-
-    def work(i):
-        try:
-            conn = dbapi.connect(CONNINFO)
-            try:
-                cur = conn.cursor()
-                barrier.wait()
-                start = time.perf_counter()
-                total = 0
-                last_sum = None
-                for _ in range(reads):
-                    for batch in cur.stream(sql, size=size):
-                        prices = np.asarray(batch.columns[3])  # the float8 column, no NULLs
-                        total += prices.size
-                        last_sum = float(prices.sum())
-                results[i] = (total, last_sum, time.perf_counter() - start)
-            finally:
-                conn.close()
-        except BaseException as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-            try:
-                barrier.abort()
-            except Exception:
-                pass
-
-    threads = [threading.Thread(target=work, args=(i,)) for i in range(workers)]
-    for t in threads:
-        t.start()
-    barrier.wait()  # all workers up: one start gun for the timed region
-    for t in threads:
-        t.join()
-
-    if errors:
-        raise SystemExit("columnar: " + "; ".join(errors))
-    for i, (total, last_sum, _elapsed) in enumerate(results):
-        if total != reads * rows:
-            raise SystemExit(f"columnar worker {i}: reduced {total} rows, expected {reads * rows}")
-        if last_sum is None:
-            raise SystemExit(f"columnar worker {i}: no batch arrived")
+    for i, (total, last, served, _elapsed) in enumerate(results):
+        check(f"asyncio worker {i}", total, last, served, reads, rows)
     sums = {round(r[1], 3) for r in results}
     if len(sums) != 1:
-        raise SystemExit(f"columnar: the workers' sums disagree: {sorted(sums)}")
-    return max(r[2] for r in results)
+        raise SystemExit(f"asyncio: the workers' sums disagree: {sorted(sums)}")
+    return max(r[3] for r in results)
 
 
-def _process_worker(sql, reads, rows, out, barrier):
+def _process_worker(sql, reads, rows, size, out, barrier):
     """One worker process: its own connection, its own rings, its own GIL."""
     conn = None
     try:
@@ -271,11 +231,10 @@ def _process_worker(sql, reads, rows, out, barrier):
         barrier.wait()
         before = conn.shm_reads
         start = time.perf_counter()
-        total, first, last = read_all(cur, sql, reads)
-        elapsed = time.perf_counter() - start
-        out.put((total, first, last, conn.shm_reads - before, elapsed, None))
+        total, last = reduce_reads(cur, sql, reads, size)
+        out.put((total, last, conn.shm_reads - before, time.perf_counter() - start, None))
     except BaseException as exc:
-        out.put((0, None, None, 0, None, f"{type(exc).__name__}: {exc}"))
+        out.put((0, None, 0, None, f"{type(exc).__name__}: {exc}"))
         try:
             barrier.abort()
         except Exception:
@@ -288,7 +247,7 @@ def _process_worker(sql, reads, rows, out, barrier):
                 pass
 
 
-def measure_processes(sql, workers, reads, rows):
+def measure_processes(sql, workers, reads, rows, size):
     """One process per worker: separate GILs, separate pools, separate rings.
 
     Each child registers its own background workers, so this setting spends
@@ -300,7 +259,7 @@ def measure_processes(sql, workers, reads, rows):
     barrier = multiprocessing.Barrier(workers)
     out = multiprocessing.Queue()
     procs = [
-        multiprocessing.Process(target=_process_worker, args=(sql, reads, rows, out, barrier))
+        multiprocessing.Process(target=_process_worker, args=(sql, reads, rows, size, out, barrier))
         for _ in range(workers)
     ]
     for p in procs:
@@ -311,11 +270,14 @@ def measure_processes(sql, workers, reads, rows):
             raise SystemExit(f"processes: a worker exited with {p.exitcode}")
 
     results = [out.get(timeout=10) for _ in procs]
-    for i, (total, first, last, served, _elapsed, error) in enumerate(results):
+    for i, (total, last, served, _elapsed, error) in enumerate(results):
         if error:
             raise SystemExit(f"processes worker {i}: {error}")
-        check(f"processes n={workers} worker {i}", total, first, last, served, reads, rows)
-    return max(r[4] for r in results)
+        check(f"processes worker {i}", total, last, served, reads, rows)
+    sums = {round(r[1], 3) for r in results}
+    if len(sums) != 1:
+        raise SystemExit(f"processes: the workers' sums disagree: {sorted(sums)}")
+    return max(r[3] for r in results)
 
 
 def ring_workers():
@@ -363,6 +325,26 @@ def wait_for_slots(need, timeout=20.0):
         time.sleep(0.05)
 
 
+def cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def cpu_ghz():
+    try:
+        with open("/proc/cpuinfo") as f:
+            values = [float(line.split(":", 1)[1]) for line in f if line.startswith("cpu MHz")]
+        return round(max(values) / 1000, 1) if values else "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rows", type=int, default=100000, help="rows per read (default: %(default)s)")
@@ -395,8 +377,8 @@ def main():
 
     build_table(args.rows)
     try:
-        measure_serial(sql, 1, args.rows)  # warm: the first read creates the ring
-        base = median_elapsed(lambda: measure_serial(sql, args.reads, args.rows))
+        measure_serial(sql, 1, args.rows, batch)  # warm: the first read creates the ring
+        base, _sum = median_elapsed(lambda: measure_serial(sql, args.reads, args.rows, batch))
         serial_rate = args.reads * args.rows / base
 
         print(f"{'mode':<9} {'n':>2} {'reads':>6} {'rows/s':>12} {'vs n=1':>8} {'per worker':>12} {'shm':>9}")
@@ -415,35 +397,37 @@ def main():
         # this process's rings would otherwise be holding the server's slots.
         if args.mode in ("processes", "all"):
             for workers in range(1, args.max_workers + 1):
-                measure_processes(sql, workers, 1, args.rows)  # warm
+                measure_processes(sql, workers, 1, args.rows, batch)  # warm
                 rate = (
                     workers * args.reads * args.rows
-                    / median_elapsed(lambda workers=workers: measure_processes(sql, workers, args.reads, args.rows))
+                    / median_elapsed(
+                        lambda workers=workers: measure_processes(sql, workers, args.reads, args.rows, batch)
+                    )
                 )
                 report("processes", workers, rate, f"{workers * args.reads}/{workers * args.reads}")
 
         def runners(mode, workers):
             """The warm-up and the timed run for one setting."""
             if mode == "threads":
-                return (lambda: measure_threads(sql, workers, 1, args.rows),
-                        lambda: measure_threads(sql, workers, args.reads, args.rows))
+                return (lambda: measure_threads(sql, workers, 1, args.rows, batch),
+                        lambda: measure_threads(sql, workers, args.reads, args.rows, batch))
             if mode == "asyncio":
-                return (lambda: asyncio.run(measure_asyncio(sql, workers, 1, args.rows)),
-                        lambda: asyncio.run(measure_asyncio(sql, workers, args.reads, args.rows)))
+                return (lambda: asyncio.run(measure_asyncio(sql, workers, 1, args.rows, batch)),
+                        lambda: asyncio.run(measure_asyncio(sql, workers, args.reads, args.rows, batch)))
             return (lambda: measure_columnar(sql, workers, 1, args.rows, batch),
                     lambda: measure_columnar(sql, workers, args.reads, args.rows, batch))
 
-        modes = [m for m in ("threads", "asyncio", "columnar") if args.mode in (m, "all")]
+        modes = [m for m in ("columnar", "threads", "asyncio") if args.mode in (m, "all")]
         # The modes alternate at each worker count, not block after block: a
         # setting measured twenty runs later sees a different machine (clock,
-        # page state), and that drift is bigger than what threads buy.
+        # page state), and that drift is bigger than what the change buys.
         for workers in range(1, args.max_workers + 1):
             for mode in modes:
                 warm, timed = runners(mode, workers)
                 warm()  # the rings this setting will use
                 rate = workers * args.reads * args.rows / median_elapsed(timed)
-                # a streamed read is not counted by shm_reads; its correctness
-                # check is the sum every worker must agree on
+                # a streamed read is not counted by shm_reads; the columnar mode's
+                # correctness check is the sum every worker must agree on
                 shm = "—" if mode == "columnar" else f"{workers * args.reads}/{workers * args.reads}"
                 report(mode, workers, rate, shm)
     finally:

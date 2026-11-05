@@ -5,7 +5,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=17ef480-dirty fastpostgres-dev-nogil client-nogil.sh
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=daa1e5e-dirty fastpostgres-dev-nogil client-nogil.sh
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -19,7 +19,7 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: bench
-git: 17ef480-dirty
+git: daa1e5e-dirty
 shm: 3.0G
 ### END ENV
 ### NOGIL
@@ -28,10 +28,22 @@ gil: disabled
 client: /src/python/src/fastpostgres/_client.cpython-313t-x86_64-linux-gnu.so
 ### END NOGIL
 
+NOTICE:  table "fp_agg_t" does not exist, skipping
+test_bad_plans_are_refused (test_aggregate.AggregateTest.test_bad_plans_are_refused) ... ok
+test_batches_combine (test_aggregate.AggregateTest.test_batches_combine)
+250k rows at 30k a batch: the per-batch scalars must add up. ... ok
+test_columns_by_index (test_aggregate.AggregateTest.test_columns_by_index) ... ok
+test_empty_result (test_aggregate.AggregateTest.test_empty_result) ... ok
+test_matches_the_server (test_aggregate.AggregateTest.test_matches_the_server) ... ok
+test_one_pass_is_a_stream_not_rows (test_aggregate.AggregateTest.test_one_pass_is_a_stream_not_rows)
+The reduction never materializes rows: the same query as tuples would ... ok
+test_shm_false_refuses (test_aggregate.AggregateTest.test_shm_false_refuses) ... ok
+test_unsupported_kind_is_refused (test_aggregate.AggregateTest.test_unsupported_kind_is_refused) ... ok
+test_aggregate_matches_the_sync_path (test_aggregate.AioAggregateTest.test_aggregate_matches_the_sync_path) ... ok
 test_cancelled_pull_returns_the_ring (test_aio.AioTest.test_cancelled_pull_returns_the_ring) ... ok
 test_close_ends_a_live_stream (test_aio.AioTest.test_close_ends_a_live_stream) ... ok
 test_concurrent_streams_on_one_loop (test_aio.AioTest.test_concurrent_streams_on_one_loop) ... ok
-test_errors (test_aio.AioTest.test_errors) ... /src/python/src/fastpostgres/dbapi.py:786: RuntimeWarning: fastpostgres: a read left the shared-memory path (RuntimeError: division by zero)
+test_errors (test_aio.AioTest.test_errors) ... /src/python/src/fastpostgres/dbapi.py:795: RuntimeWarning: fastpostgres: a read left the shared-memory path (RuntimeError: division by zero)
   result = self.connection._shm_read(sql)
 ok
 test_execute_and_fetch_parity (test_aio.AioTest.test_execute_and_fetch_parity) ... ok
@@ -100,11 +112,11 @@ test_one_ring_two_threads_is_refused (test_parallel.RingGuardTest.test_one_ring_
 The C layer refuses a second driver instead of interleaving the slot. ... ok
 
 ----------------------------------------------------------------------
-Ran 45 tests in 1.129s
+Ran 54 tests in 1.669s
 
 OK
 [test_parallel] 3 partitions (slots free: 3)
-read_rows: 125.9 cycles/row over 1390602 rows (decode 120.4, frame+desc+list 5.5)
+read_rows: 124.7 cycles/row over 1390602 rows (decode 118.4, frame+desc+list 6.3)
 
 ### the client's own scaling, GIL off
 NOTICE:  table "fp_scaling_t" does not exist, skipping
@@ -117,21 +129,20 @@ reads: 5 per worker
 reps: 3 (median reported)
 mode: threads
 pool: <machine default>
-git: 17ef480-dirty
+git: daa1e5e-dirty
 ### END CLIENT-SCALING
 
 mode       n  reads       rows/s   vs n=1   per worker       shm
-serial     1      5    3,654,193        —    3,654,193 5/5      
-threads    1      5    4,496,127        —    4,496,127       5/5
-threads    2     10    7,059,597     +57%    3,529,798     10/10
-threads    3     15    8,317,220     +85%    2,772,407     15/15
-threads    4     20    9,074,851    +102%    2,268,713     20/20
-threads    5     25    9,354,429    +108%    1,870,886     25/25
-threads    6     30    9,831,927    +119%    1,638,654     30/30
+serial     1      5    6,725,498        —    6,725,498 5/5      
+threads    1      5    6,657,554        —    6,657,554       5/5
+threads    2     10   12,233,561     +84%    6,116,781     10/10
+threads    3     15   18,908,724    +184%    6,302,908     15/15
+threads    4     20   24,612,427    +270%    6,153,107     20/20
+threads    5     25   28,332,873    +326%    5,666,575     25/25
+threads    6     30   32,155,762    +383%    5,359,294     30/30
 
 pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
-partitions: 6 rings, 12 data segments
-read_rows: 366.4 cycles/row over 35200000 rows (decode 360.0, frame+desc+list 6.4)
+partitions: 6 rings, 6 data segments
 
 NOTICE:  table "fp_scaling_t" does not exist, skipping
 ### CLIENT-SCALING
@@ -143,18 +154,17 @@ reads: 5 per worker
 reps: 3 (median reported)
 mode: columnar
 pool: <machine default>
-git: 17ef480-dirty
+git: daa1e5e-dirty
 ### END CLIENT-SCALING
 
 mode       n  reads       rows/s   vs n=1   per worker       shm
-serial     1      5    3,874,493        —    3,874,493 5/5      
-columnar   1      5    7,262,289        —    7,262,289         —
-columnar   2     10   14,313,877     +97%    7,156,939         —
-columnar   3     15   20,821,143    +187%    6,940,381         —
-columnar   4     20   26,695,072    +268%    6,673,768         —
-columnar   5     25   32,033,510    +341%    6,406,702         —
-columnar   6     30   34,988,248    +382%    5,831,375         —
+serial     1      5    6,528,197        —    6,528,197 5/5      
+columnar   1      5    7,031,520        —    7,031,520         —
+columnar   2     10   14,047,774    +100%    7,023,887         —
+columnar   3     15   20,429,855    +191%    6,809,952         —
+columnar   4     20   25,540,183    +263%    6,385,046         —
+columnar   5     25   29,821,626    +324%    5,964,325         —
+columnar   6     30   33,681,167    +379%    5,613,528         —
 
 pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
-partitions: 6 rings, 8 data segments
-read_rows: 281.6 cycles/row over 1600000 rows (decode 275.4, frame+desc+list 6.2)
+partitions: 6 rings, 6 data segments

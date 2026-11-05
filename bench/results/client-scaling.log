@@ -6,7 +6,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=17ef480-dirty fastpostgres-dev client-scaling.sh
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=daa1e5e-dirty fastpostgres-dev client-scaling.sh
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -20,7 +20,7 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: bench
-git: 17ef480-dirty
+git: daa1e5e-dirty
 shm: 3.0G
 ### END ENV
 ### CLIENT-SCALING RUN
@@ -36,50 +36,51 @@ reads: 5 per worker
 reps: 3 (median reported)
 mode: all
 pool: <machine default>
-git: 17ef480-dirty
+git: daa1e5e-dirty
 ### END CLIENT-SCALING
 
 mode       n  reads       rows/s   vs n=1   per worker       shm
-serial     1      5    3,239,101        —    3,239,101 5/5      
-processes  1      5    2,993,158        —    2,993,158       5/5
-processes  2     10    5,182,054     +73%    2,591,027     10/10
-processes  3     15    7,308,883    +144%    2,436,294     15/15
-processes  4     20    9,012,782    +201%    2,253,196     20/20
-processes  5     25   10,366,924    +246%    2,073,385     25/25
-processes  6     30   11,274,286    +277%    1,879,048     30/30
-threads    1      5    3,282,809        —    3,282,809       5/5
-asyncio    1      5    3,379,772        —    3,379,772       5/5
-columnar   1      5    7,268,313        —    7,268,313         —
-threads    2     10    3,464,698      +6%    1,732,349     10/10
-asyncio    2     10    3,488,968      +3%    1,744,484     10/10
-columnar   2     10   14,260,951     +96%    7,130,475         —
-threads    3     15    3,617,830     +10%    1,205,943     15/15
-asyncio    3     15    3,513,848      +4%    1,171,283     15/15
-columnar   3     15   20,822,582    +186%    6,940,861         —
-threads    4     20    3,683,664     +12%      920,916     20/20
-asyncio    4     20    3,772,570     +12%      943,142     20/20
-columnar   4     20   26,161,247    +260%    6,540,312         —
-threads    5     25    3,546,298      +8%      709,260     25/25
-asyncio    5     25    3,753,443     +11%      750,689     25/25
-columnar   5     25   30,065,886    +314%    6,013,177         —
-threads    6     30    3,604,122     +10%      600,687     30/30
-asyncio    6     30    3,800,735     +12%      633,456     30/30
-columnar   6     30   32,602,475    +349%    5,433,746         —
+serial     1      5    6,377,104        —    6,377,104 5/5      
+processes  1      5    5,816,308        —    5,816,308       5/5
+processes  2     10   11,535,370     +98%    5,767,685     10/10
+processes  3     15   17,244,435    +196%    5,748,145     15/15
+processes  4     20   22,193,172    +282%    5,548,293     20/20
+processes  5     25   26,986,330    +364%    5,397,266     25/25
+processes  6     30   30,269,056    +420%    5,044,843     30/30
+columnar   1      5    7,857,228        —    7,857,228         —
+threads    1      5    7,191,418        —    7,191,418       5/5
+asyncio    1      5    7,224,283        —    7,224,283       5/5
+columnar   2     10   14,200,728     +81%    7,100,364         —
+threads    2     10   13,290,759     +85%    6,645,379     10/10
+asyncio    2     10   13,118,423     +82%    6,559,211     10/10
+columnar   3     15   20,522,852    +161%    6,840,951         —
+threads    3     15   19,508,214    +171%    6,502,738     15/15
+asyncio    3     15   19,110,623    +165%    6,370,208     15/15
+columnar   4     20   26,777,612    +241%    6,694,403         —
+threads    4     20   25,096,455    +249%    6,274,114     20/20
+asyncio    4     20   25,308,608    +250%    6,327,152     20/20
+columnar   5     25   31,765,802    +304%    6,353,160         —
+threads    5     25   30,114,456    +319%    6,022,891     25/25
+asyncio    5     25   29,575,028    +309%    5,915,006     25/25
+columnar   6     30   35,799,444    +356%    5,966,574         —
+threads    6     30   33,337,466    +364%    5,556,244     30/30
+asyncio    6     30   32,895,108    +355%    5,482,518     30/30
 
 pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
-partitions: 6 rings, 18 data segments
-read_rows: 528.8 cycles/row over 68800049 rows (decode 525.6, frame+desc+list 3.1)
+partitions: 6 rings, 8 data segments
+read_rows: 18238.5 cycles/row over 50 rows (decode 1904.6, frame+desc+list 16333.9)
 
 --- reading the table ---
 serial is one connection, back to back: the same road the modes take, so that row
 sits next to their n=1 rows. Each mode is compared against its own n=1 row:
-  threads    the dbapi row path; the decode holds the GIL, so this buys a few
-             percent, not a multiple (bench/NOTES.md: +6..12%)
-  asyncio    the same work with the event loop free and a tier thread per
-             connection — it tracks threads and never blocks the loop
-  columnar   stream() batches reduced with numpy, whose loops release the GIL:
-             N threads on N partitions genuinely run in parallel here
-  processes  one process per worker, separate GILs: the tuple path parallelized
-             the other way, at the price of `workers` background-worker slots
-Every mode accounts for every read — the row paths' `shm` column (reads/reads),
-the columnar mode's cross-worker sum — and `libpq_reads=0` says nothing fell back.
+  columnar   stream() batches reduced with numpy: the array path
+  threads    Cursor.aggregate: sum/count walked in C++ over the segment, no
+             Python object per row — the path that parallelizes on any interpreter
+  asyncio    the same consumption with the event loop free and a tier thread per
+             connection
+  processes  one process per worker, separate GILs, at the price of `workers`
+             background-worker slots
+Tuple reads (execute + fetchall) are deliberately not measured: that is the
+DB-API compatibility path, not how a result is consumed in a hot path.
+Every aggregate read is accounted for by the `shm` column (reads/reads), the
+columnar mode by the cross-worker sum, and `libpq_reads=0` says nothing fell back.
