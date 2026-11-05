@@ -34,18 +34,8 @@ per-row Python objects.
 
 ## The numbers
 
-| rows/s | 1M | 5M | 10M |
-|---|---|---|---|
-| `ring` (`stream()` + numpy) | **8.18M** | **7.35M** | **7.39M** |
-| `arrow-batch` (reader + `compute`) | 2.30M | 2.37M | 2.37M |
-| `arrow-table` (table + `compute`) | 2.30M | 2.33M | 2.31M |
-
-| bytes held while the read runs | 1M | 5M | 10M |
-|---|---|---|---|
-| the ring's transfer buffer (fixed for every read) | 512 MiB | 512 MiB | 512 MiB |
-| the ring's batch in flight (100k rows) | 4.7 MiB | 4.9 MiB | 4.9 MiB |
-| the reader's largest batch (253,722 rows) | 11.5 MiB | 11.6 MiB | 11.6 MiB |
-| the table path's result | 45.7 MiB | 236.9 MiB | **475.9 MiB** |
+The chart above carries the rates and the bytes each side held; the one reading
+it does not draw is the reader process's own footprint:
 
 | peak RSS of the reader's own process | 1M | 5M | 10M |
 |---|---|---|---|

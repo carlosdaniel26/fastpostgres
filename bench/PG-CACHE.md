@@ -67,22 +67,9 @@ multiset. The log prints `ok` or `MISMATCH`; the run exits non-zero on a mismatc
 
 ## The numbers
 
-Rows/s for the two row-returning workloads, ms/read for the aggregate, median of
-3 reps (1 above 1M rows), 100K and 1M rows, `bench` shape:
-
-| 100K | fastpostgres | pgcache (hit) |
-|---|---|---|
-| large, rows/s | **3.51M** | 1.38M |
-| small, ms/read | 6.156 | **1.278** |
-| through, rows/s | **3.48M** | 1.78M |
-
-| 1M | fastpostgres | pgcache (hit) |
-|---|---|---|
-| large, rows/s | **3.81M** | 1.44M |
-| small, ms/read | 67.458 | **1.099** |
-| through, rows/s | **3.90M** | 1.76M |
-
-The two regimes, in one line each:
+The chart above has rows/s for the two row-returning workloads and ms/read for
+the aggregate, median of 3 reps (1 above 1M rows), at 100K and 1M rows,
+`bench` shape. The two regimes, in one line each:
 
 - **A large result does not want a cache.** A cache hit still ships the cached
   rows from the cache database through the proxy to the client, and the client
@@ -139,13 +126,6 @@ proxy's `pgcache_cache_memory_*` gauges — the budget it resolved, what it is
 using, what is registered, whether registration is throttled. The record is
 [`fastpostgres-vs-pgcache-memory.log`](results/fastpostgres-vs-pgcache-memory.log):
 1M rows, the same table and the same output checks as above.
-
-| 1M rows, one read | ring, segments of M/2 | pgcache, capped at M |
-|---|---|---|
-| M = 8 MiB | scan 4.25M rows/s, aggregate 64.355 ms | **does not run**: the container is OOM-killed |
-| M = 64 MiB | scan 3.84M rows/s, aggregate 63.903 ms | **does not run**: the container is OOM-killed |
-| M = 256 MiB | scan 3.75M rows/s, aggregate 63.678 ms | scan 1.75M rows/s, aggregate 26.921 ms — budget 204.8 MiB, using 251.1 MB, registered 0, throttled 1, every rep a miss |
-| M = 1 GiB | scan 3.89M rows/s, aggregate 57.403 ms | scan 1.47M rows/s, aggregate 1.177 ms — budget 819.2 MiB, using 571.8 MB, registered 2, throttled 0, a hit |
 
 Four things fall out of it:
 

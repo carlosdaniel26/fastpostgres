@@ -193,32 +193,21 @@ writable. The recipe below avoids the situation by running as the invoking user.
 The committed run, verbatim in [`codec-transport.log`](results/codec-transport.log);
 charts rendered from it by `just charts codec` ([`bench/charts/codec.py`](charts/codec.py)).
 
-![format cost](../docs/assets/codec-format.png)
-
 **Experiment 1 — format, transport held out**
 
-| cell | payload | rows/s | encode ms | decode ms | copies | peak RSS |
-|---|---|---|---|---|---|---|
-| `fpcolumn` | 47.2 MiB | **196.20M** | **3.3** | **1.8** | **1** | **101 MB** |
-| `arrow-ipc` | 45.7 MiB | 105.62M | 7.7 | 1.8 | 6 | 399 MB |
-
-![transport cost](../docs/assets/transport.png)
+![format cost](../docs/assets/codec-format.png)
 
 **Experiment 2 — transport, codec held out**
 
-| cell | GB/s | p50 µs | p99 µs | CPU ms (both sides) | copies |
-|---|---|---|---|---|---|
-| `fpcolumn` + shm | 11.04 | 3.6 | 6.5 | 4.6 | 1 |
-| `fpcolumn` + uds | 7.14 | 32.0 | 367.2 | 7.0 | 2 |
-| `arrow-ipc` + shm | 10.54 | 4.5 | 8.6 | 4.6 | 1 |
-| `arrow-ipc` + uds | 6.51 | 36.5 | 383.2 | 7.4 | 2 |
+![transport cost](../docs/assets/transport.png)
 
 Three readings:
 
-1. **The format:** `fpcolumn` is **1.9× the end-to-end rate** (5.1 ms against
-   9.5 ms per 1M rows), wins encode by 2.3× (3.3 against 7.7 ms) and decodes at
-   the same cost, and does it in **1 copy against 6** and **101 MB against 399 MB**
-   (both broken down below).
+1. **The format:** at 1M rows the frame carries 47.2 MiB of payload at
+   **196.20M rows/s** against Arrow IPC's 45.7 MiB at 105.62M, which makes it
+   **1.9× the end-to-end rate** (5.1 ms against 9.5 ms), **2.3×** faster to
+   encode (3.3 against 7.7 ms) and the same to decode, in **1 copy against 6**
+   and **101 MB against 399 MB** (both in the footprint chart below).
 2. **The transport:** moving *identical bytes*, shared memory is **1.5–1.6× the
    throughput** of a UNIX socket, **8–9× lower p50 latency**, with a tail 45–57×
    away (6.5–8.6 µs p99 against 367–383 µs), **one copy instead of two**, and
@@ -228,8 +217,6 @@ Three readings:
    transport is where the *bytes move* cheaper, and the query-level benchmark is
    what happens when both are in the path. Nothing here is measured together with
    the PostgreSQL worker; that is the caveat in the threats section.
-
-![footprint of each approach](../docs/assets/codec-footprint.png)
 
 **What the Arrow cell is not measuring: Arrow in memory.** Both cells here
 serialize, because that is the question a frame that crosses a process boundary
@@ -257,14 +244,7 @@ half a comparison.
 
 **Memory, and where each approach spends its copies**
 
-| | `fpcolumn` | `arrow-ipc` |
-|---|---|---|
-| peak RSS | 101 MB (**2.1×** the payload) | 399 MB (**8.7×** the payload) |
-| copies of the payload | **1** | 6 |
-| of which the encode path | 1 (values → payload) | 2 (values → arrays, arrays → stream) |
-| of which the decode/aggregates | **0** — decoded views alias the payload | 3 (temporaries the aggregate kernels materialize) |
-| of which the sink | 0 | 1 (stream written out) |
-| zero-copy stages in the cells' own naming | `payload->decoded-views`, `decoded-views->aggregates` | `ipc_payload->record_batch` |
+![footprint of each approach](../docs/assets/codec-footprint.png)
 
 Read the names, not the totals. The frame is one copy to build the bytes and
 nothing after that; the rival is two copies to build them, three more for the
@@ -275,15 +255,6 @@ temporaries are all alive at once, where the frame is built into the buffer it
 ships.
 
 ![who pays on the transport](../docs/assets/codec-who-pays.png)
-
-**Per side, on the transport**
-
-| cell | CPU producer + consumer | peak RSS producer / consumer | min → p50 → p99 → max |
-|---|---|---|---|---|
-| `fpcolumn` + shm | 2.2 + 2.4 = **4.6 ms** | 52 / 27 MB | 3.3 → 3.6 → 6.5 → 6.5 µs |
-| `fpcolumn` + uds | 2.8 + 4.2 = **7.0 ms** | 51 / 27 MB | 12.4 → 32.0 → 367.2 → 367.2 µs |
-| `arrow-ipc` + shm | 2.2 + 2.4 = **4.6 ms** | 51 / 26 MB | 3.5 → 4.5 → 8.6 → 8.6 µs |
-| `arrow-ipc` + uds | 3.2 + 4.2 = **7.4 ms** | 49 / 26 MB | 25.7 → 36.5 → 383.2 → 383.2 µs |
 
 Three more readings from the same cells:
 
