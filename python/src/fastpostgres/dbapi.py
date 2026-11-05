@@ -279,6 +279,15 @@ def _compiled(statement) -> str:
 _SHM_BATCH = 100000
 _READ_RE = re.compile(r"^(select|values|table)\b", re.I | re.S)
 
+# The C++ reduce's operations (fastpostgres/native/aggregate.cpp).
+_AGG_OPS = {
+    "count_all": _client.AGG_COUNT_ALL,
+    "count": _client.AGG_COUNT,
+    "sum": _client.AGG_SUM,
+    "min": _client.AGG_MIN,
+    "max": _client.AGG_MAX,
+}
+
 
 def _is_read_only(sql: str) -> bool:
     """True for statements the ring's read-only cursor can serve."""
@@ -819,6 +828,114 @@ class Cursor:
         """
         sql = operation if parameters is None else _inline(operation, parameters)
         return self._track(self._stream(sql, size))
+
+    def aggregate(self, operation: str, ops, parameters=None, size=_SHM_BATCH) -> dict:
+        """Reduce a read-only SELECT in C++: numbers out, no row objects.
+
+        `ops` maps a result name to ``(operation, column)``:
+
+            {"price_sum": ("sum", "price"), "rows": ("count_all", None),
+             "cheapest": ("min", "price"), "priced": ("count", "price")}
+
+        Operations are ``sum``, ``min``, ``max``, ``count`` (non-NULL values) and
+        ``count_all`` (rows, no column needed — pass ``None``); a column is a name
+        or an index. The segment is walked by the extension with the GIL released
+        and no Python object built per row, so a thread reducing its own
+        partition runs in parallel with the others on any interpreter — the
+        decode that materializes rows is what serializes, and this never does it.
+
+        Semantics are the obvious SQL ones: NULLs are skipped by sum/min/max and
+        not counted by count; an empty result gives 0 for sums and counts and
+        None for min/max. Integer sums accumulate in 64 bits and wrap on overflow
+        (the server's ``sum(bigint)`` is numeric and exact, so a sum that leaves
+        int64 will differ). Only the numeric kinds and bool are walked — anything
+        else (text, bytea, dates, numeric) raises ``ProgrammingError``; let the
+        server aggregate those.
+        """
+        sql = operation if parameters is None else _inline(operation, parameters)
+        if not self.connection._shm:
+            raise NotSupportedError("aggregate() is disabled on this connection (shm=False)")
+        if not _is_read_only(sql):
+            raise NotSupportedError("aggregate() serves read-only SELECTs over /dev/shm")
+
+        plan = []
+        for name, spec in ops.items():
+            op_name, column = spec
+            try:
+                op = _AGG_OPS[op_name]
+            except KeyError:
+                raise ProgrammingError(f"aggregate: unknown operation {op_name!r}") from None
+            if op == _client.AGG_COUNT_ALL:
+                if column is not None:
+                    raise ProgrammingError("aggregate: count_all takes no column (pass None)")
+            elif column is None:
+                raise ProgrammingError(f"aggregate: {op_name} needs a column")
+            plan.append((name, op, column))
+
+        info = _ring_acquire(self.connection._conn, block=self.connection._wait)
+        if info is None:
+            if pool_size() > 0:
+                _note_fallback("pool exhausted", warn=False)
+            raise NotSupportedError("aggregate() needs the fastpostgres extension (ring unavailable)")
+        ring, seg, _pid = info
+
+        seen = False
+        try:
+            ring.open(seg, sql)
+            resolved = None  # [(op, column index)], once the metadata is known
+            acc = [None] * len(plan)
+            while True:
+                n = ring.next(size)
+                if n == 0 and seen:
+                    break
+                if resolved is None:
+                    if any(column is not None for _, _, column in plan):
+                        batch = _client.read(seg)  # metadata only: the names and their order
+                        index = {c.name: i for i, c in enumerate(batch.columns)}
+                        resolved = []
+                        for name, op, column in plan:
+                            if column is None:
+                                resolved.append((op, -1))
+                                continue
+                            if isinstance(column, int):
+                                at = column if column >= 0 else len(index) + column
+                                if not 0 <= at < len(index):
+                                    raise ProgrammingError(f"aggregate: column index {column} is out of range")
+                            else:
+                                try:
+                                    at = index[column]
+                                except KeyError:
+                                    raise ProgrammingError(
+                                        f"aggregate: no column {column!r} in the result"
+                                    ) from None
+                            resolved.append((op, at))
+                    else:
+                        resolved = [(op, -1) for _, op, _ in plan]
+                try:
+                    values = _client.reduce(seg, resolved)
+                except ValueError as exc:
+                    raise ProgrammingError(str(exc)) from exc
+                for i, (op, _at) in enumerate(resolved):
+                    v = values[i]
+                    if op in (_client.AGG_MIN, _client.AGG_MAX):
+                        if v is None:
+                            continue
+                        if acc[i] is None or (v < acc[i] if op == _client.AGG_MIN else v > acc[i]):
+                            acc[i] = v
+                    else:
+                        acc[i] = (acc[i] or 0) + v
+                seen = True
+                if n == 0:
+                    break
+        finally:
+            try:
+                ring.close()
+            except Exception:
+                pass
+            _ring_release(info)
+
+        self.connection.shm_reads += 1
+        return {name: acc[i] for i, (name, _, _) in enumerate(plan)}
 
     def _track(self, stream):
         """One live stream per connection, trackable so close() can end it.

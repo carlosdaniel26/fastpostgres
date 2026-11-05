@@ -54,8 +54,8 @@ read_map_get(const char *path, const std::string &name, size_t *size_out)
 }
 
 /* Map the segment and hand back its payload. */
-static const uint8_t *
-segment_payload(const char *name, uint64_t *payload_len)
+const uint8_t *
+fp_segment_payload(const char *name, uint64_t *payload_len)
 {
     std::string path = "/" + std::string(name);
     size_t      size = 0;
@@ -126,7 +126,7 @@ segment_read(PyObject *, PyObject *args)
     if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
 
     uint64_t       payload_len = 0;
-    const uint8_t *payload     = segment_payload(name, &payload_len);
+    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
     if (payload == nullptr) return nullptr;
 
     FastpostgresReader rd;
@@ -183,7 +183,7 @@ segment_read_rows(PyObject *, PyObject *args)
 
     uint64_t           payload_len = 0;
     unsigned long long t0          = __rdtsc();
-    const uint8_t     *payload     = segment_payload(name, &payload_len);
+    const uint8_t     *payload     = fp_segment_payload(name, &payload_len);
     if (payload == nullptr) return nullptr;
 
     FastpostgresRowsReader rrd;

@@ -273,6 +273,20 @@ class AsyncCursor:
         self._connection._streams.add(stream)
         return stream
 
+    async def aggregate(self, operation, ops, parameters=None, size=dbapi._SHM_BATCH) -> dict:
+        """Reduce a read-only SELECT in C++ (see ``dbapi.Cursor.aggregate``).
+
+        One tier job, and inside it the segment walk runs with the GIL released:
+        an async caller gets numbers out without any Python object per row.
+        """
+        if self._closed:
+            raise InterfaceError("fastpostgres.aio: cursor is closed")
+        await self._connection._open()
+        cur = self._sync()
+        return await self._connection._submit(
+            lambda: cur.aggregate(operation, ops, parameters, size)
+        )
+
     async def close(self):
         self._closed = True
         self._cur = None
@@ -360,6 +374,16 @@ class AsyncConnection:
     def stream(self, operation, parameters=None, size=dbapi._SHM_BATCH) -> AsyncStream:
         """An async iterator of zero-copy batches, as ``Cursor.stream()``."""
         return self.cursor().stream(operation, parameters, size=size)
+
+    async def aggregate(self, statement, ops, **params) -> dict:
+        """Reduce a statement in C++ and return its numbers (no row objects)."""
+        sql = self.compile(statement, **params)
+        conn = await self._open()
+
+        def job():
+            return conn.cursor().aggregate(sql, ops)
+
+        return await self._submit(job)
 
     # ---- lifecycle --------------------------------------------------------
 

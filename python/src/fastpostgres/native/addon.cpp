@@ -5,6 +5,7 @@
  *   connection.cpp   Connection(conninfo)   libpq control channel
  *   ring.cpp         Ring(seg)              drive the worker through /dev/shm
  *   segment.cpp      read / read_rows       columnar segment -> Python
+ *   aggregate.cpp    reduce                 columnar segment -> numbers, in C++
  *   codec.cpp        type OID -> Python value
  *   types.cpp        the shared Result / Column / Segment types
  *
@@ -14,6 +15,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "aggregate.hpp"
 #include "codec.hpp"
 #include "connection.hpp"
 #include "fastpostgres/fastpostgres_shm.h"
@@ -60,7 +62,7 @@ static int
 client_exec(PyObject *m)
 {
     if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
-        !fp_register_segment(m) || !add_kind_constants(m))
+        !fp_register_segment(m) || !fp_register_aggregate(m) || !add_kind_constants(m))
         return -1;
     return 0;
 }
