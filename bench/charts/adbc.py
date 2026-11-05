@@ -150,12 +150,13 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
 
     # a bar keeps a bar's width: the axis grows around a single group rather
     # than the group filling the panel
-    width = min(0.8 / len(series), 0.26)
+    width = min(0.8 / len(series), 0.30)
+    step = width * 1.12  # a sliver between the bars of a group
     xs = list(range(len(loads)))
     handles = []
     for i, name in enumerate(series):
         vals = [data[load][i] for load in loads]
-        pos = [x + (i - (len(series) - 1) / 2) * width for x in xs]
+        pos = [x + (i - (len(series) - 1) / 2) * step for x in xs]
         drawn = ax.bar(pos, vals, width=width, color=colors[i], label=labels[i], zorder=3)
         handles.append(drawn[0])
 
@@ -172,7 +173,8 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
     ax.set_xticks(xs)
     ax.set_xticklabels(loads)
     ax.set_xlabel("rows")
-    pad = 1.6 if len(xs) == 1 else 0.0
+    # one group in a one-panel figure: keep the bar about half an inch wide
+    pad = 1.5 if len(xs) == 1 else 0.0
     ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
     ax.set_ylabel("rows/s")
     if scale == "log":

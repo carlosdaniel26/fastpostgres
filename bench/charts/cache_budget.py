@@ -137,11 +137,12 @@ def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
     OOM-killed, or nothing registered - is left out and the slot says why.
     """
     width = 0.8 / len(series)
+    step = width * 1.12  # a sliver between the bars of a group
     xs = list(range(len(budgets)))
     handles = []
     for i, (workload, player, color, label) in enumerate(series):
         present = [b for b in budgets if player in data[b].get(workload, {})]
-        pos = [xs[budgets.index(b)] - 0.4 + (i + 0.5) * width for b in present]
+        pos = [xs[budgets.index(b)] + (i - (len(series) - 1) / 2) * step for b in present]
         vals = [data[b][workload][player] for b in present]
         drawn = ax.bar(pos, vals, width=width, color=color, zorder=3)
         for rect, b in zip(drawn, present):
@@ -154,7 +155,7 @@ def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
         if player == "pgcache":
             for b in budgets:
                 if b in empty_budgets and b not in present and i == 1:
-                    ax.annotate("OOM", (xs[budgets.index(b)] - 0.4 + (i + 0.5) * width, 0.02),
+                    ax.annotate("OOM", (xs[budgets.index(b)] + (i - (len(series) - 1) / 2) * step, 0.02),
                                 xycoords=("data", "axes fraction"), ha="center", va="bottom",
                                 fontsize=6.8, color=ORANGE, zorder=4)
 

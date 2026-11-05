@@ -143,7 +143,7 @@ def plot_format(formats, meta):
     theme.ticks(ax_t)
 
     rss = [c["rss_kb"] / 1024 for c in formats]
-    ax_m.bar(xs, rss, width=0.30, color=colors, zorder=3)
+    ax_m.bar(xs, rss, width=0.36, color=colors, zorder=3)
     for x, c, value in zip(xs, formats, rss):
         ax_m.text(x, value, f"{value:,.0f} MB\ncopies {c['copies']}", ha="center",
                   va="bottom", fontsize=8, linespacing=1.25)
@@ -180,12 +180,13 @@ def plot_transport(pairs, meta):
 
     # throughput: one group per payload, one bar per transport
     xs = list(range(len(payloads)))
-    width = 0.30
+    width = 0.38
     cpu = {t: [cell(p, t).get("cpu_user_ms", 0) + cell(p, t).get("cpu_sys_ms", 0)
                for p in payloads] for t in transports}
+    step = width * 1.12  # a sliver between the bars of a group
     for i, transport in enumerate(transports):
         values = [cell(p, transport)["gb_per_s"] for p in payloads]
-        pos = [x + (i - (len(transports) - 1) / 2) * width for x in xs]
+        pos = [x + (i - (len(transports) - 1) / 2) * step for x in xs]
         color = ACCENT if transport == "shm" else GREY[1]
         ax_r.bar(pos, values, width=width, color=color, zorder=3,
                  label=TRANSPORT_LABELS.get(transport, transport))
@@ -214,9 +215,10 @@ def plot_transport(pairs, meta):
     rows = [(p, t) for p in payloads for t in transports]
     xs = list(range(len(rows)))
     width = 0.36
+    step = width * 1.12  # a sliver between the p50 and p99 bars
     for i, (key, alpha) in enumerate((("p50_ms", 1.0), ("p99_ms", 0.45))):
         values = [cell(p, t)[key] * 1e3 for p, t in rows]
-        pos = [x + (i - 0.5) * width for x in xs]
+        pos = [x + (i - 0.5) * step for x in xs]
         colors = [ACCENT if t == "shm" else GREY[1] for _p, t in rows]
         drawn = ax_l.bar(pos, values, width=width, color=colors, alpha=alpha, zorder=3)
         ax_l.bar_label(drawn, labels=[f"{v:,.0f}" for v in values], padding=2, fontsize=7.4)
@@ -229,8 +231,6 @@ def plot_transport(pairs, meta):
     highs = max(cell(p, t)["p99_ms"] for p, t in rows) * 1e3
     ax_l.set_yscale("log")
     ax_l.set_ylim(lows * 0.42, highs * 2.4)
-    ax_l.set_yticks([t for t in (1, 3, 10, 30, 100, 300, 1000, 3000)
-                     if lows * 0.42 <= t <= highs * 2.4])
     ax_l.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
     ax_l.yaxis.set_minor_formatter(NullFormatter())
     ax_l.set_ylabel("per-chunk latency, μs (log)")
@@ -262,8 +262,8 @@ def plot_footprint(formats, meta):
     payload = [c["payload_bytes"] / 2**20 for c in formats]
     rss = [c["rss_kb"] / 1024 for c in formats]
     extra = [max(r - p, 0.0) for r, p in zip(rss, payload)]
-    ax_m.bar(xs, payload, width=0.30, color=colors, zorder=3)
-    ax_m.bar(xs, extra, width=0.30, bottom=payload, color=colors, alpha=FADED, zorder=3)
+    ax_m.bar(xs, payload, width=0.38, color=colors, zorder=3)
+    ax_m.bar(xs, extra, width=0.38, bottom=payload, color=colors, alpha=FADED, zorder=3)
     for x, p, r in zip(xs, payload, rss):
         ax_m.text(x, r, f"{r:,.0f} MB\n{r / p:.1f}× the payload", ha="center",
                   va="bottom", fontsize=8, linespacing=1.25)
@@ -338,8 +338,8 @@ def plot_who_pays(pairs, meta):
     # memory per side
     p_rss = [cell[r].get("producer_rss_kb", 0) / 1024 for r in rows]
     c_rss = [cell[r].get("consumer_rss_kb", 0) / 1024 for r in rows]
-    ax_mem.barh([y - 0.18 for y in ys], p_rss, height=0.34, color=colors, zorder=3)
-    ax_mem.barh([y + 0.18 for y in ys], c_rss, height=0.34, color=colors, alpha=FADED, zorder=3)
+    ax_mem.barh([y - 0.21 for y in ys], p_rss, height=0.40, color=colors, zorder=3)
+    ax_mem.barh([y + 0.21 for y in ys], c_rss, height=0.40, color=colors, alpha=FADED, zorder=3)
     for y, p, c in zip(ys, p_rss, c_rss):
         ax_mem.text(max(p, c), y, f"{p:,.0f} / {c:,.0f} MB", va="center", fontsize=7.6)
     ax_mem.set_yticks(ys)
@@ -354,8 +354,8 @@ def plot_who_pays(pairs, meta):
     # latency: p50 and p99 per cell, horizontal bars like the panels above
     p50 = [cell[r]["p50_ms"] * 1e3 for r in rows]
     p99 = [cell[r]["p99_ms"] * 1e3 for r in rows]
-    ax_lat.barh([y - 0.18 for y in ys], p50, height=0.34, color=colors, zorder=3)
-    ax_lat.barh([y + 0.18 for y in ys], p99, height=0.34, color=colors, alpha=FADED, zorder=3)
+    ax_lat.barh([y - 0.21 for y in ys], p50, height=0.40, color=colors, zorder=3)
+    ax_lat.barh([y + 0.21 for y in ys], p99, height=0.40, color=colors, alpha=FADED, zorder=3)
     for y, median, tail in zip(ys, p50, p99):
         ax_lat.text(median * 1.08, y - 0.18, f"{median:,.0f}", va="center", fontsize=7.4)
         ax_lat.text(tail * 1.08, y + 0.18, f"{tail:,.0f}", va="center", fontsize=7.4)
