@@ -11,6 +11,7 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
 #include "utils/uuid.h"
 #include "varatt.h"
@@ -60,98 +61,202 @@ text_cell(Datum d, bool isnull, Oid type, Oid typoutput, const char **data, int 
     }
 }
 
-/* One pass into [out, end); the frame comes from the shared writer, so the
- * layout matches the client's generators exactly. Returns the payload size. */
-uint64
-fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out, char *end)
+/* One column's resolved layout, so the writer can reserve the whole frame
+ * before it writes the first value. */
+typedef struct ColumnPlan
 {
-    int                       ncols      = td->natts;
-    int                       null_bytes = (int)((nrows + 7) / 8);
-    int                       c;
-    uint64                    r;
-    Datum                    *vals;
-    bool                     *nulls_arr;
-    FastpostgresColumnarWrite w;
+    Form_pg_attribute att;
+    uint8_t           kind;
+    uint32_t          pgtype;
+    int               width;
+    Oid               typoutput;
+    bool              varlena;   /* wire kind carries offsets + bytes */
+    uint64            data_len;  /* region reserved for this column */
+    uint64            used;      /* its exact data_len after the write */
+    uint64            hdr_plain; /* name .. data_len, before the alignment pad */
+    char             *header;    /* start of the column header */
+    char             *data;      /* the reserved region */
+    char             *nulls;     /* its null bitmap, zeroed by write_column */
+    char             *text_p;    /* varlena: next free byte in the byte area */
+    uint32           *off;       /* varlena: the (nrows + 1) offset table */
+} ColumnPlan;
 
-    /* Deform every tuple once. Reading attribute-by-attribute with heap_getattr
-     * re-walks the variable-width offsets for each column, ~O(ncols^2) per row. */
-    vals      = palloc(sizeof(Datum) * nrows * ncols);
-    nulls_arr = palloc(sizeof(bool) * nrows * ncols);
+/* How many rows the capacity estimate looks at. Eight is enough to tell a
+ * short text column from a long one; the exact fallback handles the rest. */
+#define COLUMNAR_SAMPLE_ROWS 8
+
+static void
+columnar_setup(ColumnPlan *plans, TupleDesc td, uint64 nrows, bool *any_varlena)
+{
+    int c;
+
+    *any_varlena = false;
+    for (c = 0; c < td->natts; c++)
+    {
+        ColumnPlan       *pl = &plans[c];
+        Form_pg_attribute att = TupleDescAttr(td, c);
+
+        pl->att     = att;
+        pl->kind    = fastpostgres_oid_to_kind(att->atttypid);
+        pl->pgtype  = (uint32)att->atttypid;
+        pl->width   = fastpostgres_kind_width(pl->kind);
+        pl->varlena = fastpostgres_kind_is_varlena(pl->kind) != 0;
+        pl->data_len = pl->varlena ? (uint64)(nrows + 1) * 4 : (uint64)nrows * (uint64)pl->width;
+
+        if (pl->varlena && !varlena_bytes(att->atttypid))
+        {
+            bool varlena;
+            getTypeOutputInfo(att->atttypid, &pl->typoutput, &varlena);
+        }
+        if (pl->varlena) *any_varlena = true;
+    }
+}
+
+/* Estimate each varlena column's byte area from the first few rows, so the
+ * common case needs one write pass and no sizing pass. `data_len` is only a
+ * reservation: columnar_fill reports an overrun and the caller retries with
+ * exact sizes. */
+static void
+columnar_estimate(ColumnPlan *plans, int ncols, HeapTuple *tuples, TupleDesc td, uint64 nrows,
+                  Datum *rowvals, bool *rownulls)
+{
+    uint64  sample = nrows < COLUMNAR_SAMPLE_ROWS ? nrows : COLUMNAR_SAMPLE_ROWS;
+    uint64 *maxlen = palloc0(sizeof(uint64) * (ncols > 0 ? ncols : 1));
+    uint64  r;
+    int     c;
+
+    for (r = 0; r < sample; r++)
+    {
+        heap_deform_tuple(tuples[r], td, rowvals, rownulls);
+        for (c = 0; c < ncols; c++)
+        {
+            ColumnPlan *pl = &plans[c];
+            const char *d;
+            int         len;
+
+            if (!pl->varlena || rownulls[c]) continue;
+            text_cell(rowvals[c], false, pl->att->atttypid, pl->typoutput, &d, &len);
+            if ((uint64)len > maxlen[c]) maxlen[c] = (uint64)len;
+        }
+    }
+
+    for (c = 0; c < ncols; c++)
+    {
+        ColumnPlan *pl = &plans[c];
+        uint64      per_row;
+
+        if (!pl->varlena) continue;
+        /* One sample's longest value plus a floor that covers tiny/NULL-heavy
+         * samples and the "+ 16 B" is the per-row allowance for growth. */
+        per_row = maxlen[c] + 16;
+        if (per_row < 24) per_row = 24;
+        pl->data_len = (uint64)(nrows + 1) * 4 + per_row * nrows;
+    }
+}
+
+/* Exact sizes, for the retry after a capacity estimate overruns. This is the
+ * same walk the old writer did once; it keeps only lengths. */
+static void
+columnar_size_exact(ColumnPlan *plans, int ncols, HeapTuple *tuples, TupleDesc td, uint64 nrows,
+                    Datum *rowvals, bool *rownulls)
+{
+    uint64 r;
+    int    c;
+
+    for (c = 0; c < ncols; c++)
+        if (plans[c].varlena) plans[c].data_len = (uint64)(nrows + 1) * 4;
+
     for (r = 0; r < nrows; r++)
-        heap_deform_tuple(tuples[r], td, vals + r * ncols, nulls_arr + r * ncols);
+    {
+        heap_deform_tuple(tuples[r], td, rowvals, rownulls);
+        for (c = 0; c < ncols; c++)
+        {
+            ColumnPlan *pl = &plans[c];
+            const char *d;
+            int         len;
+
+            if (!pl->varlena || rownulls[c]) continue;
+            text_cell(rowvals[c], false, pl->att->atttypid, pl->typoutput, &d, &len);
+            pl->data_len += (uint64)len;
+        }
+    }
+}
+
+/* Reserve every column's header and its data region, then write each value
+ * once, in place. Returns 0 when a column overruns its reservation or the
+ * reserved frame does not fit; the caller retries with exact sizes. */
+static int
+columnar_fill(ColumnPlan *plans, int ncols, HeapTuple *tuples, TupleDesc td, uint64 nrows,
+              uint32 null_bytes, char *out, char *end, Datum *rowvals, bool *rownulls)
+{
+    FastpostgresColumnarWrite w;
+    uint64                    r;
+    int                       c;
 
     fastpostgres_columnar_write_begin(&w, out, (uint32)ncols, nrows);
 
     for (c = 0; c < ncols; c++)
     {
-        Form_pg_attribute att       = TupleDescAttr(td, c);
-        Oid               type      = att->atttypid;
-        int               kind      = fastpostgres_oid_to_kind(type);
-        int               width     = fastpostgres_kind_width((uint8_t)kind);
-        Oid               typoutput = InvalidOid;
-        size_t            name_len  = strlen(NameStr(att->attname));
-        char             *data;
+        ColumnPlan *pl       = &plans[c];
+        size_t      name_len = strlen(NameStr(pl->att->attname));
+        char       *data;
 
-        if (fastpostgres_kind_is_varlena((uint8_t)kind) && !varlena_bytes(type))
+        pl->header    = w.p;
+        pl->hdr_plain = 4 + (uint64)name_len + 1 + 4 + (uint64)null_bytes + 8;
+        if (w.p + pl->hdr_plain + 8 > end) return 0;
+
+        data      = fastpostgres_columnar_write_column(&w, NameStr(pl->att->attname), (uint32)name_len,
+                                                       pl->kind, pl->pgtype, null_bytes);
+        pl->data  = data;
+        pl->nulls = w.nulls;
+
+        if (pl->varlena)
         {
-            bool varlena;
-            getTypeOutputInfo(type, &typoutput, &varlena);
+            pl->off    = (uint32 *)data;
+            pl->text_p = data + (nrows + 1) * 4;
+            pl->off[0] = 0;
         }
 
-        if (w.p + 4 + name_len + 1 + 4 + (size_t)null_bytes + 8 + 8 > end)
-            elog(ERROR, "fastpostgres: result exceeds the segment");
+        if (w.p + pl->data_len > end) return 0;
+        fastpostgres_columnar_write_end(&w, pl->data_len);
+    }
 
-        data = fastpostgres_columnar_write_column(&w, NameStr(att->attname), (uint32)name_len, (uint8_t)kind,
-                                                  (uint32)type, (uint32)null_bytes);
-
-        if (fastpostgres_kind_is_varlena((uint8_t)kind))
+    for (r = 0; r < nrows; r++)
+    {
+        heap_deform_tuple(tuples[r], td, rowvals, rownulls);
+        for (c = 0; c < ncols; c++)
         {
-            uint32 *off;
-            char   *bytes;
-            char   *p;
+            ColumnPlan *pl     = &plans[c];
+            bool        isnull = rownulls[c];
 
-            if (w.p + (uint64)(nrows + 1) * 4 > end) elog(ERROR, "fastpostgres: result exceeds the segment");
-            off    = (uint32 *)data;
-            p      = data + (nrows + 1) * 4;
-            bytes  = p;
-            off[0] = 0;
-            for (r = 0; r < nrows; r++)
+            if (isnull)
             {
-                bool        isnull = nulls_arr[r * ncols + c];
+                pl->nulls[r >> 3] |= (char)(1 << (r & 7));
+                if (pl->varlena)
+                    pl->off[r + 1] = pl->off[r]; /* a null consumes no bytes */
+                else
+                    memset(pl->data + r * (uint64)pl->width, 0,
+                           (size_t)pl->width); /* data_len == nrows * width */
+                continue;
+            }
+
+            if (pl->varlena)
+            {
                 const char *d;
                 int         len;
-                text_cell(vals[r * ncols + c], isnull, type, typoutput, &d, &len);
-                if (isnull)
-                {
-                    w.nulls[r >> 3] |= (char)(1 << (r & 7));
-                    off[r + 1] = off[r];
-                }
-                else
-                {
-                    if (p + len > end) elog(ERROR, "fastpostgres: result exceeds the segment");
-                    memcpy(p, d, (size_t)len);
-                    p += len;
-                    off[r + 1] = (uint32)(p - bytes);
-                }
+
+                text_cell(rowvals[c], false, pl->att->atttypid, pl->typoutput, &d, &len);
+                if ((uint64)(pl->text_p - pl->data) + (uint64)len > pl->data_len) return 0;
+                memcpy(pl->text_p, d, (size_t)len);
+                pl->text_p += len;
+                pl->off[r + 1] = (uint32)(pl->text_p - (pl->data + (nrows + 1) * 4));
             }
-            fastpostgres_columnar_write_end(&w, (uint64)(nrows + 1) * 4 + (uint64)(p - bytes));
-        }
-        else
-        {
-            if (w.p + (uint64)nrows * (uint64)width > end)
-                elog(ERROR, "fastpostgres: result exceeds the segment");
-            for (r = 0; r < nrows; r++)
+            else
             {
-                bool  isnull = nulls_arr[r * ncols + c];
-                Datum d      = vals[r * ncols + c];
-                char *slot   = data + r * (uint64)width;
-                if (isnull)
-                {
-                    w.nulls[r >> 3] |= (char)(1 << (r & 7));
-                    memset(slot, 0, (size_t)width); /* nulls keep their slot: data_len == nrows*width */
-                    continue;
-                }
-                switch (kind)
+                Datum d    = rowvals[c];
+                char *slot = pl->data + r * (uint64)pl->width;
+
+                switch (pl->kind)
                 {
                     case FASTPOSTGRES_KIND_BOOL:
                         *slot = DatumGetBool(d) ? 1 : 0;
@@ -177,7 +282,7 @@ fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char 
                         break;
                     }
                     case FASTPOSTGRES_KIND_FLOAT8: {
-                        double v = (type == NUMERICOID)
+                        double v = (pl->att->atttypid == NUMERICOID)
                                        ? DatumGetFloat8(DirectFunctionCall1(numeric_float8, d))
                                        : DatumGetFloat8(d);
                         memcpy(slot, &v, 8);
@@ -208,11 +313,110 @@ fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char 
                     }
                 }
             }
-            fastpostgres_columnar_write_end(&w, (uint64)nrows * (uint64)width);
         }
     }
 
-    return (uint64)(w.p - out);
+    for (c = 0; c < ncols; c++)
+        plans[c].used = plans[c].varlena ? (uint64)(plans[c].text_p - plans[c].data)
+                                          : plans[c].data_len;
+    return 1;
+}
+
+/* Close the gap the capacity estimate left in front of each column, so the
+ * final bytes and data_len are the exact ones the frame always carried. The
+ * move is leftwards only: a column's new data can never pass its old end, so
+ * later columns are still readable when their turn comes. */
+static char *
+columnar_compact(ColumnPlan *plans, int ncols, char *out)
+{
+    char *dst = out + FASTPOSTGRES_COLUMNAR_FRAME;
+    int   c;
+
+    for (c = 0; c < ncols; c++)
+    {
+        ColumnPlan *pl       = &plans[c];
+        uint64      dst_off  = (uint64)(dst - out);
+        uint64      data_off = FASTPOSTGRES_ALIGN8(dst_off + pl->hdr_plain);
+        char       *data     = out + data_off;
+
+        if (dst != pl->header) memmove(dst, pl->header, (size_t)pl->hdr_plain);
+        if (data_off > dst_off + pl->hdr_plain)
+            memset(dst + pl->hdr_plain, 0, (size_t)(data_off - dst_off - pl->hdr_plain));
+        fastpostgres_put_u64(dst + pl->hdr_plain - 8, pl->used); /* exact data_len */
+
+        if (pl->used > 0 && data != pl->data) memmove(data, pl->data, (size_t)pl->used);
+        dst = data + pl->used;
+    }
+    return dst;
+}
+
+/* Build the frame directly into its final column regions.
+ *
+ * The old shape palloc'd a row-major Datum/bool scratch (8 B + 1 B per value)
+ * and transposed it into the payload, so every value was touched twice and
+ * every chunk paid a fresh multi-MiB allocation and its page faults. Here the
+ * fixed-width sizes are exact, the varlena areas are reserved from a sample of
+ * the first rows, every column's header and region is laid out up front, and
+ * each value is written once, in place. A sampled text column that grows past
+ * its reservation falls back to exact sizing and one more pass; the common
+ * case takes neither.
+ *
+ * The frame comes from the shared writer, so the layout matches the client's
+ * generators exactly. Returns the payload size. */
+uint64
+fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out, char *end)
+{
+    int                       ncols      = td->natts;
+    uint32                    null_bytes = (uint32)((nrows + 7) / 8);
+    int                       nalloc     = ncols > 0 ? ncols : 1;
+    ColumnPlan               *plans;
+    Datum                    *rowvals;
+    bool                     *rownulls;
+    bool                      any_varlena;
+    char                     *final;
+    MemoryContext             tmp_ctx = NULL;
+    MemoryContext             old_ctx = CurrentMemoryContext;
+
+    plans    = palloc0(sizeof(ColumnPlan) * nalloc);
+    rowvals  = palloc(sizeof(Datum) * nalloc);
+    rownulls = palloc(sizeof(bool) * nalloc);
+
+    columnar_setup(plans, td, nrows, &any_varlena);
+
+    /* Detoast copies and output-function strings are chunk temporaries, not
+     * frame bytes: give them a context this build owns and delete it at the
+     * end instead of leaving them in the SPI context. */
+    if (any_varlena)
+    {
+        tmp_ctx = AllocSetContextCreate(CurrentMemoryContext, "fastpostgres columnar", ALLOCSET_DEFAULT_SIZES);
+        old_ctx = MemoryContextSwitchTo(tmp_ctx);
+        columnar_estimate(plans, ncols, tuples, td, nrows, rowvals, rownulls);
+        MemoryContextReset(tmp_ctx);
+    }
+
+    if (!columnar_fill(plans, ncols, tuples, td, nrows, null_bytes, out, end, rowvals, rownulls))
+    {
+        if (!any_varlena) elog(ERROR, "fastpostgres: result exceeds the segment");
+
+        /* The estimate was too small (or the reserved frame did not fit):
+         * size the text areas exactly and fill once more. */
+        MemoryContextReset(tmp_ctx);
+        columnar_size_exact(plans, ncols, tuples, td, nrows, rowvals, rownulls);
+        MemoryContextReset(tmp_ctx);
+
+        if (!columnar_fill(plans, ncols, tuples, td, nrows, null_bytes, out, end, rowvals, rownulls))
+            elog(ERROR, "fastpostgres: result exceeds the segment");
+    }
+
+    final = columnar_compact(plans, ncols, out);
+
+    if (tmp_ctx != NULL)
+    {
+        MemoryContextSwitchTo(old_ctx);
+        MemoryContextDelete(tmp_ctx);
+    }
+
+    return (uint64)(final - out);
 }
 
 uint64

@@ -1,0 +1,109 @@
+# team-databases — H8-A: build the columnar frame in place
+#
+# Same host, same command, one player at a time, under /tmp/fpq-bench.lock.
+# Baseline image: fpq-baseline. Change image: fpq-databases (team/databases).
+#
+# command:
+#   flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+#       -e BENCH_GIT_REV=baseline fpq-baseline benchmarks.sh 100000'
+#   flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+#       -e BENCH_GIT_REV=databases fpq-databases benchmarks.sh 100000'
+
+### BASELINE
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+read_rows: 660.2 cycles/row over 400000 rows (decode 658.0, frame+desc+list 2.3)
+read_rows: 663.9 cycles/row over 400000 rows (decode 659.5, frame+desc+list 4.4)
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  100K            8.27M        2.31M    357.3%  ok
+  spread: stream() ±3.3%  arrow table ±1.3%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  100K     fastpostgres, DBAPI                 3.70M          
+  100K     fastpostgres, stream()              8.19M      221%
+  100K     fastpostgres, core interface        3.66M       99%
+  100K     fastpostgres, 4 processes           9.17M      248%
+  100K     adbc+arrow, arrow table             2.31M       62%
+  100K     adbc+arrow, fetchall()              0.14M        4%
+  100K     adbc+arrow, table+to_pylist         1.37M       37%
+
+### CHANGE
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: databases
+shm: 3.0G
+### END ENV
+read_rows: 656.0 cycles/row over 400000 rows (decode 654.1, frame+desc+list 1.9)
+read_rows: 642.6 cycles/row over 400000 rows (decode 640.9, frame+desc+list 1.7)
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  100K            9.37M        2.32M    404.0%  ok
+  spread: stream() ±0.9%  arrow table ±0.4%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  100K     fastpostgres, DBAPI                 3.74M          
+  100K     fastpostgres, stream()              9.41M      252%
+  100K     fastpostgres, core interface        3.59M       96%
+  100K     fastpostgres, 4 processes           8.57M      229%
+  100K     adbc+arrow, arrow table             2.31M       62%
+  100K     adbc+arrow, fetchall()              0.14M        4%
+  100K     adbc+arrow, table+to_pylist         1.36M       36%
+
+# ---------------------------------------------------------------------------
+# The encode isolated: 1M-row table in the benchmark's shape, 100k-row batches,
+# ring.next (fetch + columnar_build + publish) against ring.next_rows (the row
+# frame, which does no transpose) as the control. Same script both images.
+#
+# command:
+#   flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+#       -v /tmp/opencode/encode_probe.py:/tmp/encode_probe.py:ro \
+#       fpq-baseline|fpq-databases python3 /tmp/encode_probe.py <label>'
+#
+# baseline (three interleaved runs):
+baseline-1: columnar next 112.62 ns/row median, min 108.07, max 191.88, n=50
+baseline-1: rows next 34.12 ns/row median, min 33.38, max 38.99, n=50
+baseline-2: columnar next 113.95 ns/row median, min 109.56, max 193.13, n=50
+baseline-2: rows next 34.64 ns/row median, min 33.57, max 40.12, n=50
+baseline-3: columnar next 110.35 ns/row median, min 107.43, max 175.14, n=50
+baseline-3: rows next 34.20 ns/row median, min 33.52, max 38.84, n=50
+#
+# change (three interleaved runs):
+databases-1: columnar next 103.52 ns/row median, min 99.21, max 225.38, n=50
+databases-1: rows next 34.29 ns/row median, min 33.57, max 43.56, n=50
+databases-2: columnar next 101.99 ns/row median, min 97.69, max 166.72, n=50
+databases-2: rows next 34.01 ns/row median, min 33.26, max 38.81, n=50
+databases-3: columnar next 106.41 ns/row median, min 103.17, max 174.90, n=50
+databases-3: rows next 34.18 ns/row median, min 33.43, max 37.77, n=50
+#
+# wire identity: sha256 over every exposed frame byte (names/kinds/types, data,
+# offsets+bytes, null bitmaps) is identical on baseline and change for the bench,
+# NULL-heavy, growing-text-retry and binary-kind shapes. See DESIGN.md.
+
+### AB
+benchmarks.sh 100000: stream() 8.27M -> 9.37M rows/s (+13.3%), PATHS stream 8.19M -> 9.41M (+14.9%); encode isolation: ring.next columnar 112.6 -> 103.5 ns/row median (-8.1%, the row-frame control is flat 34.2 -> 34.2); tests.sh green (55 client tests + make installcheck).
