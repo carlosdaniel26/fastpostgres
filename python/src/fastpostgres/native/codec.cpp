@@ -594,29 +594,80 @@ namespace
 
 /* Rows one kind dispatch covers: enough for the switch not to be per value,
  * small enough that a block's pointers, offsets and tuples stay in registers. */
-#define FP_ROWS_BLOCK 8
+#define FP_ROWS_BLOCK 16
+
+/* No attribute offset is a property of the schema here. */
+#define FP_NO_OFF UINT32_MAX
 
 struct AttLayout {
     int32_t  attlen;   /* -1 for the varlena kinds */
     uint32_t alignby;
     uint32_t nullbyte; /* the tuple byte holding this column's null bit */
     uint8_t  nullbit;
+    bool     varlena;
 };
 
-/* One block being decoded: the rows, where each row's walk has got to, whether
- * it carries a null bitmap, and the tuple its values are landing in. */
+/* One block being decoded: the rows, the attribute area of each (t_hoff is
+ * MAXALIGNed, so offsets relative to it align as heap_deform_tuple's do),
+ * where each row's walk has got to, whether it carries a null bitmap, and the
+ * tuple its values are landing in. */
 struct RowBlock {
     const uint8_t *row[FP_ROWS_BLOCK];
+    const uint8_t *base[FP_ROWS_BLOCK]; /* row + t_hoff: offsets are relative to it */
     PyObject      *tup[FP_ROWS_BLOCK];
     uint32_t       off[FP_ROWS_BLOCK];
-    bool           hasnull[FP_ROWS_BLOCK];
+    uint8_t        hasnull[FP_ROWS_BLOCK];
     uint32_t       n;
 };
 
+/* A varlena header decoded once: the value's total size (header included) and
+ * its data length. The old body asked for the data pointer and the length
+ * separately and then decoded the same header a third time to advance the
+ * offset; that is two dependent loads on the walk's critical path per value.
+ *
+ * The header form is data-dependent on a mixed batch (short values use one byte,
+ * long ones four), so the choice is a cmov rather than a branch: the shape the
+ * mixed meter prices at ~3 conditional mispredicts a row. Reading four bytes
+ * from a one-byte header is safe here - the row is padded to MAXALIGN and the
+ * value is never the last mapped byte. */
+static inline uint32_t
+fp_varatt_size(const uint8_t *p, uint32_t *len)
+{
+#if FASTPOSTGRES_BIG_ENDIAN
+    uint32_t one = (uint32_t)(p[0] >> 7);
+    uint32_t s1  = (uint32_t)(p[0] & 0x7Fu);
+    uint32_t s4  = fastpostgres_peek_u32(p) & 0x3FFFFFFFu;
+#else
+    uint32_t one = (uint32_t)(p[0] & 1u);
+    uint32_t s1  = (uint32_t)(p[0] >> 1);
+    uint32_t s4  = fastpostgres_peek_u32(p) >> 2;
+#endif
+    uint32_t mask = (uint32_t)0 - one; /* all ones for the one-byte form */
+    uint32_t size = (s4 & ~mask) | (s1 & mask);
+    uint32_t hdr  = 4u - 3u * one;
+
+    *len = size - hdr;
+    return size;
+}
+
+/* att_align_pointer's choice without the branch: a value whose first byte is
+ * zero is aligned, anything else is taken where it lies. */
+static inline uint32_t
+fp_att_pointer_align(uint32_t off, uint32_t alignby, const uint8_t *ptr)
+{
+    uint32_t aligned = (off + alignby - 1) & ~(alignby - 1);
+    uint32_t mask    = (uint32_t)0 - (uint32_t)(*ptr == 0);
+
+    return off + ((aligned - off) & mask);
+}
+
 template <uint8_t K>
 inline PyObject *
-tuple_value(const uint8_t *p)
+tuple_fixed(const uint8_t *p)
 {
+    static_assert(K != FASTPOSTGRES_KIND_TEXT && K != FASTPOSTGRES_KIND_BYTEA,
+                  "varlena kinds are decoded by tuple_varlena()");
+
     if constexpr (K == FASTPOSTGRES_KIND_BOOL)
         return PyBool_FromLong(*p != 0);
     else if constexpr (K == FASTPOSTGRES_KIND_INT16)
@@ -657,105 +708,218 @@ tuple_value(const uint8_t *p)
         return timestamp_from_us(load_le64(p), 0);
     else if constexpr (K == FASTPOSTGRES_KIND_TIMESTAMPTZ)
         return timestamp_from_us(load_le64(p), 1);
-    else if constexpr (K == FASTPOSTGRES_KIND_UUID)
-        return uuid_from_bytes(p);
-    else if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
-        return PyBytes_FromStringAndSize((const char *)fastpostgres_vardata_any(p),
-                                         (Py_ssize_t)fastpostgres_vardata_len(p));
     else
-    {
-        const char *d = (const char *)fastpostgres_vardata_any(p);
-
-        return PyUnicode_FromStringAndSize(d, (Py_ssize_t)fastpostgres_vardata_len(p));
-    }
+        return uuid_from_bytes(p);
 }
 
-/* One column of a block, in row order. K settles which alignment the value
- * needs and whether it is varlena at compile time, so the body carries no kind
- * test; the layout supplies the rest, resolved once per batch. */
 template <uint8_t K>
+inline PyObject *
+tuple_varlena(const uint8_t *data, uint32_t len)
+{
+    if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
+        return PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)len);
+    else
+        return PyUnicode_FromStringAndSize((const char *)data, (Py_ssize_t)len);
+}
+
+/* One column of a block, in row order, for a fixed-width kind. STATIC_OFF says
+ * the batch's layout made this attribute's offset constant, so the value is
+ * read where it lies with no align/addlength chain; NULLFREE says no row in the
+ * block has a null here, so the body carries no null test either. */
+template <uint8_t K, bool NULLFREE, bool STATIC_OFF>
 inline bool
-block_column(RowBlock &b, const AttLayout &layout, uint32_t cidx)
+block_fixed_loop(RowBlock &b, const AttLayout &layout, uint32_t cidx, uint32_t fixed_off)
 {
     for (uint32_t k = 0; k < b.n; k++)
     {
         const uint8_t *row = b.row[k];
-        PyObject      *v;
 
-        if (b.hasnull[k] && (row[layout.nullbyte] & layout.nullbit) == 0)
+        if constexpr (!NULLFREE)
         {
-            v = Py_None;
-            Py_INCREF(v); /* a null stores nothing: the offset does not move */
+            if (b.hasnull[k] && (row[layout.nullbyte] & layout.nullbit) == 0)
+            {
+                PyObject *none = Py_None;
+                Py_INCREF(none); /* a null stores nothing: the offset does not move */
+                PyTuple_SET_ITEM(b.tup[k], (Py_ssize_t)cidx, none);
+                continue;
+            }
         }
+
+        uint32_t o;
+
+        if constexpr (STATIC_OFF)
+            o = fixed_off;
         else
-        {
-            uint32_t       o;
-            const uint8_t *p;
+            o = fastpostgres_att_align(b.off[k], layout.alignby);
 
-            if (fastpostgres_kind_is_varlena(K))
-                o = fastpostgres_att_pointer_align(b.off[k], layout.alignby, row + b.off[k]);
-            else
-                o = fastpostgres_att_align(b.off[k], layout.alignby);
-
-            p = row + o;
-            v = tuple_value<K>(p);
-            if (v == nullptr) return false;
-            b.off[k] = fastpostgres_att_addlength(o, layout.attlen, p);
-        }
+        PyObject *v = tuple_fixed<K>(b.base[k] + o);
+        if (v == nullptr) return false;
+        b.off[k] = o + (uint32_t)layout.attlen;
         PyTuple_SET_ITEM(b.tup[k], (Py_ssize_t)cidx, v);
     }
     return true;
 }
 
-/* One block: the switch runs once per column, and each column's body then walks
- * every row of the block without it. */
+/* The same walk for a varlena kind. The header is decoded once and its total
+ * size advances the offset, so the value and the next attribute share one load.
+ * A schema-static offset is only used when that offset is already aligned: when
+ * it is not, att_align_pointer's answer depends on the value's own first byte. */
+template <uint8_t K, bool NULLFREE, bool STATIC_OFF>
 inline bool
-decode_block(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *layout, RowBlock &b)
+block_varlena_loop(RowBlock &b, const AttLayout &layout, uint32_t cidx, uint32_t fixed_off)
 {
+    for (uint32_t k = 0; k < b.n; k++)
+    {
+        const uint8_t *row = b.row[k];
+
+        if constexpr (!NULLFREE)
+        {
+            if (b.hasnull[k] && (row[layout.nullbyte] & layout.nullbit) == 0)
+            {
+                PyObject *none = Py_None;
+                Py_INCREF(none);
+                PyTuple_SET_ITEM(b.tup[k], (Py_ssize_t)cidx, none);
+                continue;
+            }
+        }
+
+        uint32_t o;
+
+        if constexpr (STATIC_OFF)
+            o = fixed_off;
+        else
+            o = fp_att_pointer_align(b.off[k], layout.alignby, b.base[k] + b.off[k]);
+
+        const uint8_t *p    = b.base[k] + o;
+        uint32_t       len  = 0;
+        uint32_t       size = fp_varatt_size(p, &len);
+        PyObject      *v    = tuple_varlena<K>(p + (size - len), len);
+
+        if (v == nullptr) return false;
+        b.off[k] = o + size;
+        PyTuple_SET_ITEM(b.tup[k], (Py_ssize_t)cidx, v);
+    }
+    return true;
+}
+
+/* One column of a block. K settles the kind at compile time; the layout and the
+ * block's null map settle the rest before the row loop starts. */
+template <uint8_t K>
+inline bool
+block_column(RowBlock &b, const AttLayout &layout, uint32_t cidx, uint32_t fixed_off, bool nullfree)
+{
+    constexpr bool VARLENA = (K == FASTPOSTGRES_KIND_TEXT || K == FASTPOSTGRES_KIND_BYTEA);
+    bool           fixed   = fixed_off != FP_NO_OFF;
+
+    if constexpr (VARLENA)
+    {
+        if (fixed)
+        {
+            if (nullfree) return block_varlena_loop<K, true, true>(b, layout, cidx, fixed_off);
+            return block_varlena_loop<K, false, true>(b, layout, cidx, fixed_off);
+        }
+        if (nullfree) return block_varlena_loop<K, true, false>(b, layout, cidx, 0);
+        return block_varlena_loop<K, false, false>(b, layout, cidx, 0);
+    }
+    else
+    {
+        if (fixed)
+        {
+            if (nullfree) return block_fixed_loop<K, true, true>(b, layout, cidx, fixed_off);
+            return block_fixed_loop<K, false, true>(b, layout, cidx, fixed_off);
+        }
+        if (nullfree) return block_fixed_loop<K, true, false>(b, layout, cidx, 0);
+        return block_fixed_loop<K, false, false>(b, layout, cidx, 0);
+    }
+}
+
+/* One block: the switch runs once per column, and each column's body then walks
+ * every row of the block without it. The per-block layout is resolved here,
+ * after the block's null bytes are known: a fixed-width attribute whose
+ * predecessors are all fixed-width and null-free in this block has one offset,
+ * and a column with no null bit anywhere in the block needs no null test. */
+inline bool
+decode_block(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *layout, uint32_t *fixed,
+             const uint8_t *nonnull, RowBlock &b)
+{
+    uint32_t off = 0;
+    bool     dyn = false;
+
     for (uint32_t c = 0; c < ncols; c++)
     {
-        bool ok;
+        bool anynull = (nonnull[c >> 3] & (uint8_t)(1u << (c & 7))) == 0;
+
+        if (dyn)
+            fixed[c] = FP_NO_OFF;
+        else if (layout[c].varlena)
+        {
+            if ((off & (layout[c].alignby - 1)) != 0)
+            {
+                /* att_align_pointer reads the value's own header to choose */
+                fixed[c] = FP_NO_OFF;
+                dyn      = true;
+            }
+            else
+                fixed[c] = off;
+        }
+        else
+        {
+            off      = fastpostgres_att_align(off, layout[c].alignby);
+            fixed[c] = off;
+        }
+
+        if (layout[c].varlena || anynull)
+            dyn = true;
+        else
+            off += (uint32_t)layout[c].attlen;
+    }
+
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        bool     nullfree = (nonnull[c >> 3] & (uint8_t)(1u << (c & 7))) != 0;
+        uint32_t f        = fixed[c];
+        bool     ok;
 
         switch (cols[c].kind)
         {
             case FASTPOSTGRES_KIND_BOOL:
-                ok = block_column<FASTPOSTGRES_KIND_BOOL>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_BOOL>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT16:
-                ok = block_column<FASTPOSTGRES_KIND_INT16>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_INT16>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT32:
-                ok = block_column<FASTPOSTGRES_KIND_INT32>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_INT32>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT64:
-                ok = block_column<FASTPOSTGRES_KIND_INT64>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_INT64>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_FLOAT4:
-                ok = block_column<FASTPOSTGRES_KIND_FLOAT4>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_FLOAT4>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_FLOAT8:
-                ok = block_column<FASTPOSTGRES_KIND_FLOAT8>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_FLOAT8>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_DATE:
-                ok = block_column<FASTPOSTGRES_KIND_DATE>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_DATE>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIME:
-                ok = block_column<FASTPOSTGRES_KIND_TIME>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_TIME>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIMESTAMP:
-                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMP>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMP>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIMESTAMPTZ:
-                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_UUID:
-                ok = block_column<FASTPOSTGRES_KIND_UUID>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_UUID>(b, layout[c], c, f, nullfree);
                 break;
             case FASTPOSTGRES_KIND_BYTEA:
-                ok = block_column<FASTPOSTGRES_KIND_BYTEA>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_BYTEA>(b, layout[c], c, f, nullfree);
                 break;
             default:
-                ok = block_column<FASTPOSTGRES_KIND_TEXT>(b, layout[c], c);
+                ok = block_column<FASTPOSTGRES_KIND_TEXT>(b, layout[c], c, f, nullfree);
                 break;
         }
         if (!ok) return false;
@@ -769,11 +933,14 @@ bool
 fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRowsReader *rd, PyObject *rows)
 {
     std::vector<AttLayout> layout(ncols);
+    std::vector<uint32_t>  fixed(ncols);
+    std::vector<uint8_t>   nonnull((size_t)((ncols + 7) / 8)); /* one bit-byte per 8 columns */
     RowBlock               block;
     const uint8_t         *row;
     uint32_t               len;
-    uint64_t               expect = rd->left;
-    uint64_t               r      = 0;
+    uint64_t               expect   = rd->left;
+    uint64_t               r        = 0;
+    uint32_t               nulbytes = (ncols + 7) / 8;
 
     for (uint32_t c = 0; c < ncols; c++)
     {
@@ -788,6 +955,7 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
         layout[c].alignby  = (uint32_t)fastpostgres_kind_alignby(cols[c].kind);
         layout[c].nullbyte = FASTPOSTGRES_HT_BITS + (c >> 3);
         layout[c].nullbit  = (uint8_t)(1u << (c & 7));
+        layout[c].varlena  = fastpostgres_kind_is_varlena(cols[c].kind) != 0;
     }
 
     unsigned long long t0 = __rdtsc();
@@ -799,11 +967,18 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
          * into the caller's list before it is filled. A half-filled tuple is
          * only reachable through that list, and both the GC and the deallocator
          * walk its items null-safely. */
+        /* The block's non-null bits: heap_fill_tuple sets a bit for every
+         * attribute that is NOT null, so ANDing over the rows that carry a
+         * bitmap leaves a set bit exactly when no row in the block has a null
+         * here. Such a column gets a body with no per-value null test. A tuple
+         * without a bitmap has no nulls, so it contributes nothing. */
+        memset(nonnull.data(), 0xFF, (size_t)nulbytes);
         block.n = 0;
         while (block.n < FP_ROWS_BLOCK && fastpostgres_rows_next(rd, &row, &len))
         {
             PyObject *tup = PyTuple_New((Py_ssize_t)ncols);
             uint32_t  hoff;
+            uint8_t   hasnull;
 
             if (tup == nullptr) return false;
             hoff = fastpostgres_tuple_hoff(row);
@@ -821,16 +996,23 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
                 PyErr_SetString(PyExc_ValueError, "row tuple: fewer attributes than columns");
                 return false;
             }
+            hasnull = (uint8_t)(fastpostgres_tuple_hasnull(row) != 0);
+            if (hasnull)
+            {
+                for (uint32_t j = 0; j < nulbytes; j++)
+                    nonnull[j] &= row[FASTPOSTGRES_HT_BITS + j];
+            }
             block.row[block.n]     = row;
-            block.off[block.n]     = hoff;
-            block.hasnull[block.n] = fastpostgres_tuple_hasnull(row) != 0;
+            block.base[block.n]    = row + hoff;
+            block.off[block.n]     = 0;
+            block.hasnull[block.n] = hasnull;
             block.tup[block.n]     = tup;
             PyList_SET_ITEM(rows, (Py_ssize_t)(r + block.n), tup);
             block.n++;
         }
         if (block.n == 0) break;
 
-        if (!decode_block(cols, ncols, layout.data(), block)) return false;
+        if (!decode_block(cols, ncols, layout.data(), fixed.data(), nonnull.data(), block)) return false;
         r += block.n;
     }
     g_dec_cycles.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
