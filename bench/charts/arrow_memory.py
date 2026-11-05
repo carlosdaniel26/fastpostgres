@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Render the fixed-ring-budget comparison against ADBC + Arrow from its log.
 
-One image, two panels, the row count on the x axis (log2):
+One image, two panels, bars at the largest row count in the log (the smaller
+sizes tell the same relation):
 
     left   the same read, rows/s: the ring's stream() against ADBC's
            record-batch reader and against its materialized Arrow table
-    right  what each side held while it delivered: the ring's batches and the
-           fixed transfer buffer the worker mapped, the largest Arrow batch the
-           reader held, and the whole result for the table path - the three
-           numbers that say whether "the same rows" cost the same memory
+    right  what each side held while it delivered: the ring's batch, the largest
+           Arrow batch the reader held, and the whole result for the table path,
+           read against the ring's fixed transfer buffer (the dashed rule)
+
 
 The right panel is the point of the comparison, so the budget is drawn as a flat
 line: the ring's segment is the same number of bytes for every row count, while
@@ -87,32 +88,18 @@ def fmt_rows(v):
 
 def fmt_bytes(v, _pos=None):
     if v >= 1024**3:
-        return f"{v / 1024**3:g} GiB"
+        return f"{v / 1024**3:.3g} GiB"
     if v >= 1024**2:
-        return f"{v / 1024**2:g} MiB"
+        return f"{v / 1024**2:.3g} MiB"
     if v >= 1024:
-        return f"{v / 1024:g} KiB"
+        return f"{v / 1024:.3g} KiB"
     return f"{v:g}"
 
 
-def line(ax, xs, ys, color, ls="-", marker="o", width=1.8, labels=True, dy=7, fmt=fmt_bytes):
-    if not xs:
-        return
-    ax.plot(xs, ys, color=color, linestyle=ls, marker=marker, markersize=4.5,
-            linewidth=width, zorder=3)
-    if not labels:
-        return
-    for x, y in zip(xs, ys):
-        ax.annotate(fmt(y), (x, y), textcoords="offset points", xytext=(0, dy),
-                    ha="center", va="bottom" if dy > 0 else "top",
-                    fontsize=6.5, color=color, zorder=5)
-
-
 def style(ax, ticks, ylabel, log_y=False):
-    ax.set_xscale("log", base=10)
-    ax.set_xticks(ticks)
+    # categorical x: one group per row count, the bars side by side within it
+    ax.set_xticks(range(len(ticks)))
     ax.set_xticklabels([fmt_rows(t) for t in ticks], fontsize=8.5)
-    ax.xaxis.set_minor_formatter(mticker.NullFormatter())
     ax.set_xlabel("rows read")
     ax.set_ylabel(ylabel)
     if log_y:
@@ -140,6 +127,9 @@ def main():
         sys.exit(f"{args.log}: no rows found -- run `just arrow-memory-bench` first")
 
     rows = sorted(data)
+    if not rows:
+        sys.exit(f"{args.log}: no rows found")
+    rows = [rows[-1]]  # the largest size: the smaller ones tell the same relation
     fig, (ax_rate, ax_bytes) = plt.subplots(1, 2, figsize=(11.0, 5.0))
     style(ax_bytes, rows, "bytes held", log_y=True)
 
@@ -174,21 +164,43 @@ def main():
     theme.declutter(ax_rate, grid="y")
     ax_rate.set_title("the same read, same output, same rows", fontsize=9.5)
 
-    # the ring's fixed budget first: the line the others are read against
+    # the ring's fixed budget first: the rule the bars are read against
     budget = next((carried[n]["ring"]["seg_bytes"] for n in rows
                    if carried.get(n, {}).get("ring", {}).get("seg_bytes")), 0)
     if budget:
-        line(ax_bytes, [rows[0], rows[-1]], [budget, budget], GREY, ls="--", marker=None,
-             width=1.4, labels=False)
+        ax_bytes.axhline(budget, color=GREY, linestyle="--", linewidth=1.4, zorder=2)
         ax_bytes.annotate(f"the ring's transfer buffer: {fmt_bytes(budget)}, fixed",
-                          xy=(rows[0], budget), textcoords="offset points", xytext=(6, -12),
+                          xy=(0.02, budget), xycoords=("axes fraction", "data"),
+                          textcoords="offset points", xytext=(4, -12),
                           fontsize=7, color="#888888", zorder=4)
-    # the table path is the tallest line, so its labels go below the markers
-    for player, key, color, dy in (("ring", "max_batch_bytes", ACCENT, -11),
-                                   ("arrow-batch", "max_batch_bytes", GREEN, -11),
-                                   ("arrow-table", "result_bytes", ORANGE, -11)):
-        xs = [n for n in rows if carried.get(n, {}).get(player, {}).get(key)]
-        line(ax_bytes, xs, [carried[n][player][key] for n in xs], color, dy=dy)
+
+    slot = 0.8 / len(players)
+    smallest = None
+    peak = 0.0
+    for index, (player, color) in enumerate(players):
+        key = "result_bytes" if player == "arrow-table" else "max_batch_bytes"
+        xs, values = [], []
+        for position, n in enumerate(rows):
+            value = carried.get(n, {}).get(player, {}).get(key)
+            if not value:
+                continue
+            xs.append(position - 0.4 + slot * (index + 0.5))
+            values.append(value)
+        if not xs:
+            continue
+        peak = max([peak] + values)
+        smallest = min([smallest or peak] + values)
+        ax_bytes.bar(xs, values, slot * 0.9, color=color, zorder=3)
+        for x, value in zip(xs, values):
+            ax_bytes.annotate(fmt_bytes(value), (x, value), textcoords="offset points",
+                              xytext=(0, 5), ha="center", fontsize=6.5, color=color, zorder=5)
+    ax_bytes.set_xticks(range(len(rows)))
+    ax_bytes.set_xticklabels([fmt_rows(n) for n in rows], fontsize=8.5)
+    ax_bytes.set_xlabel("rows read")
+    ax_bytes.set_xlim(-0.6, len(rows) - 0.4)
+    ax_bytes.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_bytes))
+    if peak and smallest:
+        ax_bytes.set_ylim(smallest * 0.5, peak * 2.2)  # bars on a log axis
     ax_bytes.set_title("what each held while it delivered", fontsize=9.5)
 
     handles = [

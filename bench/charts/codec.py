@@ -210,43 +210,38 @@ def plot_transport(pairs, meta):
     theme.legend(ax_r, loc="upper right", fontsize=8)
     theme.declutter(ax_r)
 
-    # latency: p50 -> p99 per cell, log scale (the range is ~100x). The numbers
-    # live in the row labels: putting them beside the markers pushed them off the
-    # figure at the p99 end.
+    # latency: two bars per cell (p50 solid, p99 faded), log axis - the range is
+    # ~100x, and on a bar chart the two bars are read against the same baseline
     rows = [(p, t) for p in payloads for t in transports]
-    ys = list(range(len(rows)))
-    tick_labels = []
-    for y, (payload, transport) in zip(ys, rows):
-        c = cell(payload, transport)
-        p50, p99 = c["p50_ms"] * 1e3, c["p99_ms"] * 1e3
-        color = ACCENT if transport == "shm" else GREY[1]
-        ax_l.plot([p50, p99], [y, y], color=color, linewidth=2.4, zorder=3,
-                  solid_capstyle="round")
-        ax_l.scatter([p50], [y], color=color, s=44, zorder=4)
-        ax_l.scatter([p99], [y], facecolors="white", edgecolors=color, linewidths=1.6,
-                     s=44, zorder=4)
-        tick_labels.append(
-            f"{FORMAT_LABELS.get(payload, payload)} · {TRANSPORT_LABELS.get(transport, transport)}\n"
-            f"p50 {p50:,.0f} μs · p99 {p99:,.0f} μs"
-        )
+    xs = list(range(len(rows)))
+    width = 0.36
+    for i, (key, alpha) in enumerate((("p50_ms", 1.0), ("p99_ms", 0.45))):
+        values = [cell(p, t)[key] * 1e3 for p, t in rows]
+        pos = [x + (i - 0.5) * width for x in xs]
+        colors = [ACCENT if t == "shm" else GREY[1] for _p, t in rows]
+        drawn = ax_l.bar(pos, values, width=width, color=colors, alpha=alpha, zorder=3)
+        ax_l.bar_label(drawn, labels=[f"{v:,.0f}" for v in values], padding=2, fontsize=7.4)
+    ax_l.set_xticks(xs)
+    ax_l.set_xticklabels(
+        [f"{FORMAT_LABELS.get(p, p)}\n{TRANSPORT_LABELS.get(t, t)}" for p, t in rows],
+        fontsize=7.6, linespacing=1.3,
+    )
     lows = min(cell(p, t)["p50_ms"] for p, t in rows) * 1e3
     highs = max(cell(p, t)["p99_ms"] for p, t in rows) * 1e3
-    ax_l.set_yticks(ys)
-    ax_l.set_yticklabels(tick_labels, fontsize=7.6, linespacing=1.4)
-    ax_l.set_xscale("log")
-    ax_l.set_xlim(lows * 0.42, highs * 2.2)
-    ax_l.set_xticks([t for t in (1, 3, 10, 30, 100, 300, 1000, 3000)
-                     if lows * 0.42 <= t <= highs * 2.2])
-    ax_l.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
-    ax_l.xaxis.set_minor_formatter(NullFormatter())
-    ax_l.set_xlabel("per-chunk latency, μs (log scale)")
-    ax_l.set_title("latency: filled = p50, hollow = p99", fontsize=9.5)
+    ax_l.set_yscale("log")
+    ax_l.set_ylim(lows * 0.42, highs * 2.4)
+    ax_l.set_yticks([t for t in (1, 3, 10, 30, 100, 300, 1000, 3000)
+                     if lows * 0.42 <= t <= highs * 2.4])
+    ax_l.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
+    ax_l.yaxis.set_minor_formatter(NullFormatter())
+    ax_l.set_ylabel("per-chunk latency, μs (log)")
+    ax_l.set_title("latency: p50 solid, p99 faded", fontsize=9.5)
     ax_l.margins(y=0.24)
-    theme.declutter(ax_l, grid="x")
+    theme.declutter(ax_l)
 
     fig.suptitle("Transport cost: identical payload bytes, producer → consumer", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one chunk in flight"))
-    fig.subplots_adjust(left=0.235, right=0.975, top=0.84, bottom=0.14, wspace=0.42)
+    fig.subplots_adjust(left=0.235, right=0.975, top=0.84, bottom=0.21, wspace=0.42)
     return fig
 
 
@@ -352,39 +347,32 @@ def plot_who_pays(pairs, meta):
     ax_mem.set_title("peak RSS, MB", fontsize=9.5)
     theme.declutter(ax_mem)
 
-    # latency: min -> p50 -> p99 -> max, log scale
-    for y, r in zip(ys, rows):
-        c = cell[r]
-        lo, p50, p99, hi = (c["latency_min_ms"] * 1e3, c["p50_ms"] * 1e3,
-                            c["p99_ms"] * 1e3, c["latency_max_ms"] * 1e3)
-        color = ACCENT if r[1] == "shm" else GREY[1]
-        ax_lat.plot([lo, hi], [y, y], color=color, linewidth=1.4, zorder=3,
-                    solid_capstyle="round")
-        ax_lat.scatter([lo, hi], [y, y], color=color, marker="|", s=70, zorder=4)
-        ax_lat.scatter([p50], [y], color=color, s=44, zorder=5)
-        ax_lat.scatter([p99], [y], facecolors="white", edgecolors=color, linewidths=1.6,
-                       s=44, zorder=5)
+    # latency: p50 and p99 per cell, horizontal bars like the panels above
+    p50 = [cell[r]["p50_ms"] * 1e3 for r in rows]
+    p99 = [cell[r]["p99_ms"] * 1e3 for r in rows]
+    ax_lat.barh([y - 0.18 for y in ys], p50, height=0.34, color=colors, zorder=3)
+    ax_lat.barh([y + 0.18 for y in ys], p99, height=0.34, color=colors, alpha=FADED, zorder=3)
+    for y, median, tail in zip(ys, p50, p99):
+        ax_lat.text(median * 1.08, y - 0.18, f"{median:,.0f}", va="center", fontsize=7.4)
+        ax_lat.text(tail * 1.08, y + 0.18, f"{tail:,.0f}", va="center", fontsize=7.4)
     ax_lat.set_yticks(ys)
-    ax_lat.set_yticklabels([
-        f"{FORMAT_LABELS.get(p, p)} · {t}  ({cell[(p, t)]['p50_ms'] * 1e3:,.0f}/"
-        f"{cell[(p, t)]['p99_ms'] * 1e3:,.0f} μs)"
-        for p, t in rows
-    ], fontsize=7.8)
+    ax_lat.set_yticklabels(names, fontsize=7.8)
     ax_lat.invert_yaxis()
     ax_lat.set_xscale("log")
-    lo_all = min(cell[r]["latency_min_ms"] for r in rows) * 1e3 * 0.45
-    ax_lat.set_xlim(lo_all, max(cell[r]["latency_max_ms"] for r in rows) * 1e3 * 2.0)
-    ax_lat.set_xticks([t for t in (1, 3, 10, 30, 100, 300, 1000) if t >= lo_all])
+    lo_all = min(p50) * 0.45
+    hi_all = max(p99) * 2.2
+    ax_lat.set_xlim(lo_all, hi_all)
+    ax_lat.set_xticks([t for t in (1, 3, 10, 30, 100, 300, 1000) if lo_all <= t <= hi_all])
     ax_lat.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
     ax_lat.xaxis.set_minor_formatter(NullFormatter())
-    ax_lat.set_xlabel("min · p50 · p99 · max")
+    ax_lat.set_xlabel("p50 / p99, μs")
     ax_lat.set_title("per-chunk latency, μs (log)", fontsize=9.5)
     theme.declutter(ax_lat, grid="x")
 
     fig.suptitle("Who pays: CPU, memory and latency per side", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(
-        meta, "solid = producer, faded = consumer · | = min/max, ● = filled p50, "
-              "○ = hollow p99 · shm = shared memory, uds = UNIX socket"))
+        meta, "solid = producer / p50, faded = consumer / p99 · "
+              "shm = shared memory, uds = UNIX socket"))
     fig.subplots_adjust(left=0.115, right=0.975, top=0.83, bottom=0.16, wspace=0.85)
     return fig
 
