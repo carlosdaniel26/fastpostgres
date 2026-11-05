@@ -8,6 +8,7 @@
 #include "segment.hpp"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -24,11 +25,18 @@ typedef struct {
     size_t      size;
 } ReadMap;
 
+/* One mapping per segment name, for the process lifetime. Decoder threads share
+ * this cache (the asyncio layer runs one per connection), so the lookup-and-
+ * insert is locked: a reallocating push_back under a second reader is UB, even
+ * with the GIL held, once the GIL stops being the lock that hides it. */
+static std::mutex           g_read_maps_lock;
 static std::vector<ReadMap> g_read_maps;
 
 static void *
 read_map_get(const char *path, const std::string &name, size_t *size_out)
 {
+    std::lock_guard<std::mutex> held(g_read_maps_lock);
+
     for (ReadMap &m : g_read_maps)
     {
         if (m.name == name)

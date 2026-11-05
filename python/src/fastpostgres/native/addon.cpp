@@ -50,13 +50,36 @@ add_kind_constants(PyObject *module)
     return true;
 }
 
+/* Multi-phase init, so the free-threaded interpreter can be told this module is
+ * safe without the GIL. What that claim rests on, in this module and its
+ * neighbours: one ring belongs to one thread (ring.cpp refuses a second driver),
+ * a connection belongs to one thread (libpq's rule), the segment map cache and
+ * the decode counters are locked/atomic (segment.cpp, codec.cpp), and the codec's
+ * Python singletons are written once at init and only borrowed afterwards. */
+static int
+client_exec(PyObject *m)
+{
+    if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
+        !fp_register_segment(m) || !add_kind_constants(m))
+        return -1;
+    return 0;
+}
+
+static PyModuleDef_Slot client_slots[] = {
+    {Py_mod_exec, (void *)client_exec},
+#ifdef Py_mod_gil
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, nullptr},
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "fastpostgres._client",
     "fastpostgres client (shared memory + libpq)",
-    -1,
+    0, /* no module state: the types and caches are process globals, as before */
     nullptr,
-    nullptr,
+    client_slots,
     nullptr,
     nullptr,
     nullptr,
@@ -69,14 +92,5 @@ PyInit__client(void)
     if (!fp_types_init()) return nullptr;
     Py_AtExit(fp_stats_report); /* one line per process: how the row decode cost */
 
-    PyObject *m = PyModule_Create(&moduledef);
-    if (!m) return nullptr;
-
-    if (!fp_register_types(m) || !fp_register_connection(m) || !fp_register_ring(m) ||
-        !fp_register_segment(m) || !add_kind_constants(m))
-    {
-        Py_DECREF(m);
-        return nullptr;
-    }
-    return m;
+    return PyModuleDef_Init(&moduledef);
 }

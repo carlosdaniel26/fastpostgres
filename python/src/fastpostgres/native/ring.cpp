@@ -41,6 +41,71 @@ ring_errno(const char *what)
     PyErr_Format(PyExc_OSError, "%s: %s", what, strerror(e ? e : EIO));
 }
 
+/* Claim the ring's single request slot for this thread and process. Two drivers
+ * interleave the slot and steal each other's wake; and a forked child shares the
+ * mapped segment with its parent, so it must not drive the parent's ring at all.
+ * Both are silent corruption, so they are refused here rather than left to the
+ * caller's discipline. */
+static int
+ring_claim(RingObject *self, const char *what)
+{
+    if (self->ring == nullptr || self->done)
+    {
+        PyErr_Format(PyExc_RuntimeError, "ring: %s on a ring that was stopped", what);
+        return -1;
+    }
+    if (self->pid != (uint32_t)getpid())
+    {
+        PyErr_Format(PyExc_RuntimeError, "ring: %s after fork (the ring belongs to process %u)", what,
+                     (unsigned)self->pid);
+        return -1;
+    }
+    if (self->busy)
+    {
+        PyErr_Format(PyExc_RuntimeError, "ring: %s while a request is already in flight", what);
+        return -1;
+    }
+    self->busy    = 1;
+    self->busy_by = PyThread_get_thread_ident();
+    return 0;
+}
+
+static void
+ring_unclaim(RingObject *self)
+{
+    self->busy    = 0;
+    self->busy_by = 0;
+}
+
+/* The sticky half: an open stream belongs to the thread that opened it until
+ * that stream ends. The worker keeps one stream per ring, so a second thread's
+ * OPEN would silently abort the first thread's cursor and its next pull would
+ * read another query's rows. */
+static int
+ring_own(RingObject *self, const char *what)
+{
+    if (self->owned && self->owner != PyThread_get_thread_ident())
+    {
+        PyErr_Format(PyExc_RuntimeError, "ring: %s while another thread holds the open stream", what);
+        return -1;
+    }
+    return 0;
+}
+
+static void
+ring_take(RingObject *self)
+{
+    self->owned = 1;
+    self->owner = PyThread_get_thread_ident();
+}
+
+static void
+ring_disown(RingObject *self)
+{
+    self->owned = 0;
+    self->owner = 0;
+}
+
 /* Run the engine's teardown once. The shm engine has nothing to release, but
  * the call is kept for an engine that does. Idempotent, so the stop path and
  * the destructor can both run it. */
@@ -91,6 +156,11 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
             PyErr_SetString(PyExc_ValueError, "Ring: invalid segment name");
             return -1;
         }
+    }
+    if (std::strlen(seg) >= sizeof(self->data))
+    {
+        PyErr_SetString(PyExc_ValueError, "Ring: segment name too long");
+        return -1;
     }
 
     std::string path = "/" + std::string(seg);
@@ -159,6 +229,11 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     self->ops  = ops;
     self->seq  = 0;
     self->done = 1; /* nothing to release until client_init succeeds */
+    self->busy    = 0;
+    self->busy_by = 0;
+    self->owned   = 0;
+    self->owner   = 0;
+    self->pid     = (uint32_t)getpid(); /* the ring is this process's to drive */
     memcpy(self->data, seg, std::strlen(seg) + 1);
     /* the capacity the worker is to map each data segment at (0 = its default) */
     r->data_bytes = data_bytes;
@@ -191,8 +266,10 @@ ring_send(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_
 {
     FastpostgresRing *r = self->ring;
 
+    if (ring_claim(self, "sending a request") < 0) return -1;
     if (fastpostgres_ring_arg_set(r->arg, a1, a2) != 0)
     {
+        ring_unclaim(self);
         PyErr_SetString(PyExc_ValueError, "ring: argument too long");
         return -1;
     }
@@ -212,6 +289,7 @@ ring_send(RingObject *self, uint32_t op, const char *a1, const char *a2, uint32_
     rc    = self->ops->post_request(r, seq, RING_POST_MS);
     if (rc <= 0)
     {
+        ring_unclaim(self);
         if (rc == 0)
             PyErr_SetString(PyExc_TimeoutError, "ring: the transport timed out posting the request");
         else
@@ -238,10 +316,17 @@ ring_collect(RingObject *self)
     FastpostgresRing *r = self->ring;
     int               rc;
 
+    if (!self->busy || self->busy_by != PyThread_get_thread_ident())
+    {
+        PyErr_SetString(PyExc_RuntimeError, "ring: no request of this thread is in flight");
+        return -1;
+    }
+
     errno = 0;
     Py_BEGIN_ALLOW_THREADS;
     rc = self->ops->wait_response(r, self->seq, RING_WAIT_MS);
     Py_END_ALLOW_THREADS;
+    ring_unclaim(self); /* the slot is free again, whatever the wait decided */
     if (rc <= 0)
     {
         if (rc == 0)
@@ -288,6 +373,7 @@ Ring_start(RingObject *self, PyObject *conn)
         PyErr_SetString(PyExc_ValueError, "connection is closed");
         return nullptr;
     }
+    if (ring_claim(self, "starting a worker") < 0) return nullptr;
 
     /* The bootstrap asks the server to register the worker over libpq, as it
      * always has. This is the one-argument call, which starts the shm ring and
@@ -304,6 +390,7 @@ Ring_start(RingObject *self, PyObject *conn)
     {
         PyObject *err = fp_raise_libpq(res);
         PQclear(res);
+        ring_unclaim(self);
         return err;
     }
     PQclear(res);
@@ -317,6 +404,7 @@ Ring_start(RingObject *self, PyObject *conn)
     Py_END_ALLOW_THREADS;
     if (rc <= 0)
     {
+        ring_unclaim(self);
         if (rc == 0)
             PyErr_SetString(PyExc_TimeoutError, "ring: worker did not become ready");
         else
@@ -328,6 +416,7 @@ Ring_start(RingObject *self, PyObject *conn)
         }
         return nullptr;
     }
+    ring_unclaim(self);
     Py_RETURN_NONE;
 }
 
@@ -336,8 +425,19 @@ Ring_open(RingObject *self, PyObject *args)
 {
     const char *seg, *query;
     if (!PyArg_ParseTuple(args, "ss", &seg, &query)) return nullptr;
+    if (strlen(seg) >= sizeof(self->data))
+    {
+        PyErr_SetString(PyExc_ValueError, "ring: stream name too long");
+        return nullptr;
+    }
+    if (ring_own(self, "opening a stream") < 0) return nullptr;
     memcpy(self->data, seg, strlen(seg) + 1);
-    if (ring_request(self, FASTPOSTGRES_OP_OPEN, self->data, query, 0) < 0) return nullptr;
+    if (ring_request(self, FASTPOSTGRES_OP_OPEN, self->data, query, 0) < 0)
+    {
+        ring_disown(self); /* the stream is over here, whatever the worker saw */
+        return nullptr;
+    }
+    ring_take(self);
     Py_RETURN_NONE;
 }
 
@@ -347,6 +447,7 @@ Ring_next(RingObject *self, PyObject *args)
     long long batch = 100000;
     if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
     if (batch <= 0) batch = 100000;
+    if (ring_own(self, "pulling the next batch") < 0) return nullptr;
     long long n = ring_request(self, FASTPOSTGRES_OP_NEXT, self->data, self->data, (uint32_t)batch);
     if (n < 0) return nullptr;
     return PyLong_FromLongLong(n);
@@ -360,6 +461,7 @@ Ring_next_rows(RingObject *self, PyObject *args)
     long long batch = 100000;
     if (!PyArg_ParseTuple(args, "|L", &batch)) return nullptr;
     if (batch <= 0) batch = 100000;
+    if (ring_own(self, "pulling the next batch") < 0) return nullptr;
     long long n = ring_request(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, self->data, (uint32_t)batch);
     if (n < 0) return nullptr;
     return PyLong_FromLongLong(n);
@@ -381,6 +483,7 @@ Ring_post_rows(RingObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "ring: open a stream first");
         return nullptr;
     }
+    if (ring_own(self, "posting the next batch") < 0) return nullptr;
     if (ring_send(self, FASTPOSTGRES_OP_NEXT_ROWS, self->data, seg, (uint32_t)batch) < 0) return nullptr;
     Py_RETURN_NONE;
 }
@@ -389,6 +492,7 @@ Ring_post_rows(RingObject *self, PyObject *args)
 static PyObject *
 Ring_wait(RingObject *self, PyObject *)
 {
+    if (ring_own(self, "collecting a batch") < 0) return nullptr;
     long long n = ring_collect(self);
     if (n < 0) return nullptr;
     return PyLong_FromLongLong(n);
@@ -397,7 +501,13 @@ Ring_wait(RingObject *self, PyObject *)
 static PyObject *
 Ring_close(RingObject *self, PyObject *)
 {
-    if (ring_request(self, FASTPOSTGRES_OP_CLOSE, self->data, nullptr, 0) < 0) return nullptr;
+    /* CLOSE ends the stream however it is asked — a stream abandoned by a dead
+     * task must not wedge the ring for its next lease — so ownership is dropped
+     * either way; the request itself still needs the slot. */
+    int rc = ring_request(self, FASTPOSTGRES_OP_CLOSE, self->data, nullptr, 0);
+
+    ring_disown(self);
+    if (rc < 0) return nullptr;
     Py_RETURN_NONE;
 }
 
@@ -406,6 +516,14 @@ Ring_stop(RingObject *self, PyObject *)
 {
     if (self->ring == nullptr || self->ops == nullptr || self->done)
     {
+        Py_RETURN_NONE;
+    }
+    if (ring_claim(self, "stopping") < 0)
+    {
+        /* Teardown is best effort and must not raise: a ring already being
+         * driven by another thread, or one inherited by a forked child, is left
+         * to its owner; the worker also exits when the client process goes. */
+        PyErr_Clear();
         Py_RETURN_NONE;
     }
 
@@ -422,6 +540,8 @@ Ring_stop(RingObject *self, PyObject *)
         if (__atomic_load_n(&r->req_seq, __ATOMIC_RELAXED) < seq)
             __atomic_store_n(&r->req_seq, seq, __ATOMIC_RELEASE);
     }
+    ring_unclaim(self);
+    ring_disown(self);
 
     /* The engine's teardown; the worker's own fini runs on its side. */
     ring_fini(self);

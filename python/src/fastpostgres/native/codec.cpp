@@ -13,8 +13,12 @@
 
 #include <x86intrin.h>
 
+#include <atomic>
 #include <datetime.h>
 
+/* These are written once by fp_codec_init and only read afterwards, so decoder
+ * threads can share the borrowed references without a lock. Nothing here may
+ * ever be reassigned or DECREF'd. */
 static PyObject *s_decimal   = nullptr; /* decimal.Decimal */
 static PyObject *s_timezone  = nullptr; /* datetime.timezone */
 static PyObject *s_timedelta = nullptr; /* datetime.timedelta */
@@ -311,21 +315,31 @@ fp_decode_value(PGresult *res, int row, int col)
 
 /* The row decode's cost in TSC cycles: two rdtsc per batch, free at this scale,
  * and the one number that says whether the loop is worth hand-writing (perf
- * cannot run in the container, so this stands in for it). */
-static unsigned long long g_dec_cycles;
-static unsigned long long g_dec_rows;
-static unsigned long long g_read_cycles;
-static unsigned long long g_read_rows;
+ * cannot run in the container, so this stands in for it). Relaxed atomics: the
+ * counters only need to not lose updates when decoder threads run in more than
+ * one, and the report is a plain read of a done deal. */
+static std::atomic<unsigned long long> g_dec_cycles{0};
+static std::atomic<unsigned long long> g_dec_rows{0};
+static std::atomic<unsigned long long> g_read_cycles{0};
+static std::atomic<unsigned long long> g_read_rows{0};
 
 /* One line per process, so a benchmark log says how the decode cost broke down. */
 void
 fp_stats_report(void)
 {
-    if (g_read_rows != 0)
+    unsigned long long read_rows = g_read_rows.load(std::memory_order_relaxed);
+
+    if (read_rows != 0)
+    {
+        unsigned long long read_cycles = g_read_cycles.load(std::memory_order_relaxed);
+        unsigned long long dec_cycles  = g_dec_cycles.load(std::memory_order_relaxed);
+        unsigned long long dec_rows    = g_dec_rows.load(std::memory_order_relaxed);
+
         fprintf(stderr, "read_rows: %.1f cycles/row over %llu rows (decode %.1f, frame+desc+list %.1f)\n",
-                (double)g_read_cycles / (double)g_read_rows, g_read_rows,
-                (double)g_dec_cycles / (double)g_dec_rows,
-                (double)(g_read_cycles - g_dec_cycles) / (double)g_read_rows);
+                (double)read_cycles / (double)read_rows, read_rows,
+                (double)dec_cycles / (double)(dec_rows ? dec_rows : 1),
+                (double)(read_cycles - dec_cycles) / (double)read_rows);
+    }
 }
 
 /* ---- decoding a whole batch ----------------------------------------------
@@ -401,8 +415,8 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
 void
 fp_stats_add(unsigned long long cycles, unsigned long long rows)
 {
-    g_read_cycles += cycles;
-    g_read_rows += rows;
+    g_read_cycles.fetch_add(cycles, std::memory_order_relaxed);
+    g_read_rows.fetch_add(rows, std::memory_order_relaxed);
 }
 
 PyObject *
@@ -819,8 +833,8 @@ fp_decode_tuples(const FastpostgresColumn *cols, uint32_t ncols, FastpostgresRow
         if (!decode_block(cols, ncols, layout.data(), block)) return false;
         r += block.n;
     }
-    g_dec_cycles += __rdtsc() - t0;
-    g_dec_rows += r;
+    g_dec_cycles.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
+    g_dec_rows.fetch_add(r, std::memory_order_relaxed);
 
     if (r != expect)
     {

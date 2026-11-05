@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import threading
+import time
 import warnings
 from typing import Any, Optional, Sequence
 
@@ -315,6 +316,11 @@ class _Result:
 # max_worker_processes. FASTPOSTGRES_SHM_POOL overrides it; 0 disables the
 # shared-memory path. FASTPOSTGRES_SEGMENT_BYTES sizes each of the two data
 # segments per ring (0 = the worker's 1 GiB default, clamped to 64 KiB-1 GiB).
+#
+# A checked-out ring is a lease: one thread drives it until it hands it back,
+# and the C layer refuses a second driver. That is what lets several threads
+# (the asyncio layer's tiers) each work their own partition of the shared
+# memory; the pool is the partition table.
 
 _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
 _SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
@@ -325,13 +331,28 @@ _POOL_MAX = 8
 # the server's worker budget by _server_ring_slots.
 _RING_BACKEND = "fastpostgres ring worker"
 
+# A blocked acquire's budget and its re-check interval: the pool grows lazily, so
+# a sleeper may wake to find a ring that another thread just made.
+_ACQUIRE_WAIT = 10.0
+_ACQUIRE_POLL = 0.05
+
 _pool_idle = queue.Queue()
 _pool_lock = threading.Lock()
+_pool_cond = threading.Condition()  # releases wake acquirers blocked on the pool
 _pool_created = 0
 _pool_broken = False
 _pool_pid = None
 _pool_prefix = ""
 _pool_size = None
+_pool_leases = {}  # thread id -> (segment name, pid): the rings checked out now
+
+# Reads that left the shared-memory path, and why. Silence is how a pool that is
+# too small, or a worker that died, goes unnoticed. Locked: on a free-threaded
+# build two decoders can fall back at once.
+libpq_reads = 0
+last_fallback = None
+_fallback_causes = {}
+_fallback_lock = threading.Lock()
 
 
 def _cgroup_cpu_threads():
@@ -439,6 +460,8 @@ def _prefix() -> str:
         _pool_created = 0
         _pool_broken = False
         _pool_size = None  # and its size is the child's to work out
+        with _pool_lock:
+            _pool_leases.clear()  # the parent's leases died with the fork
         while True:
             try:
                 _pool_idle.get_nowait()
@@ -463,12 +486,50 @@ def pool_created():
     return _pool_created
 
 
-def _ring_acquire(bootstrap):
-    """Check out a (ring, segment) pair; None when there is none to give."""
-    global _pool_created, _pool_broken
-    prefix = _prefix()  # per process: a forked child must not reuse the parent's
-    if _pool_broken:
-        return None
+def pool_stats() -> dict:
+    """What the shared-memory path is doing: its size, its leases, its fallbacks."""
+    with _pool_lock:
+        leases = sorted(name for name, _pid in _pool_leases.values())
+        created, broken = _pool_created, _pool_broken
+    return {
+        "size": _pool_size,
+        "created": created,
+        "idle": _pool_idle.qsize(),
+        "leases": leases,
+        "broken": broken,
+        "libpq_reads": libpq_reads,
+        "last_fallback": last_fallback,
+        "causes": dict(_fallback_causes),
+    }
+
+
+def _note_fallback(reason, detail=None, warn=True):
+    """Count a read that left the shared-memory path; say so once per reason.
+
+    A fallback is invisible by design — same rows, slower road — but a process
+    that has quietly lost the ring path should not look healthy. Count every
+    cause; warn the first time a failure class (not routine pool pressure)
+    shows up.
+    """
+    global libpq_reads, last_fallback
+
+    with _fallback_lock:
+        libpq_reads += 1
+        last_fallback = detail or reason
+        count = _fallback_causes.get(reason, 0)
+        _fallback_causes[reason] = count + 1
+    if warn and count == 0:
+        warnings.warn(
+            f"fastpostgres: a read left the shared-memory path ({last_fallback})",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _try_acquire(bootstrap, prefix):
+    """The idle queue, else a fresh ring while the pool may still grow."""
+    global _pool_created
+
     try:
         return _pool_idle.get_nowait()
     except queue.Empty:
@@ -492,7 +553,36 @@ def _ring_acquire(bootstrap):
         if "could not register background worker" in str(exc):
             _warn_no_workers()
         return None
-    return (ring, name + "_seg")
+    return (ring, name + "_seg", os.getpid())
+
+
+def _ring_acquire(bootstrap, block=False, timeout=None):
+    """Check out a (ring, segment, pid) partition, or None when there is none.
+
+    The idling queue first, then a fresh ring while the pool may still grow.
+    With ``block``, wait for either — up to ``timeout`` (``_ACQUIRE_WAIT`` by
+    default) — instead of dropping straight to libpq, which is what the
+    awaitable paths pass: an async caller queues for a partition.
+
+    The acquiring thread owns the lease and must be the one to release it.
+    """
+    prefix = _prefix()  # per process: a forked child must not reuse the parent's
+    deadline = None
+    if block:
+        deadline = time.monotonic() + (_ACQUIRE_WAIT if timeout is None else timeout)
+
+    while True:
+        if _pool_broken:
+            return None
+        info = _try_acquire(bootstrap, prefix)
+        if info is not None:
+            with _pool_lock:
+                _pool_leases[threading.get_ident()] = (info[1], info[2])
+            return info
+        if not block or time.monotonic() >= deadline:
+            return None
+        with _pool_cond:
+            _pool_cond.wait(min(_ACQUIRE_POLL, max(0.0, deadline - time.monotonic())))
 
 
 _warned_no_workers = False
@@ -516,7 +606,20 @@ def _warn_no_workers():
 
 
 def _ring_release(info):
+    """Hand a checked-out partition back, unless it is not this process's.
+
+    A forked child inherits its parent's rings: driving one would race the
+    parent, and returning it to the child's idle queue would hand a stranger's
+    ring to its own next reader. Drop it; the parent keeps using its own.
+    """
+    ring, _seg, pid = info
+    with _pool_lock:
+        _pool_leases.pop(threading.get_ident(), None)
+    if pid != os.getpid():
+        return
     _pool_idle.put_nowait(info)
+    with _pool_cond:
+        _pool_cond.notify()
 
 
 class Connection:
@@ -525,9 +628,13 @@ class Connection:
     Read-only SELECTs are served by the /dev/shm ring; everything else (DML,
     DDL, SET, ...) takes libpq. If the extension is absent the ring fails to
     start and every statement stays on libpq.
+
+    ``wait`` blocks for a ring when the pool is at its limit instead of falling
+    back to libpq — what the awaitable paths pass, so an async caller queues for
+    a partition rather than dropping to the slow road.
     """
 
-    def __init__(self, conninfo: str = "", shm: bool = True, **kwargs):
+    def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = False, **kwargs):
         if not conninfo and kwargs:
             conninfo = " ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
         try:
@@ -536,15 +643,19 @@ class Connection:
             raise _translate(exc) from exc
         self._closed = False
         self._shm = shm
+        self._wait = wait
+        self._streams = set()  # live stream generators, so close() can end them
         self.shm_reads = 0
 
     def _shm_read(self, sql):
         if not self._shm:
             return None
-        info = _ring_acquire(self._conn)
+        info = _ring_acquire(self._conn, block=self._wait)
         if info is None:
+            if pool_size() > 0:  # size 0 is the explicit "no ring" configuration
+                _note_fallback("pool exhausted", warn=False)
             return None  # pool exhausted, or the extension is absent
-        ring, seg = info
+        ring, seg, _pid = info
         try:
             fields = field_types = None
             rows = []
@@ -582,7 +693,8 @@ class Connection:
                     except Exception:
                         pass
                 ring.close()
-        except Exception:
+        except Exception as exc:
+            _note_fallback(type(exc).__name__, detail=f"{type(exc).__name__}: {exc}")
             return None  # re-run on libpq so the caller sees the real error
         finally:
             _ring_release(info)
@@ -633,7 +745,14 @@ class Connection:
         pass
 
     def close(self):
+        """End any live stream (its ring goes back), then the control channel."""
         if not self._closed:
+            for stream in list(self._streams):
+                try:
+                    stream.close()  # CLOSE over the ring, then release
+                except Exception:
+                    pass
+            self._streams.clear()
             self._conn.close()
             self._closed = True
 
@@ -695,18 +814,37 @@ class Cursor:
         row objects, so it runs at transport speed rather than decode speed.
 
         The ring is held for the stream's lifetime; exhausting or closing the
-        generator returns it. Requires the extension.
+        generator returns it, and so does closing the connection. Requires the
+        extension.
         """
         sql = operation if parameters is None else _inline(operation, parameters)
-        return self._stream(sql, size)
+        return self._track(self._stream(sql, size))
+
+    def _track(self, stream):
+        """One live stream per connection, trackable so close() can end it.
+
+        The tracked generator is the inner one: closing it runs its ``finally``
+        (CLOSE then release), whichever way the stream ends — exhaustion, the
+        caller's ``.close()``, GC, or the connection closing under it.
+        """
+        conn = self.connection
+        conn._streams.add(stream)
+        try:
+            yield from stream
+        finally:
+            conn._streams.discard(stream)
 
     def _stream(self, sql, size):
-        if not self.connection._shm or not _is_read_only(sql):
+        if not self.connection._shm:
+            raise NotSupportedError("stream() is disabled on this connection (shm=False)")
+        if not _is_read_only(sql):
             raise NotSupportedError("stream() serves read-only SELECTs over /dev/shm")
-        info = _ring_acquire(self.connection._conn)
+        info = _ring_acquire(self.connection._conn, block=self.connection._wait)
         if info is None:
+            if pool_size() > 0:
+                _note_fallback("pool exhausted", warn=False)
             raise NotSupportedError("stream() needs the fastpostgres extension (ring unavailable)")
-        ring, seg = info
+        ring, seg, _pid = info
         yielded = False
         try:
             ring.open(seg, sql)
