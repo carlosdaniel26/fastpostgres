@@ -89,10 +89,14 @@ they are what decides whether this belongs in an application.
 
 The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose results arrive as Arrow record batches - and each comparison asks both stacks for the same output.
 
+![FastPostgres vs ADBC + Arrow: the same output, Python tuples](docs/assets/tuples-read.png)
+
 | same output: Python tuples | 100K | 1M | 10M |
 |---|---|---|---|
 | FastPostgres (its DBAPI) | 3.70M | 4.07M | 4.06M |
 | ADBC + Arrow, `to_pylist` | 1.36M | 1.33M | 1.32M |
+
+![FastPostgres vs ADBC + Arrow: the same output, columnar, one column summed](docs/assets/zerocopy-read.png)
 
 | same output: the columnar form, one column summed in place | 100K | 1M | 10M |
 |---|---|---|---|
@@ -124,9 +128,13 @@ Speed is half of the comparison; memory is the other half. With the ring's trans
 
 A transfer buffer is a window: the ring's is the same 512 MiB whatever the result's size. A table is a working set: at 10M rows ADBC's holds ~476 MiB at once, one size up from the buffer the ring ever spends.
 
+![FastPostgres against Arrow under a fixed 512 MiB buffer](docs/assets/arrow-memory.png)
+
 ### Result caches: PgCache
 
 A result cache removes *execution* on repeated queries; this removes *delivery* on every query, so they win different shapes. The rival is PgCache, a CDC-maintained result cache in front of the same server, with its defaults ([`bench/PG-CACHE.md`](bench/PG-CACHE.md), [`log`](bench/results/fastpostgres-vs-pgcache.log)):
+
+![FastPostgres vs PgCache: the full scan and the aggregate](docs/assets/pgcache-read.png)
 
 | 1M rows, the same rows out | FastPostgres | PgCache (hit) |
 |---|---|---|
@@ -136,6 +144,8 @@ A result cache removes *execution* on repeated queries; this removes *delivery* 
 A cached aggregate is 56x faster than reading the same rows directly: the executor is the cost, and no transport closes that. A cached large result is the other way round - 2.7x slower than the ring - and a hit costs what its cold fill costs, because a hit still ships every row through the socket and rebuilds every Python object.
 
 Given the **same memory budget on both sides** - the ring's transfer buffer and the cache's own memory, one `M` - the ranking holds where the cache fits at all: at 1 GiB, the 1M-row scan is 3.89M rows/s against the cache's 1.47M, and the aggregate 1.177 ms cached against 57.403 ms read. The ring's numbers are flat from an 8 MiB budget up, while the cache's container is OOM-killed at 8 MiB and 64 MiB ([`section`](bench/PG-CACHE.md#the-same-memory-budget-on-both-sides), [`log`](bench/results/fastpostgres-vs-pgcache-memory.log)).
+
+![FastPostgres vs PgCache under one memory budget](docs/assets/pgcache-memory.png)
 
 ### A published suite's own terms
 
