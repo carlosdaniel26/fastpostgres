@@ -5,9 +5,10 @@ ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose
 results arrive as Arrow record batches - and the socket's text protocol is no
 longer in the comparison:
 
-  ZERO-COPY READ  the same output from both: the columnar form each stack lands,
-                  with one column summed in place - stream()'s numpy view over
-                  the shm bytes, ADBC's pyarrow.compute over its Arrow table
+  ZERO-COPY READ  the same read from both: the columnar form each stack lands
+                  and holds - stream()'s views over the shm bytes, ADBC's Arrow
+                  table - with nothing consumed afterwards, because what a
+                  program does with a result is its own, not the transport's
 
 Both sides land the same columnar output, so the comparison prices the transport
 rather than the object model. The DB-API's tuple read is not compared: building
@@ -39,8 +40,6 @@ from pathlib import Path
 
 import adbc_driver_postgresql.dbapi as adbc
 import fastpostgres.dialect  # noqa: F401  registers postgresql+fastpostgres
-import numpy as np
-import pyarrow.compute as pc
 from fastpostgres import dbapi
 from fastpostgres.core import create_engine as lean_engine
 from sqlalchemy import select
@@ -152,24 +151,21 @@ def read_arrow_fetchall(conn):
 
 
 def read_stream(conn):
-    """stream()'s zero-copy column views, summed in place with numpy."""
+    """stream()'s zero-copy column views: the read itself, nothing consumed."""
     cur = conn.cursor()
     t0 = now()
     total = 0
     for batch in cur.stream(CORE_SQL, size=100000):
         total += batch.row_count
-        if batch.row_count:
-            np.frombuffer(batch.columns[3].data, dtype="<f8").sum()
     ms = (now() - t0) * 1000
     cur.close()
     return ms, total
 
 
-def read_arrow_sum(conn):
-    """ADBC's Arrow table, summed over the same column with pyarrow.compute."""
+def read_arrow_table(conn):
+    """ADBC's Arrow table: the read itself, nothing consumed."""
     t0 = now()
     table = fetch_arrow(conn)
-    pc.sum(table["price"])
     ms = (now() - t0) * 1000
     return ms, table.num_rows
 
@@ -182,10 +178,10 @@ def read_arrow_sum(conn):
 SECTIONS = {
     "zerocopy": {
         "title": "ZERO-COPY READ (rows/s)",
-        "note": "same output: the columnar form each stack lands, one column summed in place",
+        "note": "the same read: the columnar form each stack lands, nothing consumed",
         "players": (
-            (FPG, "stream()+sum", open_dbapi, read_stream),
-            (ARROW, "arrow+sum", open_arrow, read_arrow_sum),
+            (FPG, "stream()", open_dbapi, read_stream),
+            (ARROW, "arrow table", open_arrow, read_arrow_table),
         ),
         "ratio": "vs arrow",
     },
@@ -345,10 +341,10 @@ def close_engine(engine):
 
 PATHS = (
     ("dbapi", "fastpostgres, DBAPI", open_dbapi, read_dbapi, close_conn, 1),
-    ("stream", "fastpostgres, stream()+sum", open_dbapi, read_stream, close_conn, 1),
+    ("stream", "fastpostgres, stream()", open_dbapi, read_stream, close_conn, 1),
     ("core", "fastpostgres, core interface", open_lean, read_lean, close_engine, 1),
     ("par", "fastpostgres, 4 processes", open_pool, read_parallel, close_pool, 4),
-    ("arrow", "adbc+arrow, arrow+sum", open_arrow, read_arrow_sum, close_conn, 1),
+    ("arrow", "adbc+arrow, arrow table", open_arrow, read_arrow_table, close_conn, 1),
     ("arrow_rows", "adbc+arrow, fetchall()", open_arrow, read_arrow_fetchall, close_conn, 1),
     ("arrow_pylist", "adbc+arrow, table+to_pylist", open_arrow, read_arrow_tuples, close_conn, 1),
 )
