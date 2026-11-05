@@ -65,10 +65,13 @@ no parameters.
 - **Warm read** before the timed ones (connections, rings, Arrow pools, plans);
   it is never timed.
 - **Repetitions**: three, median reported. Above 1M rows, a single rep.
-- **Timed region**: the read call itself, including everything the consumer must
-  do to hold the result — `stream()` iteration plus the numpy sum in the headline
-  section; the database call plus `fetchall`, or `fetch_arrow_table` plus
-  `pyarrow.compute.sum`, for the paths table.
+- **Timed region**: the read call itself, including everything needed to hold
+  the result — `stream()`'s batches, or the database call plus `fetchall` (or
+  `fetch_arrow_table`) for the paths table. Nothing is consumed inside it: a
+  sum, a numpy conversion or a `to_pylist` would price the consumer's kernel,
+  not the read. Where the object model *is* the subject — the `fetchall` and
+  `to_pylist` rows, whose question is what a wrapper costs — the conversion is
+  the measurement.
 - **Verification**: every read's row count is checked against `n`; a mismatch
   prints `MISMATCH` and fails the run (the `ok` column).
 - **Dispersion**: the log prints the spread over the reps (`±`, half the
@@ -94,9 +97,9 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   one container configuration. Clock frequencies drift with thermals; the TSC is
   invariant, so cycle figures are comparable across runs, but throughput is not
   portable.
-- **The comparison is columnar against columnar.** Both sides land the same
-  columnar form and one column is summed in place, so the numbers price the
-  transport rather than the object model. The DB-API's tuple read is the
+- **The comparison is columnar against columnar.** Both sides land and hold the
+  same columnar form and neither consumes it, so the numbers price the transport
+  rather than the consumer's kernel. The DB-API's tuple read is the
   compatibility interface — an application that wants Python objects pays for
   them on either stack — and it is a path in the log, not a headline.
 - **Two shapes, not every shape.** NULLs, both varlena header sizes and

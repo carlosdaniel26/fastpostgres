@@ -28,8 +28,8 @@ this design gives up in exchange is in [`LIMITATIONS.md`](../docs/LIMITATIONS.md
 
 ## 1. The numbers, so the rest of the document has an anchor
 
-**Query level, the same columnar output on both sides** (one column summed in
-place — the harness's `ZERO-COPY READ` rows):
+**Query level, the same columnar output on both sides** (the harness's
+`ZERO-COPY READ` rows: each stack's columnar form, held and not consumed):
 
 | rows | this repo | ADBC + Arrow | difference |
 |---|---|---|---|

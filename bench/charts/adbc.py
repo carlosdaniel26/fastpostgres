@@ -4,7 +4,7 @@
 Builds the container, runs the benchmark, then writes the image the harness
 measures:
 
-    zerocopy-read.png                 the zero-copy paths, summed in place
+    zerocopy-read.png                 the zero-copy read paths
 
 One load, the largest the log has: the smaller ones carry the same relation,
 so a single bar pair says it without repeating it. Each bar carries its rate;
@@ -85,18 +85,17 @@ def parse_sections(text, sections, row_re):
 
 # The two head-to-head sections the benchmark prints, and the players in its
 # column order: fast-postgres takes the accent, the Arrow rival is grey. Each
-# section compares the same output (columnar), so it gets its own
-# pair of labels.
+# section compares the same read, so it gets its own pair of labels.
 CHART_SECTIONS = {"ZERO-COPY READ": "zerocopy"}
 PLAYERS = ("fastpostgres", "adbc+arrow")
 CHART_LABELS = {
-    "zerocopy": ("fast-postgres (stream + numpy)", "ADBC Arrow + pyarrow.compute"),
+    "zerocopy": ("fast-postgres (stream())", "ADBC (fetch_arrow_table())"),
 }
 COLORS = (ACCENT, GREY[1])
 CHARTS = {
     "zerocopy": (
         "zerocopy-read.png",
-        "the same output, one column summed in place",
+        "the same read, nothing consumed",
     ),
 }
 
