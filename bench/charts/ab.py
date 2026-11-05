@@ -66,20 +66,18 @@ def cell_map(path):
 
 
 def bench_rows(path):
-    """The `TUPLE READ` / `ZERO-COPY READ` 1M numbers from a query-level log.
+    """The `ZERO-COPY READ` 1M numbers from a query-level log.
 
-    Each section is parsed inside its own block: a regex spanning the whole file
-    matches the first section twice and reports the same numbers for both.
+    Parsed inside its own block: a regex spanning the whole file would pick up
+    the first section's numbers for whichever section it is looking for.
     """
     text = Path(path).read_text(errors="replace")
     out = {}
-    for key, header in (("tuple", "TUPLE READ"), ("zerocopy", "ZERO-COPY READ")):
-        start = text.find(header)
-        if start < 0:
-            continue
+    start = text.find("ZERO-COPY READ")
+    if start >= 0:
         m = re.search(r"^\s+1M\s+([\d.]+)M\s+([\d.]+)M", text[start:start + 600], re.M)
         if m:
-            out[key] = (float(m.group(1)), float(m.group(2)))
+            out["zerocopy"] = (float(m.group(1)), float(m.group(2)))
     return out
 
 
