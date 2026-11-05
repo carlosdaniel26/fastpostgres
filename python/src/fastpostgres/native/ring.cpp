@@ -11,10 +11,14 @@
 #include "ring.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -22,7 +26,12 @@
 
 #include "connection.hpp"
 #include "fastpostgres/fastpostgres_shm.h"
+#include "segment.hpp"
 #include "types.hpp"
+
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
 
 /* The handoff budgets, in milliseconds: the response wait, the readiness wait
  * that lets a background worker register and start, and the near-immediate post
@@ -106,6 +115,63 @@ ring_disown(RingObject *self)
     self->owner = 0;
 }
 
+/* The memfd-handoff channel: a listener the client opens before it starts the
+ * worker, whose abstract address travels in the ring. The worker connects once;
+ * segment descriptors ride that connection (SCM_RIGHTS). */
+static int
+ring_listen(RingObject *self)
+{
+    static unsigned serial;
+    struct sockaddr_un addr;
+    socklen_t          len;
+    int                n, s;
+
+    if (self->fd_listen >= 0) return 0;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    n = snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1, "fpq-%u-%u", (unsigned)getpid(), serial++);
+    if (n < 0 || (size_t)n >= sizeof(addr.sun_path) - 1) return -1;
+    len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n);
+
+    s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    if (bind(s, (struct sockaddr *)&addr, len) != 0 || listen(s, 4) != 0)
+    {
+        close(s);
+        return -1;
+    }
+
+    self->fd_listen        = s;
+    self->ring->fd_handoff = 1;
+    self->ring->fd_pathlen = (uint32_t)(1 + n);
+    memcpy(self->ring->fd_path, addr.sun_path, (size_t)(1 + n));
+    return 0;
+}
+
+/* Close both ends of the handoff and drop the accepted socket from the
+ * process-wide registry. Idempotent. */
+static void
+ring_handoff_close(RingObject *self)
+{
+    if (self->fd_sock >= 0)
+    {
+        fp_handoff_unregister(self->fd_sock);
+        close(self->fd_sock);
+        self->fd_sock = -1;
+    }
+    if (self->fd_listen >= 0)
+    {
+        close(self->fd_listen);
+        self->fd_listen = -1;
+    }
+    if (self->ring != nullptr)
+    {
+        self->ring->fd_handoff = 0;
+        self->ring->fd_pathlen = 0;
+    }
+}
+
 /* Run the engine's teardown once. The shm engine has nothing to release, but
  * the call is kept for an engine that does. Idempotent, so the stop path and
  * the destructor can both run it. */
@@ -117,6 +183,7 @@ ring_fini(RingObject *self)
         self->ops->client_fini(self->ring);
         self->done = 1;
     }
+    ring_handoff_close(self);
 }
 
 static void
@@ -138,6 +205,15 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 
     /* The ring's engine is the shm one: its semaphores are the doorbells. */
     const FastpostgresTransport *ops = &fastpostgres_transport_shm;
+
+    /* Sealed-memfd data segments are opt-in (FASTPOSTGRES_MEMFD=1). The default
+     * stays the named /dev/shm segment, which is what a client running as a
+     * different user than the server needs. */
+    const char *memfd_env = getenv("FASTPOSTGRES_MEMFD");
+
+    self->memfd     = memfd_env != nullptr && memfd_env[0] != 0 && memfd_env[0] != '0';
+    self->fd_listen = -1;
+    self->fd_sock   = -1;
 
     if (data_bytes != 0)
     {
@@ -238,6 +314,9 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     /* the capacity the worker is to map each data segment at (0 = its default) */
     r->data_bytes = data_bytes;
     r->client_pid = (uint32_t)getpid(); /* the worker exits once this process is gone */
+    /* stale handoff fields from a previous owner of this name are not ours */
+    r->fd_handoff = 0;
+    r->fd_pathlen = 0;
 
     /* Last: the engine opens what it needs. A failure is raised with the errno
      * text and the segment is left alone. */
@@ -375,6 +454,16 @@ Ring_start(RingObject *self, PyObject *conn)
     }
     if (ring_claim(self, "starting a worker") < 0) return nullptr;
 
+    /* Before the worker starts: publish where it should connect to hand over
+     * its data segment. If the listener cannot be made, the ring falls back to
+     * the named segment without failing the session. */
+    if (self->memfd && self->fd_sock < 0 && ring_listen(self) != 0)
+    {
+        self->memfd           = 0;
+        self->ring->fd_handoff = 0;
+        self->ring->fd_pathlen = 0;
+    }
+
     /* The bootstrap asks the server to register the worker over libpq, as it
      * always has. This is the one-argument call, which starts the shm ring and
      * is also what a server that predates the two-argument overload
@@ -416,6 +505,36 @@ Ring_start(RingObject *self, PyObject *conn)
         }
         return nullptr;
     }
+
+    /* The worker connects while it starts, so the accept has the connection
+     * queued by now. The wait bounds an old server that ignored the request:
+     * its segment stays /dev/shm and read() falls back to it. */
+    if (self->fd_listen >= 0)
+    {
+        struct pollfd p;
+        int           ready;
+
+        p.fd      = self->fd_listen;
+        p.events  = POLLIN;
+        p.revents = 0;
+        do
+            ready = poll(&p, 1, 2000);
+        while (ready < 0 && errno == EINTR);
+        if (ready > 0)
+        {
+            int s = accept(self->fd_listen, nullptr, nullptr);
+
+            if (s >= 0)
+            {
+                fcntl(s, F_SETFD, FD_CLOEXEC);
+                self->fd_sock = s;
+                fp_handoff_register(s);
+            }
+        }
+        close(self->fd_listen);
+        self->fd_listen = -1;
+    }
+
     ring_unclaim(self);
     Py_RETURN_NONE;
 }

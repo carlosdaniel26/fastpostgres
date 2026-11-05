@@ -38,6 +38,7 @@
 
 #include "columnar.h"
 #include "fastpostgres/ring.h"
+#include "shm.h"
 #include "stream.h"
 #include "transport/transport.h"
 
@@ -307,9 +308,15 @@ fastpostgres_ring_main(Datum main_arg)
         proc_exit(1);
     }
 
+    /* The data segment's backing store. When the client is listening for a
+     * memfd handoff this connects to it before worker_ready, so the client's
+     * accept after wait_ready finds the connection queued. */
+    fastpostgres_shm_worker_begin(r);
+
     if (t->worker_init(r) < 0)
     {
         elog(LOG, "fastpostgres_ring_main: %s worker_init failed: %m", t->name);
+        fastpostgres_shm_worker_end();
         munmap(r, rsize);
         proc_exit(1);
     }
@@ -360,6 +367,7 @@ fastpostgres_ring_main(Datum main_arg)
     abort_txn();
     __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
     t->worker_fini(r);
+    fastpostgres_shm_worker_end();
     munmap(r, rsize);
     proc_exit(0);
 }

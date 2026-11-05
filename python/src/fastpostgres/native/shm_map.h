@@ -34,3 +34,19 @@ fp_map_ro(const char *path, size_t *size_out)
     *size_out = (size_t)st.st_size;
     return map;
 }
+
+/* Map a descriptor the worker handed over (SCM_RIGHTS) read-only. The mapping
+ * holds its own reference to the memfd, so the descriptor may be closed after
+ * this returns; the bytes stay mapped even if the worker goes away. */
+static inline void *
+fp_map_fd_ro(int fd, size_t *size_out)
+{
+    struct stat st;
+    void       *map;
+
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) return nullptr;
+    map = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) return nullptr;
+    *size_out = (size_t)st.st_size;
+    return map;
+}
