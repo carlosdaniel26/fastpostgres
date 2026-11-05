@@ -96,7 +96,7 @@ COLORS = (ACCENT, GREY[1])
 CHARTS = {
     "zerocopy": (
         "zerocopy-read.png",
-        "the same output — columnar, one column summed in place",
+        "the same output, one column summed in place",
     ),
 }
 
@@ -174,7 +174,7 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
     ax.set_xticklabels(loads)
     ax.set_xlabel("rows")
     # one group in a one-panel figure: keep the bar about half an inch wide
-    pad = 1.5 if len(xs) == 1 else 0.0
+    pad = 0.70 if len(xs) == 1 else 0.0
     ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
     ax.set_ylabel("rows/s")
     if scale == "log":
@@ -183,7 +183,7 @@ def bars(ax, data, series, colors, labels, scale, delta_vs=0):
     ax.yaxis.set_major_formatter(FuncFormatter(fmt_rate))
     theme.declutter(ax)
     theme.ticks(ax)
-    ax.margins(y=0.22)  # room for the second label line
+    ax.margins(y=0.12)  # room for the second label line
     return handles
 
 
@@ -196,7 +196,7 @@ def largest(data):
 
 
 def figure(section, data, series, colors, labels, title, headline, footer, scale, delta_vs=0):
-    fig, ax = plt.subplots(figsize=(7.8, 5.9))
+    fig, ax = plt.subplots(figsize=(5.0, 4.5))
     handles = bars(ax, data, series, colors, labels, scale, delta_vs)
     ax.set_title(title)
     fig.suptitle(headline, fontsize=13 if len(headline) <= 70 else 10, y=0.975)
@@ -204,7 +204,7 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
         theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.92), ncol=len(series),
                      handles=handles, labels=labels)
     theme.footer(fig, footer)
-    fig.subplots_adjust(left=0.13, right=0.97, top=0.79, bottom=0.12)
+    fig.subplots_adjust(left=0.20, right=0.97, top=0.79, bottom=0.20)
     return fig
 
 

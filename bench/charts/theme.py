@@ -116,13 +116,38 @@ def legend(parent, loc="upper left", **kw):
 
 
 def footer(fig, text, y=0.02, **kw):
-    """The caption under the figure: small, gray, serif, one provenance line."""
+    """The caption under the figure: small, gray, wrapped to the figure width.
+
+    A provenance line lists every version the run saw, and on a narrow figure it
+    runs off both edges, so it is packed into as many lines as the width needs.
+    """
     kw.setdefault("ha", "center")
     kw.setdefault("va", "bottom")
     kw.setdefault("fontsize", 8)
     kw.setdefault("color", CAPTION_COLOR)
     kw.setdefault("linespacing", 1.5)
-    return fig.text(0.5, y, text, **kw)
+    return fig.text(0.5, y, fit_caption(text, fig.get_size_inches()[0], kw["fontsize"]), **kw)
+
+
+def fit_caption(text, width_in, fontsize):
+    """Break a caption into lines that fit the figure, at its dot separators.
+
+    DejaVu Sans averages a little over half an em per character, which is all
+    the estimate this needs.
+    """
+    per_line = max(24, int(width_in * 0.92 * 72 / (fontsize * 0.66)))
+    lines = []
+    for paragraph in text.split("\n"):
+        current = ""
+        for piece in paragraph.split(" \u00b7 "):
+            candidate = f"{current} \u00b7 {piece}" if current else piece
+            if current and len(candidate) > per_line:
+                lines.append(current)
+                current = piece
+            else:
+                current = candidate
+        lines.append(current)
+    return "\n".join(lines)
 
 
 apply()

@@ -166,7 +166,7 @@ def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
     if log_y:
         ax.set_yscale("log")
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: f"{v:g}"))
-    ax.margins(y=0.24)
+    ax.margins(y=0.12)
     theme.declutter(ax)
     theme.ticks(ax, log=log_y)
     return handles
@@ -185,7 +185,7 @@ def main():
         sys.exit(f"{args.log}: no rows found -- run `just pgcache-memory-bench` first")
 
     budgets = sorted(data)
-    fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(11.0, 5.0))
+    fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(9.8, 4.7))
 
     # the budgets where the cache held nothing at all: its container was
     # OOM-killed, or every workload in that cell reported nothing registered.
@@ -224,7 +224,7 @@ def main():
 
     footer = " · ".join(env.get(k, "?") for k in ENV_KEYS)
     theme.footer(fig, footer, y=0.03)
-    fig.subplots_adjust(left=0.07, right=0.985, top=0.79, bottom=0.14)
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.79, bottom=0.21)
 
     path = args.out / FILENAME
     fig.savefig(path, dpi=150)

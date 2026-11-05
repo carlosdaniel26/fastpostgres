@@ -117,7 +117,7 @@ def plot_format(formats, meta):
     if not formats:
         sys.exit("no format cells in the log (fpcolumn / arrow-ipc)")
     fig, (ax_t, ax_m) = plt.subplots(
-        1, 2, figsize=(9.6, 4.9), gridspec_kw={"width_ratios": [1.45, 1.0]}
+        1, 2, figsize=(8.4, 4.5), gridspec_kw={"width_ratios": [1.45, 1.0]}
     )
     names = [c["cell"] for c in formats]
     labels = [FORMAT_LABELS.get(n, n) for n in names]
@@ -137,7 +137,7 @@ def plot_format(formats, meta):
     ax_t.set_xticklabels(labels)
     ax_t.set_ylabel("ms per 1M rows")
     ax_t.set_title("encode + decode, transport held out (lower is better)", fontsize=9.5)
-    ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.20)
+    ax_t.set_ylim(0, max(e + d for e, d in zip(enc, dec)) * 1.08)
     ax_t.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_t)
     theme.ticks(ax_t)
@@ -151,14 +151,14 @@ def plot_format(formats, meta):
     ax_m.set_xticklabels(labels, fontsize=8.5)
     ax_m.set_ylabel("peak RSS, MB")
     ax_m.set_title("memory and copies", fontsize=9.5)
-    ax_m.set_ylim(0, max(rss) * 1.30)
+    ax_m.set_ylim(0, max(rss) * 1.16)
     ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
     theme.ticks(ax_m)
 
     fig.suptitle("Format cost: the same rows, encoded and decoded", fontsize=12.5, y=0.975)
     theme.footer(fig, footer_text(meta, "one process, no transport"))
-    fig.subplots_adjust(left=0.09, right=0.97, top=0.84, bottom=0.14, wspace=0.28)
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.84, bottom=0.20, wspace=0.28)
     return fig
 
 
@@ -175,7 +175,7 @@ def plot_transport(pairs, meta):
         return next(c for p, t, c in pairs if p == payload and t == transport)
 
     fig, (ax_r, ax_l) = plt.subplots(
-        1, 2, figsize=(10.4, 4.9), gridspec_kw={"width_ratios": [1.12, 1.35]}
+        1, 2, figsize=(9.8, 4.5), gridspec_kw={"width_ratios": [1.12, 1.35]}
     )
 
     # throughput: one group per payload, one bar per transport
@@ -204,7 +204,7 @@ def plot_transport(pairs, meta):
         f"CPU, both sides: {cpu_note}",
         fontsize=9.5,
     )
-    ax_r.set_ylim(0, max(cell(p, t)["gb_per_s"] for p in payloads for t in transports) * 1.18)
+    ax_r.set_ylim(0, max(cell(p, t)["gb_per_s"] for p in payloads for t in transports) * 1.08)
     ax_r.set_xlim(-0.8, len(payloads) - 0.2)
     theme.legend(ax_r, loc="upper right", fontsize=8)
     theme.declutter(ax_r)
@@ -230,12 +230,12 @@ def plot_transport(pairs, meta):
     lows = min(cell(p, t)["p50_ms"] for p, t in rows) * 1e3
     highs = max(cell(p, t)["p99_ms"] for p, t in rows) * 1e3
     ax_l.set_yscale("log")
-    ax_l.set_ylim(lows * 0.42, highs * 2.4)
+    ax_l.set_ylim(lows * 0.42, highs * 1.6)
     ax_l.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
     ax_l.yaxis.set_minor_formatter(NullFormatter())
     ax_l.set_ylabel("per-chunk latency, μs (log)")
     ax_l.set_title("latency: p50 solid, p99 faded", fontsize=9.5)
-    ax_l.margins(y=0.24)
+    ax_l.margins(y=0.10)
     theme.declutter(ax_l)
     theme.ticks(ax_l, log=True)
 
@@ -253,7 +253,7 @@ def plot_footprint(formats, meta):
     if not formats:
         sys.exit("no format cells in the log (fpcolumn / arrow-ipc)")
     fig, (ax_m, ax_c) = plt.subplots(
-        1, 2, figsize=(10.4, 5.0), gridspec_kw={"width_ratios": [1.0, 1.45]}
+        1, 2, figsize=(9.4, 4.7), gridspec_kw={"width_ratios": [1.0, 1.45]}
     )
     labels = [FORMAT_LABELS.get(c["cell"], c["cell"]) for c in formats]
     colors = [ACCENT if c["cell"] == "fpcolumn" else GREY[1] for c in formats]
@@ -262,8 +262,8 @@ def plot_footprint(formats, meta):
     payload = [c["payload_bytes"] / 2**20 for c in formats]
     rss = [c["rss_kb"] / 1024 for c in formats]
     extra = [max(r - p, 0.0) for r, p in zip(rss, payload)]
-    ax_m.bar(xs, payload, width=0.38, color=colors, zorder=3)
-    ax_m.bar(xs, extra, width=0.38, bottom=payload, color=colors, alpha=FADED, zorder=3)
+    ax_m.bar(xs, payload, width=0.34, color=colors, zorder=3)
+    ax_m.bar(xs, extra, width=0.34, bottom=payload, color=colors, alpha=FADED, zorder=3)
     for x, p, r in zip(xs, payload, rss):
         ax_m.text(x, r, f"{r:,.0f} MB\n{r / p:.1f}× the payload", ha="center",
                   va="bottom", fontsize=8, linespacing=1.25)
@@ -271,7 +271,7 @@ def plot_footprint(formats, meta):
     ax_m.set_xticklabels(labels)
     ax_m.set_ylabel("peak RSS, MB")
     ax_m.set_title("solid = payload, faded = held on top of it", fontsize=9.5)
-    ax_m.set_ylim(0, max(rss) * 1.30)
+    ax_m.set_ylim(0, max(rss) * 1.16)
     ax_m.set_xlim(-0.9, len(xs) - 0.1)
     theme.declutter(ax_m)
     theme.ticks(ax_m)
@@ -309,7 +309,7 @@ def plot_who_pays(pairs, meta):
     if not pairs:
         sys.exit("no transport cells in the log (transport_shm / transport_uds)")
     fig, (ax_cpu, ax_mem, ax_lat) = plt.subplots(
-        1, 3, figsize=(11.6, 5.0), gridspec_kw={"width_ratios": [1.0, 0.95, 1.5]}
+        1, 3, figsize=(10.6, 4.7), gridspec_kw={"width_ratios": [1.0, 0.95, 1.5]}
     )
     rows = [(p, t) for p in dict.fromkeys(p for p, _t, _c in pairs)
             for t in dict.fromkeys(t for _p, t, _c in pairs)]
@@ -330,7 +330,7 @@ def plot_who_pays(pairs, meta):
     ax_cpu.set_yticklabels(names, fontsize=7.8)
     ax_cpu.invert_yaxis()
     ax_cpu.set_xlabel("producer + consumer")
-    ax_cpu.set_xlim(0, max(p + c for p, c in zip(prod, cons)) * 1.30)
+    ax_cpu.set_xlim(0, max(p + c for p, c in zip(prod, cons)) * 1.22)
     ax_cpu.set_title("CPU, ms", fontsize=9.5)
     theme.declutter(ax_cpu)
     theme.ticks(ax_cpu, axis="x")
@@ -346,7 +346,7 @@ def plot_who_pays(pairs, meta):
     ax_mem.set_yticklabels(names, fontsize=7.8)
     ax_mem.invert_yaxis()
     ax_mem.set_xlabel("producer / consumer")
-    ax_mem.set_xlim(0, max(max(p, c) for p, c in zip(p_rss, c_rss)) * 1.55)
+    ax_mem.set_xlim(0, max(max(p, c) for p, c in zip(p_rss, c_rss)) * 1.28)
     ax_mem.set_title("peak RSS, MB", fontsize=9.5)
     theme.declutter(ax_mem)
     theme.ticks(ax_mem, axis="x")
@@ -378,7 +378,7 @@ def plot_who_pays(pairs, meta):
     theme.footer(fig, footer_text(
         meta, "solid = producer / p50, faded = consumer / p99 · "
               "shm = shared memory, uds = UNIX socket"))
-    fig.subplots_adjust(left=0.115, right=0.975, top=0.83, bottom=0.16, wspace=0.85)
+    fig.subplots_adjust(left=0.115, right=0.975, top=0.83, bottom=0.24, wspace=0.85)
     return fig
 
 

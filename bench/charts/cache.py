@@ -128,7 +128,7 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
     ax.set_xticks(xs)
     ax.set_xticklabels(labels)
     ax.set_xlabel("rows")
-    pad = 0.8 if len(xs) == 1 else 0.0
+    pad = 0.40 if len(xs) == 1 else 0.0
     ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
     ax.set_ylabel(ylabel)
     if log:
@@ -137,7 +137,7 @@ def bars(ax, data, workload, fmt, ylabel, log=False):
     ax.yaxis.set_major_formatter(FuncFormatter(fmt))
     theme.declutter(ax)
     theme.ticks(ax, log=log)
-    ax.margins(y=0.24)
+    ax.margins(y=0.12)
     return handles
 
 
@@ -154,11 +154,11 @@ def main():
     if not data:
         sys.exit(f"{args.log}: no rows found -- run `just pgcache-bench` first")
 
-    fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(11.0, 5.0))
+    fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(6.6, 4.4))
     bars(ax_scan, data, "large", fmt_rows, "rows/s")
     ax_scan.set_title("the full scan: n rows out, delivery-bound", fontsize=9.5)
     handles = bars(ax_agg, data, "small", fmt_ms, "ms/read", log=True)
-    ax_agg.set_title("count + two sums: one row out, execution-bound", fontsize=9.5)
+    ax_agg.set_title("count + two sums, execution-bound", fontsize=9.5)
 
     fig.suptitle("fast-postgres against a result cache, same rows, same output",
                  fontsize=12.5, y=0.975)
@@ -167,7 +167,7 @@ def main():
 
     footer = " · ".join(env.get(k, "?") for k in ("cpu", "postgres", "pgcache image", "git"))
     theme.footer(fig, footer, y=0.03)
-    fig.subplots_adjust(left=0.075, right=0.985, top=0.80, bottom=0.14)
+    fig.subplots_adjust(left=0.095, right=0.985, top=0.80, bottom=0.21)
 
     path = args.out / FILENAME
     fig.savefig(path, dpi=150)

@@ -131,7 +131,7 @@ def main():
     if not rows:
         sys.exit(f"{args.log}: no rows found")
     rows = [rows[-1]]  # the largest size: the smaller ones tell the same relation
-    fig, (ax_rate, ax_bytes) = plt.subplots(1, 2, figsize=(11.0, 5.0))
+    fig, (ax_rate, ax_bytes) = plt.subplots(1, 2, figsize=(7.8, 4.4))
     style(ax_bytes, rows, "bytes held", log_y=True)
 
     # The rate panel is bars - one group per size, one bar per player - so it is
@@ -160,10 +160,10 @@ def main():
     ax_rate.set_xlabel("rows read")
     ax_rate.set_ylabel("rows/s")
     ax_rate.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
-    pad = 0.7 if len(rows) == 1 else 0.0
+    pad = 0.45 if len(rows) == 1 else 0.0
     ax_rate.set_xlim(-0.5 - pad, len(rows) - 0.5 + pad)
     if peak:
-        ax_rate.set_ylim(0, peak * 1.18)
+        ax_rate.set_ylim(0, peak * 1.06)
     theme.declutter(ax_rate)
     theme.ticks(ax_rate)
     ax_rate.set_title("the same read, same output, same rows", fontsize=9.5)
@@ -210,7 +210,7 @@ def main():
     ax_bytes.set_xlim(-0.5 - pad, len(rows) - 0.5 + pad)
     ax_bytes.yaxis.set_major_formatter(mticker.FuncFormatter(fmt_bytes))
     if peak and smallest:
-        ax_bytes.set_ylim(smallest * 0.5, peak * 2.2)  # bars on a log axis
+        ax_bytes.set_ylim(smallest * 0.5, peak * 1.35)  # bars on a log axis
     ax_bytes.set_title("what each held while it delivered", fontsize=9.5)
 
     handles = [
@@ -222,12 +222,12 @@ def main():
     ]
     fig.suptitle("the same rows against a fixed 512 MiB shared-memory buffer",
                  fontsize=12.5, y=0.975)
-    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.925), ncol=4,
+    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.945), ncol=2,
                  handles=handles, labels=[h.get_label() for h in handles])
 
     footer = " · ".join(env.get(k, "?") for k in ENV_KEYS)
     theme.footer(fig, footer, y=0.03)
-    fig.subplots_adjust(left=0.07, right=0.985, top=0.79, bottom=0.14)
+    fig.subplots_adjust(left=0.085, right=0.985, top=0.70, bottom=0.17)
 
     path = args.out / FILENAME
     fig.savefig(path, dpi=150)
