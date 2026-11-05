@@ -220,11 +220,11 @@ fastpostgres_publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tup
                                   size_t capacity)
 {
     size_t cap   = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    void  *map   = fastpostgres_shm_map_rw(path, cap);
+    void  *map   = fastpostgres_shm_map_cached(path, cap);
     uint64 total = fastpostgres_columnar_build(tuples, td, nrows, (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE,
                                                (char *)map + cap);
 
     fastpostgres_shm_publish(map, cap, total);
-    munmap(map, cap);
+    /* the mapping stays cached: the next batch rewrites the same segment */
     return total;
 }
