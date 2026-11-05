@@ -33,8 +33,8 @@ COPY bench /src/bench
 COPY examples /src/examples
 COPY docker/entrypoint.sh docker/tests.sh examples/run.sh \
      bench/jobs/adoption.sh bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh \
-     bench/jobs/decode-mca.sh bench/jobs/loop-asm.py \
-     bench/rivals/adbc-arrow/benchmarks.sh /usr/local/bin/
+     bench/jobs/decode-mca.sh bench/jobs/client-scaling.sh bench/jobs/client-nogil.sh \
+     bench/jobs/loop-asm.py bench/rivals/adbc-arrow/benchmarks.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py
 
 # The adopted suite's Python cells run through its own wrapper, which wants a
@@ -66,3 +66,22 @@ FROM dev AS profile
 RUN apt-get update && apt-get install -y --no-install-recommends \
       valgrind llvm \
  && rm -rf /var/lib/apt/lists/*
+
+# The free-threaded interpreter (PEP 703), for the client's own parallelism: the
+# decode holds the GIL in the default build, so N threads on N partitions only
+# decode in parallel here. uv installs a python-build-standalone build (headers
+# included) and the client compiles against it in place — the ABI tag differs
+# (cpython-313t), so both builds sit side by side and each interpreter finds its
+# own. `--target nogil`, tagged fastpostgres-dev-nogil.
+FROM dev AS nogil
+# The interpreter and the venv must be readable by the container's user (postgres
+# runs the command), so neither can live under /root where uv puts them by default.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+RUN python3 -m pip install --break-system-packages --no-cache-dir uv \
+ && uv python install 3.13t \
+ && uv venv --python 3.13t --seed /opt/nogil \
+ && /opt/nogil/bin/python -m pip install --no-cache-dir numpy sqlalchemy setuptools \
+ && chmod -R a+rX /opt/uv-python /opt/nogil
+WORKDIR /src/python
+RUN /opt/nogil/bin/python setup.py build_ext --inplace \
+ && chown -R postgres:postgres /src/python

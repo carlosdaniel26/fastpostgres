@@ -1,0 +1,85 @@
+bench/dispatch/internals.sh client-scaling 
+just _run client-scaling.sh 
+just _image
+docker build -q --target dev -t fastpostgres-dev -f docker/Dockerfile . >/dev/null
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=17ef480-dirty fastpostgres-dev client-scaling.sh
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: 17ef480-dirty
+shm: 3.0G
+### END ENV
+### CLIENT-SCALING RUN
+args: <cell defaults>
+### END CLIENT-SCALING RUN
+NOTICE:  table "fp_scaling_t" does not exist, skipping
+### CLIENT-SCALING
+cpu: AMD Ryzen 7 7700 8-Core Processor
+ghz: 3.7
+shape: bench (fp_scaling_t: the benchmark's six-column row, 100000 rows)
+rows: 100000
+reads: 5 per worker
+reps: 3 (median reported)
+mode: all
+pool: <machine default>
+git: 17ef480-dirty
+### END CLIENT-SCALING
+
+mode       n  reads       rows/s   vs n=1   per worker       shm
+serial     1      5    3,239,101        —    3,239,101 5/5      
+processes  1      5    2,993,158        —    2,993,158       5/5
+processes  2     10    5,182,054     +73%    2,591,027     10/10
+processes  3     15    7,308,883    +144%    2,436,294     15/15
+processes  4     20    9,012,782    +201%    2,253,196     20/20
+processes  5     25   10,366,924    +246%    2,073,385     25/25
+processes  6     30   11,274,286    +277%    1,879,048     30/30
+threads    1      5    3,282,809        —    3,282,809       5/5
+asyncio    1      5    3,379,772        —    3,379,772       5/5
+columnar   1      5    7,268,313        —    7,268,313         —
+threads    2     10    3,464,698      +6%    1,732,349     10/10
+asyncio    2     10    3,488,968      +3%    1,744,484     10/10
+columnar   2     10   14,260,951     +96%    7,130,475         —
+threads    3     15    3,617,830     +10%    1,205,943     15/15
+asyncio    3     15    3,513,848      +4%    1,171,283     15/15
+columnar   3     15   20,822,582    +186%    6,940,861         —
+threads    4     20    3,683,664     +12%      920,916     20/20
+asyncio    4     20    3,772,570     +12%      943,142     20/20
+columnar   4     20   26,161,247    +260%    6,540,312         —
+threads    5     25    3,546,298      +8%      709,260     25/25
+asyncio    5     25    3,753,443     +11%      750,689     25/25
+columnar   5     25   30,065,886    +314%    6,013,177         —
+threads    6     30    3,604,122     +10%      600,687     30/30
+asyncio    6     30    3,800,735     +12%      633,456     30/30
+columnar   6     30   32,602,475    +349%    5,433,746         —
+
+pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
+partitions: 6 rings, 18 data segments
+read_rows: 528.8 cycles/row over 68800049 rows (decode 525.6, frame+desc+list 3.1)
+
+--- reading the table ---
+serial is one connection, back to back: the same road the modes take, so that row
+sits next to their n=1 rows. Each mode is compared against its own n=1 row:
+  threads    the dbapi row path; the decode holds the GIL, so this buys a few
+             percent, not a multiple (bench/NOTES.md: +6..12%)
+  asyncio    the same work with the event loop free and a tier thread per
+             connection — it tracks threads and never blocks the loop
+  columnar   stream() batches reduced with numpy, whose loops release the GIL:
+             N threads on N partitions genuinely run in parallel here
+  processes  one process per worker, separate GILs: the tuple path parallelized
+             the other way, at the price of `workers` background-worker slots
+Every mode accounts for every read — the row paths' `shm` column (reads/reads),
+the columnar mode's cross-worker sum — and `libpq_reads=0` says nothing fell back.

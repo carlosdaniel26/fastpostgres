@@ -66,6 +66,21 @@ _run_profile *args:
     just _image_profile
     docker run --rm --shm-size={{shm}} -e MCA_CPU={{env("MCA_CPU", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-profile {{args}}
 
+# build the free-threaded image: the client compiled for CPython 3.13t
+[private]
+_image_nogil:
+    docker build -q --target nogil -t {{image}}-nogil -f docker/Dockerfile . >/dev/null
+
+# the same, in the free-threaded image (no GIL: the client's decode parallelizes)
+[private]
+_run_nogil *args:
+    just _image_nogil
+    docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-nogil {{args}}
+
+# the client suite and the scaling cell under the free-threaded interpreter
+nogil *args:
+    just _run_nogil client-nogil.sh {{args}}
+
 # both test suites: the extension's SQL surface (pg_regress) and the client's
 test:
     just _run tests.sh
@@ -132,6 +147,12 @@ decode-mca *args:
 [private]
 cache-stat *args:
     bench/jobs/cache-stat.sh {{args}}
+
+# the client's own scaling: threads and asyncio, one partition per worker
+# (internals client-scaling)
+[private]
+client-scaling *args:
+    just _run client-scaling.sh {{args}}
 
 # the codec x transport isolation matrix (internals codec-transport): sequential
 # by construction (bench/CODEC-TRANSPORT.md); writes bench/results/codec-transport.log as

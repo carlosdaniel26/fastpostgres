@@ -23,6 +23,9 @@ internals: the meters behind the design notes
                    (CODEC-TRANSPORT.md, bench/results/codec-transport.log)
   cache-stat       cache counters on the host's PMU: decodes per row, transports
                    per KiB (bench/results/cache-stat.log)
+  client-scaling   the client itself: threads and asyncio, one shared-memory
+                   partition per worker, against the serial baseline
+                   (bench/results/client-scaling.log)
 
 Arguments after the target go to that target's recipe.
 EOF
@@ -34,6 +37,7 @@ case "$target" in
   decode-mca)      just decode-mca "$@" ;;
   codec-transport) just codec-transport "$@" ;;
   cache-stat)      just cache-stat "$@" ;;
+  client-scaling)  just client-scaling "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "internals: unknown target '$target'" >&2

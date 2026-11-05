@@ -64,6 +64,7 @@ costs - and their results live in the lab notebook rather than in this catalog.
 | `decode-mca` | the decode loop's ports and latency, modeled offline (llvm-mca; profile image) | [`NOTES.md`](NOTES.md) |
 | `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](results/codec-transport.log) |
 | `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](results/cache-stat.log) |
+| `client-scaling` | the client itself: threads and asyncio, one shared-memory partition per worker | [`client-scaling.log`](results/client-scaling.log) |
 
 ## Charts: `just charts [target]`
 

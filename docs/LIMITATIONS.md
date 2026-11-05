@@ -28,7 +28,21 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
   process. The benchmark does not measure fault counts.
 - **Concurrency.** One stream at a time per ring; several processes are shown as
   one aggregate row, not as a latency distribution. No mixed read/write workload
-  is measured.
+  is measured. The client's thread and asyncio scaling is measured on its own
+  (`just internals client-scaling`), not through the rival benchmark.
+- **The asyncio layer.** A thread-per-connection facade: each connection's tier
+  thread runs the blocking ring waits with the GIL released, so the event loop
+  stays live, but concurrency is capped by the ring pool. No `PQcancel` yet —
+  cancelling a task lets the call in flight finish (its result is dropped),
+  rather than interrupting libpq or the ring. A batch's views are valid until
+  that stream's next pull, so copy what must outlive it.
+- **The row decode and the GIL.** Reading tuples is Python-object construction, so
+  it holds the GIL and N threads on N partitions gain a few percent on a normal
+  build (`just internals client-scaling`, `bench/results/client-scaling.log`). The
+  zero-copy path scales there anyway (numpy releases the GIL, +375% at six
+  workers), and the row path scales on a free-threaded interpreter: `just nogil`
+  builds the client against CPython 3.13t and the same cell runs +119% at six
+  threads (`bench/results/client-scaling-nogil.log`).
 - **Multi-host.** Everything is POSIX shared memory — client and server share
   `/dev/shm`. There is no network path to benchmark.
 - **ADBC parallelism.** The ADBC player is a single connection doing one fetch.

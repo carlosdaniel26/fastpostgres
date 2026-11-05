@@ -1,0 +1,160 @@
+just _run_nogil client-nogil.sh 
+just _image_nogil
+docker build -q --target nogil -t fastpostgres-dev-nogil -f docker/Dockerfile . >/dev/null
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=17ef480-dirty fastpostgres-dev-nogil client-nogil.sh
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: 17ef480-dirty
+shm: 3.0G
+### END ENV
+### NOGIL
+python: 3.13.18
+gil: disabled
+client: /src/python/src/fastpostgres/_client.cpython-313t-x86_64-linux-gnu.so
+### END NOGIL
+
+test_cancelled_pull_returns_the_ring (test_aio.AioTest.test_cancelled_pull_returns_the_ring) ... ok
+test_close_ends_a_live_stream (test_aio.AioTest.test_close_ends_a_live_stream) ... ok
+test_concurrent_streams_on_one_loop (test_aio.AioTest.test_concurrent_streams_on_one_loop) ... ok
+test_errors (test_aio.AioTest.test_errors) ... /src/python/src/fastpostgres/dbapi.py:786: RuntimeWarning: fastpostgres: a read left the shared-memory path (RuntimeError: division by zero)
+  result = self.connection._shm_read(sql)
+ok
+test_execute_and_fetch_parity (test_aio.AioTest.test_execute_and_fetch_parity) ... ok
+test_fetchall_matches_libpq (test_aio.AioTest.test_fetchall_matches_libpq) ... ok
+test_first (test_aio.AioTest.test_first) ... ok
+test_forked_connection_is_refused (test_aio.AioTest.test_forked_connection_is_refused)
+The child must not drive the parent's PGconn or its tier. ... /src/python/tests/test_aio.py:156: DeprecationWarning: This process (pid=80) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+ok
+test_loop_keeps_running_during_a_read (test_aio.AioTest.test_loop_keeps_running_during_a_read) ... ok
+test_second_concurrent_pull_is_refused (test_aio.AioTest.test_second_concurrent_pull_is_refused) ... ok
+test_stream_is_zero_copy_and_reuses_its_ring (test_aio.AioTest.test_stream_is_zero_copy_and_reuses_its_ring) ... ok
+test_use_after_close (test_aio.AioTest.test_use_after_close) ... ok
+test_exec_command_row_count (test_client.ConnectionTest.test_exec_command_row_count) ... NOTICE:  table "fp_py_t" does not exist, skipping
+ok
+test_exec_null (test_client.ConnectionTest.test_exec_null) ... ok
+test_exec_returns_rows_and_metadata (test_client.ConnectionTest.test_exec_returns_rows_and_metadata) ... ok
+test_exec_types (test_client.ConnectionTest.test_exec_types) ... ok
+test_core_module_mirrors_the_core_read_shape (test_client.DbapiTest.test_core_module_mirrors_the_core_read_shape)
+fastpostgres.core takes the same calls CORE does — engine.connect(), ... NOTICE:  table "fp_lean_t" does not exist, skipping
+ok
+test_core_read_without_core (test_client.DbapiTest.test_core_read_without_core)
+The CORE stand-in compiles a statement with SQLAlchemy's own compiler ... NOTICE:  table "fp_core_t" does not exist, skipping
+ok
+test_dml_stays_on_libpq (test_client.DbapiTest.test_dml_stays_on_libpq) ... NOTICE:  table "fp_shm_t" does not exist, skipping
+ok
+test_executemany (test_client.DbapiTest.test_executemany) ... NOTICE:  table "fp_dbapi_t" does not exist, skipping
+ok
+test_fetchall_and_iter (test_client.DbapiTest.test_fetchall_and_iter) ... ok
+test_forked_worker_gets_its_own_ring_name (test_client.DbapiTest.test_forked_worker_gets_its_own_ring_name)
+Module state carries across fork; the ring stem must not. gunicorn and ... ok
+test_literal_quoting_is_safe (test_client.DbapiTest.test_literal_quoting_is_safe) ... ok
+test_parameter_inlining (test_client.DbapiTest.test_parameter_inlining) ... ok
+test_pool_is_sized_from_the_machine_and_the_server (test_client.DbapiTest.test_pool_is_sized_from_the_machine_and_the_server)
+The ring pool is not a constant: it is the machine's stream count ... ok
+test_shm_binary_types_match_libpq (test_client.DbapiTest.test_shm_binary_types_match_libpq)
+The same query over /dev/shm and over libpq must agree value for ... ok
+test_shm_falls_back_for_types_it_cannot_walk (test_client.DbapiTest.test_shm_falls_back_for_types_it_cannot_walk)
+A type whose storage is not the wire bytes themselves (numeric) makes ... ok
+test_shm_pool_reuses_rings_across_connections (test_client.DbapiTest.test_shm_pool_reuses_rings_across_connections) ... ok
+test_shm_read_pipelines_across_batch_boundaries (test_client.DbapiTest.test_shm_read_pipelines_across_batch_boundaries)
+Reads alternate two data segments and ask for the next batch before ... ok
+test_shm_row_path_detoasts (test_client.DbapiTest.test_shm_row_path_detoasts)
+The row frame carries PostgreSQL's own tuples, so the worker has to ... ok
+test_shm_select_path_batches (test_client.DbapiTest.test_shm_select_path_batches) ... ok
+test_shm_types (test_client.DbapiTest.test_shm_types) ... ok
+test_stream_columnar_zero_copy (test_client.DbapiTest.test_stream_columnar_zero_copy) ... ok
+test_stream_needs_the_extension (test_client.DbapiTest.test_stream_needs_the_extension) ... ok
+test_typed_view_refuses_a_column_with_nulls (test_client.DbapiTest.test_typed_view_refuses_a_column_with_nulls) ... ok
+test_typed_views_are_zero_copy (test_client.DbapiTest.test_typed_views_are_zero_copy)
+Consuming a chunk without materialising it: numpy wraps the segment in ... ok
+test_binary_kinds_on_the_wire (test_client.RingReadTest.test_binary_kinds_on_the_wire)
+The wire form itself: date/time/timestamp/uuid/bytea arrive binary, ... ok
+test_row_frame_built_tuple_padding_is_zero (test_client.RingReadTest.test_row_frame_built_tuple_padding_is_zero)
+A projection's row is built by the worker (heap_fill_tuple), and the ... ok
+test_stream_decodes_columnar_chunk (test_client.RingReadTest.test_stream_decodes_columnar_chunk) ... ok
+test_synchronous_row_pull (test_client.RingReadTest.test_synchronous_row_pull)
+next_rows() is the one-call pull: post_rows(self->data) + wait(). ... ok
+test_the_data_segment_capacity_is_the_clients_ask (test_client.RingReadTest.test_the_data_segment_capacity_is_the_clients_ask)
+Ring(seg, segment_bytes) is the client's ask for how big the worker ... ok
+test_close_ends_a_live_stream_and_returns_the_ring (test_parallel.ParallelTest.test_close_ends_a_live_stream_and_returns_the_ring) ... ok
+test_forked_child_does_not_inherit_leases (test_parallel.ParallelTest.test_forked_child_does_not_inherit_leases)
+A child forks while the parent holds a stream open: the child must take ... ok
+test_threads_each_get_their_own_partition (test_parallel.ParallelTest.test_threads_each_get_their_own_partition) ... ok
+test_one_ring_two_threads_is_refused (test_parallel.RingGuardTest.test_one_ring_two_threads_is_refused)
+The C layer refuses a second driver instead of interleaving the slot. ... ok
+
+----------------------------------------------------------------------
+Ran 45 tests in 1.129s
+
+OK
+[test_parallel] 3 partitions (slots free: 3)
+read_rows: 125.9 cycles/row over 1390602 rows (decode 120.4, frame+desc+list 5.5)
+
+### the client's own scaling, GIL off
+NOTICE:  table "fp_scaling_t" does not exist, skipping
+### CLIENT-SCALING
+cpu: AMD Ryzen 7 7700 8-Core Processor
+ghz: 3.7
+shape: bench (fp_scaling_t: the benchmark's six-column row, 100000 rows)
+rows: 100000
+reads: 5 per worker
+reps: 3 (median reported)
+mode: threads
+pool: <machine default>
+git: 17ef480-dirty
+### END CLIENT-SCALING
+
+mode       n  reads       rows/s   vs n=1   per worker       shm
+serial     1      5    3,654,193        —    3,654,193 5/5      
+threads    1      5    4,496,127        —    4,496,127       5/5
+threads    2     10    7,059,597     +57%    3,529,798     10/10
+threads    3     15    8,317,220     +85%    2,772,407     15/15
+threads    4     20    9,074,851    +102%    2,268,713     20/20
+threads    5     25    9,354,429    +108%    1,870,886     25/25
+threads    6     30    9,831,927    +119%    1,638,654     30/30
+
+pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
+partitions: 6 rings, 12 data segments
+read_rows: 366.4 cycles/row over 35200000 rows (decode 360.0, frame+desc+list 6.4)
+
+NOTICE:  table "fp_scaling_t" does not exist, skipping
+### CLIENT-SCALING
+cpu: AMD Ryzen 7 7700 8-Core Processor
+ghz: 3.7
+shape: bench (fp_scaling_t: the benchmark's six-column row, 100000 rows)
+rows: 100000
+reads: 5 per worker
+reps: 3 (median reported)
+mode: columnar
+pool: <machine default>
+git: 17ef480-dirty
+### END CLIENT-SCALING
+
+mode       n  reads       rows/s   vs n=1   per worker       shm
+serial     1      5    3,874,493        —    3,874,493 5/5      
+columnar   1      5    7,262,289        —    7,262,289         —
+columnar   2     10   14,313,877     +97%    7,156,939         —
+columnar   3     15   20,821,143    +187%    6,940,381         —
+columnar   4     20   26,695,072    +268%    6,673,768         —
+columnar   5     25   32,033,510    +341%    6,406,702         —
+columnar   6     30   34,988,248    +382%    5,831,375         —
+
+pool: created=6 idle=6 leases=0 broken=False libpq_reads=0 causes={}
+partitions: 6 rings, 8 data segments
+read_rows: 281.6 cycles/row over 1600000 rows (decode 275.4, frame+desc+list 6.2)

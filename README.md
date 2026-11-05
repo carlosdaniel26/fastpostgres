@@ -170,8 +170,12 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 | class | command | what it answers |
 |---|---|---|
 | rivals | `just rivals [adbc\|arrow-memory\|cache\|cache-budget]` | how the ring compares with ADBC + Arrow and with a result cache, at their defaults and under a fixed memory budget |
-| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat]` | what the row decode and the transport cost at the instruction, cache and port level |
+| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|client-scaling]` | what the row decode and the transport cost at the instruction, cache and port level, and how the client itself scales across threads, asyncio and processes |
 | adoption | `just adoption [magicstack-pgbench]` | what a published third-party suite's own queries and protocol find, with our cell in its roster |
+
+`just nogil` builds the client against free-threaded CPython 3.13t and runs the
+client suite plus the scaling cell there, where the row decode stops being
+serialized by the GIL.
 
 The full catalog - the scenarios, the method, the log behind every number and the
 caveats - is [`bench/README.md`](bench/README.md); `just charts <target>`
@@ -208,6 +212,34 @@ for batch in cur.stream("select id, price from products"):
 
 Read-only `SELECT`s take the ring; everything else goes over libpq. The `examples/` application is the same SQLAlchemy app run on psycopg 3 and on FastPostgres, to show what the URL change does.
 
+The asyncio face is `fastpostgres.aio`: every connection gets a thread of its own
+for the blocking ring waits (the event loop is not blocked), and each live stream
+holds its own partition of the shared memory, so several connections' streams run
+at once — each on its own ring:
+
+```python
+from fastpostgres import aio
+
+async with await aio.connect("host=/tmp dbname=app user=app") as conn:
+    rows = await conn.fetchall("select id, name from products")
+    async with conn.stream("select id, price from products") as batches:
+        async for batch in batches:
+            total += np.asarray(batch.columns[1]).sum()   # valid until the next pull
+```
+
+An async read queues for a free partition (`wait=True`, the default) rather than
+dropping to libpq; the GIL still serializes the decode, so the win is many
+streams in flight, not a faster single read.
+
+Where the parallelism is, measured (`just internals client-scaling`): one thread
+per partition reading rows through the DB-API buys a few percent — the decode
+that builds Python objects holds the GIL — while the zero-copy path, which
+reduces batches in numpy (GIL released), scales with the workers. On a
+**free-threaded** interpreter the row path scales too: `just nogil` builds the
+client against CPython 3.13t (the module declares `Py_MOD_GIL_NOT_USED`) and runs
+the client suite plus the same cell, where six threads on six partitions read
+about twice what one does ([`bench/NOTES.md`](bench/NOTES.md)).
+
 ## Configuration
 
 | variable | default | effect |
@@ -220,8 +252,8 @@ On the server side, `max_worker_processes` bounds how many rings (background wor
 ## Status
 
 - **A research prototype.** Linux, same host, single writer's discretion: see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for the list, including the ones that shape how it can be used at all.
-- **Tested**: the extension's SQL surface under `pg_regress`, and 29 client tests covering the wire types, the ring pool, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check.
-- **Not here yet**: an async client, COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
+- **Tested**: the extension's SQL surface under `pg_regress`, and 45 client tests covering the wire types, the ring pool, the threads/partitions, the asyncio layer, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check. The same suite passes on the free-threaded 3.13t build (`just nogil`).
+- **Not here yet**: COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
 
 ## Documentation
 

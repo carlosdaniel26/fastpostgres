@@ -1333,3 +1333,65 @@ moved this repository's paths **−7% and +11%** on shapes the change did and di
 touch, while the ADBC control held **±2%** — so that harness' resolution is about
 ±10% and a 3% client-side change is inside it. The charts and every log are in
 `bench/results/ab/improve-*.log`, rendered by `just ab-charts`.
+
+## The client's own scaling: threads, asyncio, numpy and processes (measured)
+
+`just internals client-scaling` — the record is
+[`results/client-scaling.log`](results/client-scaling.log) — drives the same read
+five ways: serially on one connection, on one thread per worker through the
+DB-API, on one `AsyncConnection` per task through the asyncio layer, on the same
+threads over the zero-copy path reduced with numpy, and on one process per
+worker. Each worker owns its ring — its own partition of the shared memory. Five
+100k-row reads per worker, medians of three, one setting at a time, and the
+thread/asyncio/columnar modes alternate at each worker count so a block of runs
+cannot ride a clock shift; the row is the benchmark's six columns in a table, so
+the executor is not the cost.
+
+| workers | threads | asyncio | columnar (numpy) | processes |
+|---|---|---|---|---|
+| 1 | 3.28M | 3.38M | 7.27M | 2.99M |
+| 2 | 3.46M (+6%) | 3.49M (+3%) | 14.26M (+96%) | 5.18M (+73%) |
+| 4 | 3.68M (+12%) | 3.77M (+12%) | 26.16M (+260%) | 9.01M (+201%) |
+| 6 | 3.60M (+10%) | 3.80M (+12%) | **32.60M (+349%)** | **11.27M (+277%)** |
+
+One connection reads at 3.24M rows/s. Two of these columns parallelize and two do
+not, and the reason is one sentence: **the decode holds the GIL**. The thread and
+asyncio columns reproduce the older table's result — a few percent to a dozen from
+two to six workers (+6..12% here, +6..12% there) — because building Python objects
+from the segment is serialized no matter how many partitions are on offer;
+asyncio's job is the live event loop and a partition per stream, not a faster
+read. The columnar column is the same N-partitions shape with the consumption
+moved into numpy, whose loops release the GIL: **it scales to +349% at six
+workers**, so the partitioning was never the limit — Python-object decode is. The
+processes column is the other way to buy that: separate GILs, +277% at six, at
+the price of one background worker per process. Every read in every setting was
+served by the ring (`shm` = reads/reads, `libpq_reads=0`; the columnar mode
+checks the cross-worker sum instead, because `stream()` does not count shm
+reads). A repeat of the cell moves these by about the harness's documented
+spread; the record is the committed run.
+
+The same cell, one interpreter later (`just nogil`: the client built against
+CPython 3.13t, its module declaring `Py_MOD_GIL_NOT_USED`; the record is
+[`results/client-scaling-nogil.log`](results/client-scaling-nogil.log)):
+
+| workers | threads (3.13t) | threads (GIL) | columnar (3.13t) |
+|---|---|---|---|
+| 1 | 4.50M | 3.09M | 7.26M |
+| 2 | 7.06M (+57%) | 3.27M (+6%) | 14.31M (+97%) |
+| 4 | 9.07M (+102%) | 3.53M (+14%) | 26.70M (+268%) |
+| 6 | 9.83M (+119%) | 3.49M (+13%) | 34.99M (+382%) |
+
+With the GIL gone, the tuple column finally scales — +119% at six workers against
++13% behind the GIL, roughly twice the throughput, every read still ring-served
+and the whole 45-test client suite passing on 3.13t. It is not linear: what is
+left is the ring turn (one background worker per stream) and the memory traffic
+the decode pulls. The lesson the partition design needed is the one this table
+states: the wall was the interpreter's, not the transport's. What the free-thread
+build claims rests on the per-thread partitions, the locked segment map cache and
+the atomic counters — the same things this cell was measuring all along.
+
+Two things the cell had to learn, recorded so the next meter does not repeat
+them: time inside the worker (a launcher's stamp races the barrier's release,
+and one read outside the window is 20% of a five-read setting), and alternate
+the modes rather than measuring all the thread settings and then all the asyncio
+ones, because the drift between the two blocks was larger than what threads buy.
