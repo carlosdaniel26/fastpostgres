@@ -6,7 +6,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=63b5a38-dirty fastpostgres-dev benchmarks.sh 1000
+docker run --rm --shm-size=3g -e SHAPE= -e BENCH_GIT_REV=e770831 fastpostgres-dev benchmarks.sh 1000
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -20,23 +20,23 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: bench
-git: 63b5a38-dirty
+git: e770831
 shm: 3.0G
 ### END ENV
-read_rows: 381.3 cycles/row over 4000 rows (decode 348.7, frame+desc+list 32.6)
-read_rows: 494.8 cycles/row over 4000 rows (decode 452.2, frame+desc+list 42.5)
+read_rows: 410.2 cycles/row over 4000 rows (decode 369.4, frame+desc+list 40.8)
+read_rows: 411.9 cycles/row over 4000 rows (decode 375.4, frame+desc+list 36.5)
 # shape: bench — short ASCII text, no NULLs
 
-ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
-  (same output: the columnar form each stack lands, one column summed in place)
-  1K              4.34M        1.29M    337.5%  ok
-  spread: stream()+sum ±22.0%  arrow+sum ±4.3%
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  1K              5.03M        1.63M    308.7%  ok
+  spread: stream() ±12.0%  arrow table ±3.4%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  1K       fastpostgres, DBAPI                 5.18M          
-  1K       fastpostgres, stream()+sum          4.86M       94%
-  1K       fastpostgres, core interface        2.21M       43%
-  1K       fastpostgres, 4 processes           1.31M       25%
-  1K       adbc+arrow, arrow+sum               1.51M       29%
-  1K       adbc+arrow, fetchall()              0.12M        2%
-  1K       adbc+arrow, table+to_pylist         1.25M       24%
+  1K       fastpostgres, DBAPI                 4.96M          
+  1K       fastpostgres, stream()              4.53M       91%
+  1K       fastpostgres, core interface        3.00M       60%
+  1K       fastpostgres, 4 processes           1.45M       29%
+  1K       adbc+arrow, arrow table             1.65M       33%
+  1K       adbc+arrow, fetchall()              0.13M        3%
+  1K       adbc+arrow, table+to_pylist         1.32M       27%

@@ -33,9 +33,9 @@ this design gives up in exchange is in [`LIMITATIONS.md`](../docs/LIMITATIONS.md
 
 | rows | this repo | ADBC + Arrow | difference |
 |---|---|---|---|
-| 100K | 8.54M rows/s | 2.34M rows/s | **+266%** |
-| 1M | 8.53M rows/s | 2.35M rows/s | **+264%** |
-| 10M | 8.90M rows/s | 2.34M rows/s | **+280%** |
+| 100K | 8.27M rows/s | 2.25M rows/s | **+268%** |
+| 1M | 7.95M rows/s | 2.29M rows/s | **+247%** |
+| 10M | 8.70M rows/s | 2.32M rows/s | **+275%** |
 
 **Format only**, 1M rows, transport held out entirely, one process
 (the `fpcolumn` vs `arrow-ipc` cells):
@@ -235,7 +235,7 @@ protocol working as designed.
 ### 4.4 There is one language boundary, not three
 
 The comparison removes the Python layer on both sides — both stacks land the same
-columnar form — and the gap is still 3.6× (8.53M against 2.35M rows/s), so what
+columnar form — and the gap is still 3.5× (7.95M against 2.29M rows/s), so what
 it prices is the transport and the frame, not the object model. The DB-API's
 tuple read is the compatibility interface, not the headline: it pays CPython's
 per-object cost (`read_rows: 309 cycles/row over 400000 rows`, about 81 ns per

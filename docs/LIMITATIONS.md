@@ -74,9 +74,9 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 
 | path | rows/s | use it when |
 |---|---|---|
-| four processes, DBAPI | 9.42M aggregate | one process cannot keep up |
-| `stream()` + numpy | 8.75M | you want numbers, not rows |
-| DBAPI / `core` | 4.01M | a wrapper expects DB-API rows |
+| four processes, DBAPI | 8.34M aggregate | one process cannot keep up |
+| `stream()` | 8.02M | you want columnar batches, not rows |
+| DBAPI / `core` | 3.75M / 3.78M | a wrapper expects DB-API rows |
 
 ## When not to use this
 

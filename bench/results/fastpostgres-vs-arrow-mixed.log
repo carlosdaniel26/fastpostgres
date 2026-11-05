@@ -6,7 +6,7 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
 
-docker run --rm --shm-size=3g -e SHAPE=mixed -e BENCH_GIT_REV=63b5a38-dirty fastpostgres-dev benchmarks.sh
+docker run --rm --shm-size=3g -e SHAPE=mixed -e BENCH_GIT_REV=e770831 fastpostgres-dev benchmarks.sh
 initdb: warning: enabling "trust" authentication for local connections
 initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
 ### ENV
@@ -20,57 +20,57 @@ sqlalchemy: 2.0.40
 pyarrow: 26.0.0
 adbc: 1.13.0
 shape: mixed
-git: 63b5a38-dirty
+git: e770831
 shm: 3.0G
 ### END ENV
-read_rows: 761.7 cycles/row over 400000 rows (decode 759.7, frame+desc+list 2.0)
-read_rows: 758.4 cycles/row over 400000 rows (decode 756.4, frame+desc+list 1.9)
+read_rows: 750.9 cycles/row over 400000 rows (decode 748.8, frame+desc+list 2.1)
+read_rows: 751.3 cycles/row over 400000 rows (decode 749.3, frame+desc+list 1.9)
 # shape: mixed — ~10% NULLs, text 1..54 and 130..200 bytes, a non-ASCII every eighth row
 
-ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
-  (same output: the columnar form each stack lands, one column summed in place)
-  100K            7.25M        1.84M    393.6%  ok
-  spread: stream()+sum ±4.3%  arrow+sum ±0.1%
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  100K            6.82M        1.88M    362.6%  ok
+  spread: stream() ±2.6%  arrow table ±0.5%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  100K     fastpostgres, DBAPI                 3.15M          
-  100K     fastpostgres, stream()+sum          7.34M      233%
-  100K     fastpostgres, core interface        3.12M       99%
-  100K     fastpostgres, 4 processes           7.56M      240%
-  100K     adbc+arrow, arrow+sum               1.87M       59%
+  100K     fastpostgres, DBAPI                 3.12M          
+  100K     fastpostgres, stream()              6.99M      224%
+  100K     fastpostgres, core interface        3.08M       99%
+  100K     fastpostgres, 4 processes           7.40M      237%
+  100K     adbc+arrow, arrow table             1.82M       58%
   100K     adbc+arrow, fetchall()              0.14M        4%
-  100K     adbc+arrow, table+to_pylist         1.12M       36%
-read_rows: 794.8 cycles/row over 4000000 rows (decode 793.4, frame+desc+list 1.4)
-read_rows: 790.9 cycles/row over 4000000 rows (decode 789.9, frame+desc+list 1.0)
+  100K     adbc+arrow, table+to_pylist         1.14M       36%
+read_rows: 796.6 cycles/row over 4000000 rows (decode 795.4, frame+desc+list 1.1)
+read_rows: 784.9 cycles/row over 4000000 rows (decode 783.7, frame+desc+list 1.2)
 # shape: mixed — ~10% NULLs, text 1..54 and 130..200 bytes, a non-ASCII every eighth row
 
-ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
-  (same output: the columnar form each stack lands, one column summed in place)
-  1M              6.79M        1.89M    359.5%  ok
-  spread: stream()+sum ±2.6%  arrow+sum ±0.4%
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  1M              6.77M        1.89M    358.1%  ok
+  spread: stream() ±1.1%  arrow table ±0.3%
 
 PATHS, the same rows (rows/s):                      vs driver read
   1M       fastpostgres, DBAPI                 3.36M          
-  1M       fastpostgres, stream()+sum          7.39M      220%
-  1M       fastpostgres, core interface        3.31M       99%
-  1M       fastpostgres, 4 processes           8.18M      244%
-  1M       adbc+arrow, arrow+sum               1.91M       57%
+  1M       fastpostgres, stream()              6.57M      195%
+  1M       fastpostgres, core interface        3.37M      100%
+  1M       fastpostgres, 4 processes           8.20M      244%
+  1M       adbc+arrow, arrow table             1.92M       57%
   1M       adbc+arrow, fetchall()              0.14M        4%
-  1M       adbc+arrow, table+to_pylist         1.02M       31%
-read_rows: 823.8 cycles/row over 20000000 rows (decode 822.7, frame+desc+list 1.1)
-read_rows: 794.6 cycles/row over 20000000 rows (decode 793.6, frame+desc+list 1.0)
+  1M       adbc+arrow, table+to_pylist         1.05M       31%
+read_rows: 794.5 cycles/row over 20000000 rows (decode 793.4, frame+desc+list 1.0)
+read_rows: 771.4 cycles/row over 20000000 rows (decode 770.5, frame+desc+list 0.9)
 # shape: mixed — ~10% NULLs, text 1..54 and 130..200 bytes, a non-ASCII every eighth row
 
-ZERO-COPY READ (rows/s): stream()+sum arrow+sum    vs arrow    
-  (same output: the columnar form each stack lands, one column summed in place)
-  10M             7.77M        1.89M    412.1%  ok
-  spread: stream()+sum n=1  arrow+sum n=1
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow    
+  (the same read: the columnar form each stack lands, nothing consumed)
+  10M             6.96M        1.89M    368.0%  ok
+  spread: stream() n=1  arrow table n=1
 
 PATHS, the same rows (rows/s):                      vs driver read
-  10M      fastpostgres, DBAPI                 3.41M          
-  10M      fastpostgres, stream()+sum          7.41M      218%
-  10M      fastpostgres, core interface        3.40M      100%
-  10M      fastpostgres, 4 processes           8.26M      243%
-  10M      adbc+arrow, arrow+sum               1.86M       55%
+  10M      fastpostgres, DBAPI                 3.43M          
+  10M      fastpostgres, stream()              6.76M      197%
+  10M      fastpostgres, core interface        3.41M       99%
+  10M      fastpostgres, 4 processes           8.42M      245%
+  10M      adbc+arrow, arrow table             1.88M       55%
   10M      adbc+arrow, fetchall()              0.14M        4%
-  10M      adbc+arrow, table+to_pylist         1.02M       30%
+  10M      adbc+arrow, table+to_pylist         1.06M       31%
