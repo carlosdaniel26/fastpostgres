@@ -30,9 +30,6 @@ fastpostgres_stream_open(const char *stream, const char *query)
     char  *name = cursor_name(stream);
     Portal portal;
 
-    /* whatever the last stream left carried belongs to it, not to this one */
-    fastpostgres_rows_carry_reset();
-
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_open: SPI_connect failed");
 
     portal = SPI_cursor_open_with_args(name, query, 0, NULL, NULL, NULL, true, CURSOR_OPT_PARALLEL_OK);
@@ -83,9 +80,11 @@ fastpostgres_stream_close(const char *stream)
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_close: SPI_connect failed");
 
     portal = SPI_cursor_find(name);
-    if (portal != NULL) SPI_cursor_close(portal);
-
-    fastpostgres_rows_carry_reset();
+    if (portal != NULL)
+    {
+        fastpostgres_rows_carry_drop(portal); /* the carried row was this stream's */
+        SPI_cursor_close(portal);
+    }
 
     SPI_finish();
 }

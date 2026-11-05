@@ -10,7 +10,7 @@ EXTENSION = fastpostgres
 MODULE_big = fastpostgres
 
 OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/worker.o \
-       transport/transport.o transport/engine_shm.o
+       transport/transport.o transport/engine_shm.o transport/engine_eventfd.o
 
 # PostgreSQL wants a version in fastpostgres.control and wants the SQL file named
 # after it. Nothing is released, so both say 0.0.0: no upgrade paths to carry, and
