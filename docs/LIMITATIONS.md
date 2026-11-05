@@ -36,13 +36,14 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
   cancelling a task lets the call in flight finish (its result is dropped),
   rather than interrupting libpq or the ring. A batch's views are valid until
   that stream's next pull, so copy what must outlive it.
-- **The row decode and the GIL.** Reading tuples is Python-object construction, so
-  it holds the GIL and N threads on N partitions gain a few percent on a normal
-  build (`just internals client-scaling`, `bench/results/client-scaling.log`). The
-  zero-copy path scales there anyway (numpy releases the GIL, +375% at six
-  workers), and the row path scales on a free-threaded interpreter: `just nogil`
-  builds the client against CPython 3.13t and the same cell runs +119% at six
-  threads (`bench/results/client-scaling-nogil.log`).
+- **`aggregate()` is for numbers only.** `Cursor.aggregate` walks sum/min/max/count in C++ over the mapped segment with the GIL released — it is the path that parallelizes on a stock interpreter, with no numpy and no Python object per row — but it walks only the fixed-width numeric kinds and bool. Text, bytea, dates and `numeric` have to be aggregated by the server; integer sums wrap at 64 bits where the server's `sum(bigint)` is exact.
+- **What parallelizes, and what does not.** With one ring per thread, the paths
+  that never build a Python object per row scale: `Cursor.aggregate` (the C++
+  reduce) +340%, a numpy reduction +367%, and one process per worker +386% at six
+  workers (`bench/results/client-scaling.log`). Python-tuple materialization is
+  the DB-API compatibility path and is not benchmarked: it holds the GIL, and it
+  scales only on a free-threaded interpreter (`just nogil`, which also runs the
+  whole client suite on CPython 3.13t).
 - **Multi-host.** Everything is POSIX shared memory — client and server share
   `/dev/shm`. There is no network path to benchmark.
 - **ADBC parallelism.** The ADBC player is a single connection doing one fetch.

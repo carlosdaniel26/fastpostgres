@@ -212,6 +212,18 @@ for batch in cur.stream("select id, price from products"):
 
 Read-only `SELECT`s take the ring; everything else goes over libpq. The `examples/` application is the same SQLAlchemy app run on psycopg 3 and on FastPostgres, to show what the URL change does.
 
+When the answer is numbers, let the extension do the reduction: it streams the
+result and walks each batch in C++ — no Python object per row, no numpy — with
+the GIL released, so one thread per partition actually runs in parallel:
+
+```python
+sums = conn.cursor().aggregate(
+    "select price, stock from products",
+    {"rows": ("count_all", None), "price_sum": ("sum", "price"),
+     "cheapest": ("min", "price"), "stock_seen": ("count", "stock")},
+)
+```
+
 The asyncio face is `fastpostgres.aio`: every connection gets a thread of its own
 for the blocking ring waits (the event loop is not blocked), and each live stream
 holds its own partition of the shared memory, so several connections' streams run
@@ -231,14 +243,13 @@ An async read queues for a free partition (`wait=True`, the default) rather than
 dropping to libpq; the GIL still serializes the decode, so the win is many
 streams in flight, not a faster single read.
 
-Where the parallelism is, measured (`just internals client-scaling`): one thread
-per partition reading rows through the DB-API buys a few percent — the decode
-that builds Python objects holds the GIL — while the zero-copy path, which
-reduces batches in numpy (GIL released), scales with the workers. On a
-**free-threaded** interpreter the row path scales too: `just nogil` builds the
-client against CPython 3.13t (the module declares `Py_MOD_GIL_NOT_USED`) and runs
-the client suite plus the same cell, where six threads on six partitions read
-about twice what one does ([`bench/NOTES.md`](bench/NOTES.md)).
+Where the parallelism is, measured (`just internals client-scaling`): with one
+ring per thread, the consumption paths scale — `aggregate` (the C++ reduce) +340%,
+the numpy reduction +367%, one process per worker +386% at six workers. The
+benchmark measures those, not Python-tuple materialization: reading rows into
+objects is the DB-API compatibility path, and it is GIL-bound — on a
+**free-threaded** interpreter (`just nogil`: CPython 3.13t, the module declaring
+`Py_MOD_GIL_NOT_USED`) even that path scales, which is why that build exists.
 
 ## Configuration
 
@@ -252,7 +263,7 @@ On the server side, `max_worker_processes` bounds how many rings (background wor
 ## Status
 
 - **A research prototype.** Linux, same host, single writer's discretion: see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for the list, including the ones that shape how it can be used at all.
-- **Tested**: the extension's SQL surface under `pg_regress`, and 45 client tests covering the wire types, the ring pool, the threads/partitions, the asyncio layer, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check. The same suite passes on the free-threaded 3.13t build (`just nogil`).
+- **Tested**: the extension's SQL surface under `pg_regress`, and 54 client tests covering the wire types, the ring pool, the threads/partitions, the asyncio layer, the C++ aggregate path, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check. The same suite passes on the free-threaded 3.13t build (`just nogil`).
 - **Not here yet**: COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
 
 ## Documentation

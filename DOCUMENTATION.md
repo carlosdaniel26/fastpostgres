@@ -11,7 +11,7 @@ and the formal bits.
 |---|---|
 | `extension/transport/` | the doorbell engine (`engine_shm.c`) |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
-| `python/` | the client: a C++ extension module, the PEP 249 DBAPI, the asyncio layer (`aio.py`), the SQLAlchemy dialect, and the tests |
+| `python/` | the client: a C++ extension module (the row/columnar decode and the aggregate reduce), the PEP 249 DBAPI, the asyncio layer (`aio.py`), the SQLAlchemy dialect, and the tests |
 | `bench/` | the claim's tree: the measurement classes (`rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
@@ -45,7 +45,8 @@ how this can be used:
 - **`numeric` widens to `float8` on the wire.** Types whose storage is not the wire bytes (numeric, jsonb, arrays, enums) take the columnar frame, which is correct but not the zero-copy row path.
 - **One stream per ring.** The pool is sized on first use - one stream per ~1.2 hardware threads, divided by the SMT width (6 on this machine), clamped by the server's free `max_worker_processes` - and when it is exhausted the read falls back to libpq.
 - **The asyncio layer is a thread-per-connection facade.** Each `AsyncConnection` owns a tier thread that runs the blocking ring waits, so the loop keeps running; concurrency is bounded by the ring pool, and there is no `PQcancel` yet, so cancelling a task lets its current call finish before the cancellation lands. A batch's views are valid until *that stream's* next pull.
-- **The row decode parallelizes only off the GIL.** Building Python objects from a segment needs the GIL, so threads on separate partitions buy a few percent on a normal build; the zero-copy path (numpy reductions) already scales, and the row path scales on a free-threaded interpreter — `just nogil` builds the client against CPython 3.13t and runs the suite and the scaling cell there (`bench/NOTES.md`).
+- **`aggregate()` walks numbers, not rows.** `Cursor.aggregate` reduces sum/min/max/count in C++ over the mapped segment with the GIL released — parallel on any interpreter, no numpy — but only for the fixed-width numeric kinds and bool; anything else (text, bytea, dates, numeric) has to be aggregated by the server. Integer sums accumulate in 64 bits and wrap, while the server's `sum(bigint)` is exact numeric.
+- **What parallelizes is the consumption, not the row decode.** `Cursor.aggregate` (a C++ reduce) and numpy reductions over `stream()` scale with one ring per thread; building Python tuples is the DB-API compatibility path, holds the GIL, and is not benchmarked — it scales on a free-threaded interpreter, where `just nogil` builds the client against CPython 3.13t and runs the suite and the scaling cell (`bench/NOTES.md`).
 
 ## Contributing
 
