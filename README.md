@@ -233,22 +233,6 @@ On the server side, `max_worker_processes` bounds how many rings (background wor
 - **Tested**: the extension's SQL surface under `pg_regress`, and 29 client tests covering the wire types, the ring pool, fork safety and the libpq fallbacks; CI runs both, plus ruff, shellcheck and the markdown link check.
 - **Not here yet**: an async client, COPY, a network transport, and any platform but Linux. Writes, DDL and transactions are libpq's, deliberately.
 
-## How this was built
-
-FastPostgres is built with an AI coding assistant, from a human design: the
-transport - a background worker publishing batches into shared memory, the two
-frames, the ring, the engine choice - is the design, and the implementation, the
-harnesses, the charts and most of this documentation were written in pairing
-sessions with it. The commit history and the notebook
-([`bench/NOTES.md`](bench/NOTES.md)) are the record of how the numbers moved,
-including the hypotheses that were falsified.
-
-That is also why the measurement discipline here is what it is. Every number
-quoted on this page is a line in a committed log, produced by a command you can
-run, stamped with the commit it came from; two of the four classes measure
-somebody else's protocol or somebody else's stack, on purpose, so that not all
-of the evidence is ours.
-
 ## Documentation
 
 Project layout, the documentation index, the known limitations, contributing,
