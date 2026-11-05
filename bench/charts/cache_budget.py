@@ -12,12 +12,9 @@ because the same number of bytes buys different things:
                                      its budget lets it hold the entry
 
 The budget is the log's own schema: each `# budget M` section runs the ring with
-a transfer segment of M/2 and the cache in a container capped at M. The dashed
-line on the left is the pass-through workload - the same rows through the proxy
-with no cache in front of them - so the cache's line can be read against what
-forwarding alone costs. The shaded budgets are the ones where the cache's own
-evidence says it held nothing (its container was OOM-killed, or nothing was
-registered): on those bytes it is a plain proxy.
+a transfer segment of M/2 and the cache in a container capped at M. Where the
+cache's own evidence says it held nothing (its container was OOM-killed, or
+nothing was registered), its slot in the group carries `OOM` instead of a bar.
 
 Usage:
     just charts cache-budget                        plots the committed log
@@ -46,8 +43,6 @@ FILENAME = "pgcache-memory.png"
 
 ACCENT = "#1f77b4"
 ORANGE = "#e1812c"
-GREY = "#9a9a9a"
-SHADE = "#f0f0f0"
 
 BUDGET_RE = re.compile(r"^# budget ([\d.]+) (KiB|MiB|GiB), segment ")
 # the pgcache cell is "-" at a budget the cache cannot run at: the ring's own
@@ -128,10 +123,10 @@ def fmt_rows(v):
     return f"{v:g}"
 
 
-def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
+def bars(ax, budgets, data, series, fmt, oom_budgets, ylabel, log_y=False):
     """One group per budget, one bar per player, labelled with its value.
 
-    The shape is the same in every panel: the budgets on the x axis, so the
+    The shape is the same in both panels: the budgets on the x axis, so the
     question the figure asks (what each side buys with M bytes) is read the way
     a bar chart is read. A bar the cache does not have - its container was
     OOM-killed, or nothing registered - is left out and the slot says why.
@@ -145,19 +140,13 @@ def bars(ax, budgets, data, series, fmt, empty_budgets, ylabel, log_y=False):
         pos = [xs[budgets.index(b)] + (i - (len(series) - 1) / 2) * step for b in present]
         vals = [data[b][workload][player] for b in present]
         drawn = ax.bar(pos, vals, width=width, color=color, zorder=3)
-        for rect, b in zip(drawn, present):
-            # hatched only where the cache ran but held nothing: the ring's bars
-            # are the same read whatever the budget
-            if player == "pgcache" and b in empty_budgets:
-                rect.set_hatch("//")
         handles.append(plt.Rectangle((0, 0), 1, 1, color=color, label=label))
         ax.bar_label(drawn, labels=[fmt(v) for v in vals], fontsize=6.8, padding=2)
-        if player == "pgcache":
-            for b in budgets:
-                if b in empty_budgets and b not in present and i == 1:
-                    ax.annotate("OOM", (xs[budgets.index(b)] + (i - (len(series) - 1) / 2) * step, 0.02),
-                                xycoords=("data", "axes fraction"), ha="center", va="bottom",
-                                fontsize=6.8, color=ORANGE, zorder=4)
+        for b in budgets:
+            if player == "pgcache" and b in oom_budgets and b not in present:
+                ax.annotate("OOM", (xs[budgets.index(b)] + (i - (len(series) - 1) / 2) * step, 0.02),
+                            xycoords=("data", "axes fraction"), ha="center", va="bottom",
+                            fontsize=6.8, color=ORANGE, zorder=4)
 
     ax.set_xticks(xs)
     ax.set_xticklabels([fmt_budget(b) for b in budgets], fontsize=8.5)
@@ -189,7 +178,7 @@ def main():
 
     # the budgets where the cache held nothing at all: its container was
     # OOM-killed, or every workload in that cell reported nothing registered.
-    # A *throttled* cache that still held the query under test is not hatched:
+    # A *throttled* cache that still held the query under test is not marked:
     # the log's evidence lines carry that distinction.
     def empty(b):
         if evidence.get(b, {}).get("down"):
@@ -203,11 +192,8 @@ def main():
     scan_series = (
         ("large", "fastpostgres", ACCENT, "fast-postgres (shm ring, M/2 per segment)"),
         ("large", "pgcache", ORANGE, "psycopg 3 → PgCache (capped at M)"),
-        ("through", "pgcache", GREY, "the cache's pass-through row (left: no cache in front)"),
     )
     handles = bars(ax_scan, budgets, data, scan_series, fmt_rows, empty_budgets, "rows/s")
-    handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="white", edgecolor="#888888",
-                                 hatch="//", label="hatched: the cache holds nothing there"))
     ax_scan.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p=None: fmt_rows(v)))
     ax_scan.set_title("the full scan: n rows out, delivery-bound", fontsize=9.5)
 
