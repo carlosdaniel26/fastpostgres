@@ -59,7 +59,7 @@ _image_profile:
 [private]
 _run *args:
     just _image
-    docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}} {{args}}
+    docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e PG_OPTS={{env("PG_OPTS", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}} {{args}}
 
 # the same, in the profile image (callgrind and llvm-mca live there)
 [private]
