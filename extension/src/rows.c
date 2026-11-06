@@ -324,7 +324,7 @@ uint64
 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity)
 {
     size_t                 cap     = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    void                  *map     = fastpostgres_shm_map_rw(path, cap);
+    void                  *map     = fastpostgres_shm_map_cached(path, cap);
     char                  *payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
     RowReceiver            rx;
     FastpostgresRowsWrite *w = &rx.w;
@@ -385,6 +385,6 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
     pfree(rx.values);
     pfree(rx.isnull);
     MemoryContextDelete(rx.tmpctx);
-    munmap(map, cap);
+    /* the mapping stays cached: the next batch rewrites the same segment */
     return w->nrows; /* the rows the batch carries, carried row included */
 }
