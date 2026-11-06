@@ -14,8 +14,7 @@ mkdir -p "$PGDATA"
 chown -R postgres:postgres "$PGDATA"
 
 # listen on 127.0.0.1 (tcp) and /tmp (unix socket), default postgres settings.
-# PG_OPTS adds server settings a single run needs (the PgCache comparison asks
-# for wal_level=logical and the replication slots it implies); empty otherwise,
+# PG_OPTS adds server settings a single run needs; empty otherwise,
 # so every other recipe starts the server it always did.
 gosu postgres initdb -D "$PGDATA" >/dev/null
 gosu postgres pg_ctl -D "$PGDATA" -l /tmp/pg.log \

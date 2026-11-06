@@ -1,6 +1,6 @@
 # One image for the client tests, both benchmarks and the demo: postgres:18 with
 # the fastpostgres extension installed, the Python client built, and SQLAlchemy +
-# psycopg 3 for the harness's own DDL and the PgCache proxy client. Its second
+# psycopg 3 for the harness's own DDL. Its second
 # stage adds the offline meters (valgrind, llvm) and is what the decode-ir/
 # decode-mca recipes build.
 #
