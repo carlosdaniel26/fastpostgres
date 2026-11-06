@@ -292,6 +292,10 @@ fp::rows_native(TupleDesc td)
             if (att->attalignby != fastpostgres_kind_alignby(kind)) return false;
             if (kind == FASTPOSTGRES_KIND_TEXT && !fp::is_text_type(typ)) return false;
             if (kind == FASTPOSTGRES_KIND_BYTEA && typ != BYTEAOID) return false;
+            /* numeric is a varlena, but its bytes are PostgreSQL's internal
+             * layout, not text: the client cannot walk it in a tuple. It takes
+             * the columnar frame, whose decimal text it can decode exactly. */
+            if (kind == FASTPOSTGRES_KIND_NUMERIC) return false;
         }
     }
     return true;

@@ -982,6 +982,14 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
 
             return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         }
+        case FASTPOSTGRES_KIND_NUMERIC: { /* the same offsets, decimal text */
+            const int32_t *off  = (const int32_t *)c->data;
+            const char    *base = (const char *)c->bytes;
+            int32_t        s0   = off[row];
+            int32_t        s1   = off[row + 1];
+
+            return decimal_from_bytes(base + s0, (Py_ssize_t)(s1 - s0));
+        }
         default: { /* text: int32 offset table, then the raw bytes */
             const int32_t *off  = (const int32_t *)c->data;
             const char    *base = (const char *)c->bytes;
@@ -1067,6 +1075,8 @@ row_value(const FastpostgresColumn *c, uint64_t r)
 
         if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
             return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+        else if constexpr (K == FASTPOSTGRES_KIND_NUMERIC)
+            return decimal_from_bytes(base + s0, (Py_ssize_t)(s1 - s0));
         else
             return birth_text(base + s0, (Py_ssize_t)(s1 - s0));
     }
@@ -1159,6 +1169,9 @@ fp_decode_columns_range(const FastpostgresColumn *cols, uint32_t ncols, uint64_t
                 break;
             case FASTPOSTGRES_KIND_BYTEA:
                 ok = row_column<FASTPOSTGRES_KIND_BYTEA>(rows, start, nrows, &cols[c], c, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_NUMERIC:
+                ok = row_column<FASTPOSTGRES_KIND_NUMERIC>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             default:
                 ok = row_column<FASTPOSTGRES_KIND_TEXT>(rows, start, nrows, &cols[c], c, nullfree);
@@ -1321,6 +1334,8 @@ tuple_varlena(const uint8_t *data, uint32_t len)
 {
     if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
         return PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)len);
+    else if constexpr (K == FASTPOSTGRES_KIND_NUMERIC)
+        return decimal_from_bytes((const char *)data, (Py_ssize_t)len);
     else
         return birth_text((const char *)data, (Py_ssize_t)len);
 }
@@ -1411,7 +1426,8 @@ template <uint8_t K>
 inline bool
 block_column(RowBlock &b, const AttLayout &layout, uint32_t cidx, uint32_t fixed_off, bool nullfree)
 {
-    constexpr bool VARLENA = (K == FASTPOSTGRES_KIND_TEXT || K == FASTPOSTGRES_KIND_BYTEA);
+    constexpr bool VARLENA =
+        (K == FASTPOSTGRES_KIND_TEXT || K == FASTPOSTGRES_KIND_BYTEA || K == FASTPOSTGRES_KIND_NUMERIC);
     bool           fixed   = fixed_off != FP_NO_OFF;
 
     if constexpr (VARLENA)
@@ -1520,6 +1536,9 @@ decode_block(const FastpostgresColumn *cols, uint32_t ncols, const AttLayout *la
                 break;
             case FASTPOSTGRES_KIND_BYTEA:
                 ok = block_column<FASTPOSTGRES_KIND_BYTEA>(b, layout[c], c, f, nullfree);
+                break;
+            case FASTPOSTGRES_KIND_NUMERIC:
+                ok = block_column<FASTPOSTGRES_KIND_NUMERIC>(b, layout[c], c, f, nullfree);
                 break;
             default:
                 ok = block_column<FASTPOSTGRES_KIND_TEXT>(b, layout[c], c, f, nullfree);

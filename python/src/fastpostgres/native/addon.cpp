@@ -48,6 +48,7 @@ add_kind_constants(PyObject *module)
         {"KIND_TIMESTAMPTZ", FASTPOSTGRES_KIND_TIMESTAMPTZ},
         {"KIND_UUID", FASTPOSTGRES_KIND_UUID},
         {"KIND_BYTEA", FASTPOSTGRES_KIND_BYTEA},
+        {"KIND_NUMERIC", FASTPOSTGRES_KIND_NUMERIC},
     };
 
     for (auto &k : kinds)

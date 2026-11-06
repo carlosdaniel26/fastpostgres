@@ -95,28 +95,27 @@ enum FastpostgresKind
     FASTPOSTGRES_KIND_TIMESTAMP   = 10, /* int64 Timestamp: microseconds since 2000-01-01 */
     FASTPOSTGRES_KIND_TIMESTAMPTZ = 11, /* the same, always UTC */
     FASTPOSTGRES_KIND_UUID        = 12, /* 16 raw bytes */
-    FASTPOSTGRES_KIND_BYTEA       = 13  /* offset table + raw bytes, like text */
+    FASTPOSTGRES_KIND_BYTEA       = 13, /* offset table + raw bytes, like text */
+    FASTPOSTGRES_KIND_NUMERIC     = 14  /* offset table + numeric_out() text, exact */
 };
 
 /* Kinds that carry an int32 offset table followed by raw bytes. */
 static inline int
 fastpostgres_kind_is_varlena(uint8_t kind)
 {
-    return kind == FASTPOSTGRES_KIND_TEXT || kind == FASTPOSTGRES_KIND_BYTEA;
+    return kind == FASTPOSTGRES_KIND_TEXT || kind == FASTPOSTGRES_KIND_BYTEA ||
+           kind == FASTPOSTGRES_KIND_NUMERIC;
 }
 
 /* PostgreSQL builtin type OIDs. Bootstrap-assigned, hence fixed for a given
  * PostgreSQL major version — pinned here so both sides share one mapping. */
 #define FASTPOSTGRES_OID_BOOL        16
 #define FASTPOSTGRES_OID_BYTEA       17
-#define FASTPOSTGRES_OID_CHAR        18
-#define FASTPOSTGRES_OID_NAME        19
 #define FASTPOSTGRES_OID_INT8        20
 #define FASTPOSTGRES_OID_INT2        21
 #define FASTPOSTGRES_OID_INT4        23
 #define FASTPOSTGRES_OID_TEXT        25
 #define FASTPOSTGRES_OID_OID         26
-#define FASTPOSTGRES_OID_JSON        114
 #define FASTPOSTGRES_OID_FLOAT4      700
 #define FASTPOSTGRES_OID_FLOAT8      701
 #define FASTPOSTGRES_OID_MONEY       790
@@ -128,7 +127,6 @@ fastpostgres_kind_is_varlena(uint8_t kind)
 #define FASTPOSTGRES_OID_TIMESTAMPTZ 1184
 #define FASTPOSTGRES_OID_NUMERIC     1700
 #define FASTPOSTGRES_OID_UUID        2950
-#define FASTPOSTGRES_OID_JSONB       3802
 
 /* PostgreSQL type OID -> wire kind. The binary kinds are the point of the
  * exercise: the extension already holds these values in binary (a DateADT, a
@@ -150,8 +148,9 @@ fastpostgres_oid_to_kind(uint32_t oid)
         case FASTPOSTGRES_OID_FLOAT4:
             return FASTPOSTGRES_KIND_FLOAT4; /* copied verbatim, not widened */
         case FASTPOSTGRES_OID_FLOAT8:
-        case FASTPOSTGRES_OID_NUMERIC:       /* numeric has no wire kind: converted, lossily */
             return FASTPOSTGRES_KIND_FLOAT8;
+        case FASTPOSTGRES_OID_NUMERIC: /* exact: its output text, decoded to Decimal */
+            return FASTPOSTGRES_KIND_NUMERIC;
         case FASTPOSTGRES_OID_DATE:
             return FASTPOSTGRES_KIND_DATE;
         case FASTPOSTGRES_OID_TIME:
@@ -220,6 +219,7 @@ fastpostgres_kind_alignby(uint8_t kind)
         case FASTPOSTGRES_KIND_TEXT: /* varlena: the 4-byte alignment, with the
                                       * 1-byte-header form exempted */
         case FASTPOSTGRES_KIND_BYTEA:
+        case FASTPOSTGRES_KIND_NUMERIC:
             return 4;
         case FASTPOSTGRES_KIND_INT64:
         case FASTPOSTGRES_KIND_FLOAT8:
@@ -442,11 +442,6 @@ fastpostgres_tuple_hoff(const uint8_t *t)
  * t_bits, so the padding sits *after* the bitmap, not before it. The bits mark
  * the attributes that are *not* null (fill_val sets one for every value it
  * writes), which is why PostgreSQL's own att_isnull() negates the test. */
-static inline int
-fastpostgres_tuple_isnull(const uint8_t *t, uint32_t att)
-{
-    return (t[FASTPOSTGRES_HT_BITS + (att >> 3)] & (1u << (att & 7))) == 0;
-}
 
 /* varlena headers (varatt.h). PostgreSQL encodes the 1-byte form differently on
  * big- and little-endian hosts — the tag bit is the low bit on little-endian,
