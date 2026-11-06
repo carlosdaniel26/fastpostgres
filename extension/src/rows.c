@@ -179,8 +179,9 @@ row_build(RowReceiver *rx, char *out, uint32 len)
                     &th->t_infomask, rx->hasnull ? th->t_bits : NULL);
 }
 
-/* The row the last batch had no room for is in carry.c, keyed by portal: a row
- * carried from stream A must never be written into stream B's batch. */
+/* The row the last batch had no room for is in carry.c, keyed by portal name:
+ * a row carried from stream A must never be written into stream B's batch, and
+ * the name (unlike the Portal pointer) survives a savepoint abort. */
 
 static bool
 row_receive(TupleTableSlot *slot, DestReceiver *self)

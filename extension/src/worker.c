@@ -45,6 +45,7 @@
 #include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 
 #include "fastpostgres/fastpostgres_shm.h"
@@ -340,12 +341,13 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
  * already lived in one transaction for its whole life).
  */
 #define FP_POOL_MAGIC         "FPPOOL01"
-#define FP_POOL_VERSION       1u
+#define FP_POOL_VERSION       2u /* v2 adds the load hint */
 #define FP_POOL_MAX_WORKERS   8  /* slots in the registry */
 #define FP_POOL_MAX_RINGS     32 /* rings one worker will serve */
 #define FP_POOL_DEFAULT_RINGS 8  /* FASTPOSTGRES_RINGS_PER_WORKER */
 #define FP_POOL_EXIT_MS       2000
 #define FP_POOL_START_GRACE_MS 30000
+#define FP_POOL_IDLE_MS       25 /* quiet this long means "not in a read" */
 
 typedef struct FpPoolSlot
 {
@@ -353,6 +355,15 @@ typedef struct FpPoolSlot
     uint32_t state;    /* 0 free, 1 starting, 2 running */
     uint32_t capacity; /* rings this worker will serve */
     uint32_t used;     /* rings listed in segs[] */
+
+    /* Published by the worker (atomics, no lock) so the attach policy can put
+     * a new ring on a quiet worker before a busy one. `busy` is "a ring has an
+     * unanswered request"; `last_service_ms` keeps a worker that has just
+     * answered one looking busy for a moment, since a read is many batches. */
+    uint32_t busy;
+    uint32_t pad;
+    int64_t  last_service_ms;
+
     int64_t  started_ms;
     char     segs[FP_POOL_MAX_RINGS][64];
 } FpPoolSlot;
@@ -384,6 +395,12 @@ typedef struct PoolTxn
 {
     bool started;
 } PoolTxn;
+
+/* The worker's own view of the registry, kept mapped for its lifetime so the
+ * load hint is an atomic store instead of a shm_open per request. */
+static int             pool_self_fd   = -1;
+static FpPoolRegistry *pool_self_reg  = NULL;
+static int             pool_self_slot = -1;
 
 static int64_t
 pool_now_ms(void)
@@ -482,28 +499,57 @@ pool_slot_dead(const FpPoolSlot *s)
     return errno == ESRCH;
 }
 
+/* Caller holds the lock. A worker is idle when it has no outstanding request
+ * and has not served one for a few milliseconds. The hint is advisory: it is
+ * written by the worker without the lock, and a stale value only changes which
+ * worker is preferred, never which rings exist. */
+static bool
+pool_slot_idle(const FpPoolSlot *s, int64_t now)
+{
+    int64_t last = __atomic_load_n(&s->last_service_ms, __ATOMIC_ACQUIRE);
+
+    if (__atomic_load_n(&s->busy, __ATOMIC_ACQUIRE) != 0) return false;
+    return last == 0 || now - last > FP_POOL_IDLE_MS;
+}
+
 /* Find the live worker that should take one more ring when a new worker cannot
- * be registered. Prefer spare capacity already granted (a previous bump); else
+ * be registered. Prefer, in order: an idle worker, one that already has spare
+ * capacity granted (so the pool does not grow a second worker's capacity), and
  * the least-loaded worker below the per-worker cap. Caller holds the lock. */
 static FpPoolSlot *
 pool_overflow_slot(FpPoolRegistry *reg)
 {
     FpPoolSlot *best = NULL;
+    int64_t     now  = pool_now_ms();
+    bool        best_idle = false;
+    int         best_group = 0;
+    uint32_t    best_used = 0;
     int         i;
 
     for (i = 0; i < FP_POOL_MAX_WORKERS; i++)
     {
         FpPoolSlot *s = &reg->slots[i];
+        bool        spare;
+        bool        idle;
+        int         group;
 
         if (s->state == 0 || pool_slot_dead(s)) continue;
-        if (s->used < s->capacity)
+        spare = s->used < s->capacity;
+        if (!spare && s->capacity >= pool_capacity()) continue;
+        /* group 0 has capacity already granted; group 1 must grow it. */
+        group = spare ? 0 : 1;
+        idle  = pool_slot_idle(s, now);
+
+        if (best == NULL ||
+            (idle && !best_idle) ||
+            (idle == best_idle &&
+             (group < best_group || (group == best_group && s->used < best_used))))
         {
-            if (best == NULL || s->used < best->used) best = s;
-            continue;
+            best       = s;
+            best_idle  = idle;
+            best_group = group;
+            best_used  = s->used;
         }
-        if (s->capacity < pool_capacity() &&
-            (best == NULL || s->used < best->used || (best->used >= best->capacity)))
-            best = s;
     }
     return best;
 }
@@ -702,6 +748,35 @@ pool_any_stream(const PoolSet *set)
     return false;
 }
 
+/* Publish whether this worker has work outstanding. Called once per poll loop:
+ * the set is tiny and the fields are plain atomics in a mapping the worker
+ * already owns, so the hot path gains two cached stores, not a syscall. */
+static void
+pool_publish_load(PoolSet *set)
+{
+    FpPoolSlot *s;
+    bool        busy = false;
+    int         i;
+
+    if (pool_self_reg == NULL || pool_self_slot < 0) return;
+    s = &pool_self_reg->slots[pool_self_slot];
+
+    for (i = 0; i < set->n; i++)
+    {
+        FastpostgresRing *r = set->rings[i].r;
+
+        if (__atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE))
+        {
+            busy = true;
+            break;
+        }
+    }
+    if (busy)
+        __atomic_store_n(&s->last_service_ms, pool_now_ms(), __ATOMIC_RELEASE);
+    __atomic_store_n(&s->busy, busy ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
 static int
 pool_attach_one(PoolSet *set, const char *seg, const FastpostgresTransport *t)
 {
@@ -729,6 +804,44 @@ pool_attach_one(PoolSet *set, const char *seg, const FastpostgresTransport *t)
     return 0;
 }
 
+/* Close one ring's stream without taking the worker's other streams with it.
+ * Used on teardown (STOP, dead client): a close that errors aborts its own
+ * savepoint and drops only this stream's carry. */
+static void
+pool_close_stream(PoolRing *pr, PoolTxn *tx)
+{
+    if (!pr->have_stream) return;
+
+    if (tx->started)
+    {
+        MemoryContext oldcontext = CurrentMemoryContext;
+        ResourceOwner oldowner   = CurrentResourceOwner;
+
+        BeginInternalSubTransaction(NULL);
+        PG_TRY();
+        {
+            fastpostgres_stream_close(pr->stream);
+            ReleaseCurrentSubTransaction();
+            MemoryContextSwitchTo(oldcontext);
+            CurrentResourceOwner = oldowner;
+        }
+        PG_CATCH();
+        {
+            MemoryContextSwitchTo(oldcontext);
+            FlushErrorState();
+            RollbackAndReleaseCurrentSubTransaction();
+            MemoryContextSwitchTo(oldcontext);
+            CurrentResourceOwner = oldowner;
+            fastpostgres_stream_forget(pr->stream);
+        }
+        PG_END_TRY();
+    }
+    else
+        fastpostgres_stream_forget(pr->stream);
+
+    pr->have_stream = false;
+}
+
 /* Unmap a ring and free its slot. `tx` is committed when it was the last open
  * stream, because a transaction cannot be kept for nothing. */
 static void
@@ -736,20 +849,7 @@ pool_drop_ring(PoolSet *set, int i, PoolTxn *tx)
 {
     PoolRing *pr = &set->rings[i];
 
-    if (pr->have_stream)
-    {
-        PG_TRY();
-        {
-            fastpostgres_stream_close(pr->stream);
-        }
-        PG_CATCH();
-        {
-            FlushErrorState();
-            pool_abort(set, tx);
-        }
-        PG_END_TRY();
-        pr->have_stream = false;
-    }
+    pool_close_stream(pr, tx);
     if (tx->started && !pool_any_stream(set)) pool_commit(set, tx);
 
     __atomic_store_n(&pr->r->worker_ready, 0, __ATOMIC_RELEASE);
@@ -799,8 +899,11 @@ pool_refresh(PoolSet *set, const FastpostgresTransport *t)
     }
 }
 
-static bool
-pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
+/* The op-specific body. It may ereport: the caller runs it in a subtransaction
+ * so a failure rolls back this request, and only this stream, rather than the
+ * transaction that every ring on the worker is sharing. */
+static void
+pool_serve_op(PoolRing *pr)
 {
     FastpostgresRing *r   = pr->r;
     char             *a1  = (char *)fastpostgres_ring_arg1(r->arg);
@@ -817,50 +920,27 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
     {
         r->status = 1;
         strlcpy(r->error, "data segment must differ from the ring", sizeof(r->error));
-        return true;
+        return;
     }
     if (data != NULL && data[0] == 0)
     {
         r->status = 1;
         strlcpy(r->error, "next needs a segment", sizeof(r->error));
-        return true;
+        return;
     }
 
     switch (r->op)
     {
-        case FASTPOSTGRES_OP_STOP:
-            return false;
-
         case FASTPOSTGRES_OP_OPEN:
-            pool_begin(tx);
             if (pr->have_stream)
             {
-                PG_TRY();
-                {
-                    fastpostgres_stream_close(pr->stream);
-                }
-                PG_CATCH();
-                {
-                    ring_set_error(r);
-                    pool_abort(set, tx);
-                    break;
-                }
-                PG_END_TRY();
+                fastpostgres_stream_close(pr->stream);
                 pr->have_stream = false;
             }
-            PG_TRY();
-            {
-                fastpostgres_stream_open(a1, a2);
-                pr->have_stream = true;
-                strlcpy(pr->stream, a1, sizeof(pr->stream));
-                r->status = 0;
-            }
-            PG_CATCH();
-            {
-                ring_set_error(r);
-                pool_abort(set, tx);
-            }
-            PG_END_TRY();
+            fastpostgres_stream_open(a1, a2);
+            pr->have_stream = true;
+            strlcpy(pr->stream, a1, sizeof(pr->stream));
+            r->status = 0;
             break;
 
         case FASTPOSTGRES_OP_NEXT:
@@ -870,18 +950,12 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
                 strlcpy(r->error, "no open stream", sizeof(r->error));
                 break;
             }
-            PG_TRY();
             {
-                uint64 n  = fastpostgres_stream_next(a1, a2, (int64)r->batch, ring_data_capacity(r));
+                uint64 n = fastpostgres_stream_next(a1, a2, (int64)r->batch, ring_data_capacity(r));
+
                 r->status = 0;
                 r->nrows  = (int64)n;
             }
-            PG_CATCH();
-            {
-                ring_set_error(r);
-                pool_abort(set, tx);
-            }
-            PG_END_TRY();
             break;
 
         case FASTPOSTGRES_OP_NEXT_ROWS:
@@ -891,18 +965,12 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
                 strlcpy(r->error, "no open stream", sizeof(r->error));
                 break;
             }
-            PG_TRY();
             {
-                uint64 n  = fastpostgres_stream_next_rows(a1, a2, (int64)r->batch, ring_data_capacity(r));
+                uint64 n = fastpostgres_stream_next_rows(a1, a2, (int64)r->batch, ring_data_capacity(r));
+
                 r->status = 0;
                 r->nrows  = (int64)n;
             }
-            PG_CATCH();
-            {
-                ring_set_error(r);
-                pool_abort(set, tx);
-            }
-            PG_END_TRY();
             break;
 
         case FASTPOSTGRES_OP_REDUCE:
@@ -912,7 +980,6 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
                 strlcpy(r->error, "no open stream", sizeof(r->error));
                 break;
             }
-            PG_TRY();
             {
                 /* a1 is both the stream and the data segment; a2 is the plan. */
                 uint64 n = fastpostgres_stream_next_reduce(a1, a1, (int64)r->batch, ring_data_capacity(r), a2);
@@ -920,31 +987,15 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
                 r->status = 0;
                 r->nrows  = (int64)n;
             }
-            PG_CATCH();
-            {
-                ring_set_error(r);
-                pool_abort(set, tx);
-            }
-            PG_END_TRY();
             break;
 
         case FASTPOSTGRES_OP_CLOSE:
             if (pr->have_stream)
             {
-                PG_TRY();
-                {
-                    fastpostgres_stream_close(pr->stream);
-                }
-                PG_CATCH();
-                {
-                    ring_set_error(r);
-                    pool_abort(set, tx);
-                }
-                PG_END_TRY();
+                fastpostgres_stream_close(pr->stream);
                 pr->have_stream = false;
             }
             r->status = 0;
-            if (tx->started && !pool_any_stream(set)) pool_commit(set, tx);
             break;
 
         default:
@@ -952,6 +1003,57 @@ pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
             strlcpy(r->error, "unknown op", sizeof(r->error));
             break;
     }
+}
+
+/* Run one request for one ring inside a savepoint. A PG error aborts that
+ * savepoint, not the worker's transaction: the other rings keep their streams
+ * and their snapshot, and this ring is left with no stream (the portal died
+ * with the savepoint) so its next OPEN starts clean. Returns false only for
+ * STOP, which means the caller should drop the ring. */
+static bool
+pool_handle(PoolRing *pr, PoolSet *set, PoolTxn *tx)
+{
+    FastpostgresRing *r          = pr->r;
+    MemoryContext     oldcontext = CurrentMemoryContext;
+    ResourceOwner     oldowner   = CurrentResourceOwner;
+
+    if (r->op == FASTPOSTGRES_OP_STOP) return false;
+
+    pool_begin(tx); /* the shared transaction, outside the savepoint */
+
+    BeginInternalSubTransaction(NULL);
+    PG_TRY();
+    {
+        pool_serve_op(pr);
+        ReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(oldcontext);
+        CurrentResourceOwner = oldowner;
+    }
+    PG_CATCH();
+    {
+        ErrorData *edata;
+
+        MemoryContextSwitchTo(oldcontext);
+        edata = CopyErrorData();
+        FlushErrorState();
+        RollbackAndReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(oldcontext);
+        CurrentResourceOwner = oldowner;
+
+        /* The portal, if there was one, went with the savepoint. The carried
+         * row is keyed by cursor name precisely so this stream can drop its
+         * own and leave the other rings' carries alone. */
+        if (pr->stream[0] != 0) fastpostgres_stream_forget(pr->stream);
+        pr->have_stream = false;
+
+        r->status = 1;
+        strlcpy(r->error, (edata != NULL && edata->message != NULL) ? edata->message : "error",
+                sizeof(r->error));
+        if (edata != NULL) FreeErrorData(edata);
+    }
+    PG_END_TRY();
+
+    if (tx->started && !pool_any_stream(set)) pool_commit(set, tx);
     return true;
 }
 
@@ -971,6 +1073,7 @@ fastpostgres_pool_main(Datum main_arg)
     int64_t                      empty_since = 0;
     int64_t                      last_tick;
     int                          slot;
+    int                          next_ring = 0;
 
     (void)main_arg;
 
@@ -991,7 +1094,9 @@ fastpostgres_pool_main(Datum main_arg)
     BackgroundWorkerInitializeConnection(db[0] ? db : "postgres", NULL, 0);
 
     /* Publish ourselves as the slot's owner. The backend queued the rings
-     * before registering us, so they are already in segs[]. */
+     * before registering us, so they are already in segs[]. The registry stays
+     * mapped for the worker's lifetime: the load hint below is an atomic store
+     * in it, not a shm_open per request. */
     {
         int             fd;
         FpPoolRegistry *reg;
@@ -1008,8 +1113,13 @@ fastpostgres_pool_main(Datum main_arg)
         }
         reg->slots[slot].pid   = (int32_t)getpid();
         reg->slots[slot].state = 2;
+        __atomic_store_n(&reg->slots[slot].busy, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&reg->slots[slot].last_service_ms, 0, __ATOMIC_RELEASE);
         flock(fd, LOCK_UN);
-        pool_close(fd, reg);
+
+        pool_self_fd   = fd;
+        pool_self_reg  = reg;
+        pool_self_slot = slot;
     }
 
     memset(&set, 0, sizeof(set));
@@ -1055,6 +1165,8 @@ fastpostgres_pool_main(Datum main_arg)
         else
             empty_since = 0;
 
+        pool_publish_load(&set);
+
         for (i = 0; i < set.n; i++)
         {
             pfds[i].fd      = set.rings[i].r->worker_req_efd;
@@ -1081,67 +1193,83 @@ fastpostgres_pool_main(Datum main_arg)
         }
         if (rc == 0) continue; /* the tick at the top of the loop does the chores */
 
-        /* Service the first ring that rang. One executor turn at a time is the
-         * honest model for one backend; the next poll picks up the rest. */
+        /* Serve every ring that is ready once per turn, starting after the last
+         * one served. One request is one batch, and a batch is the executor's
+         * unit of work, so that is the finest fair share a single backend can
+         * offer; the round-robin start keeps the lowest index from always
+         * winning the head of the loop. */
         {
-            int               which = -1;
-            PoolRing         *pr;
-            FastpostgresRing *r;
-            uint64_t          asked;
-            uint64_t          answered;
-            uint64_t          drained;
-            ssize_t           got;
+            int  start   = (set.n > 0) ? (next_ring % set.n) : 0;
+            bool dropped = false;
+            bool fatal   = false;
 
             for (i = 0; i < set.n; i++)
             {
-                if (pfds[i].revents & (POLLIN | POLLERR | POLLHUP))
+                int               which = (start + i) % set.n;
+                PoolRing         *pr;
+                FastpostgresRing *r;
+                uint64_t          asked;
+                uint64_t          answered;
+                uint64_t          drained;
+                ssize_t           got;
+
+                if (!(pfds[which].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+
+                pr = &set.rings[which];
+                r  = pr->r;
+
+                /* Drain the bell; one request is in flight per ring. A read
+                 * that would block is a stale wake, and req_seq == resp_seq
+                 * below confirms it. */
+                do
+                    got = read(r->worker_req_efd, &drained, sizeof(drained));
+                while (got < 0 && errno == EINTR);
+                if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
                 {
-                    which = i;
+                    elog(LOG, "fastpostgres_pool_main: eventfd read failed: %m");
+                    fatal = true;
                     break;
                 }
-            }
-            if (which < 0) continue;
 
-            pr = &set.rings[which];
-            r  = pr->r;
+                asked    = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
+                answered = __atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE);
+                if (asked == answered) continue;
 
-            /* Drain the bell; one request is in flight per ring. A read that
-             * would block is a stale wake, and req_seq == resp_seq below
-             * confirms it. */
-            do
-                got = read(r->worker_req_efd, &drained, sizeof(drained));
-            while (got < 0 && errno == EINTR);
-            if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-            {
-                elog(LOG, "fastpostgres_pool_main: eventfd read failed: %m");
-                break;
-            }
-
-            asked    = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
-            answered = __atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE);
-            if (asked != answered)
-            {
                 r->status   = 0;
                 r->nrows    = 0;
                 r->error[0] = 0;
 
                 if (!pool_handle(pr, &set, &tx))
                 {
+                    /* STOP: dropping swaps the last ring into `which`, so end
+                     * this scan and let the next poll rebuild the set. */
+                    next_ring = 0;
                     pool_drop_ring(&set, which, &tx);
-                    continue;
+                    dropped = true;
+                    break;
                 }
                 if (t->post_response(r, asked) < 0)
                 {
                     elog(LOG, "fastpostgres_pool_main: post_response failed: %m");
+                    fatal = true;
                     break;
                 }
             }
+            if (fatal) break;
+            if (dropped) continue;
+            next_ring = (set.n > 0) ? (start + 1) % set.n : 0;
         }
     }
 
     pool_abort(&set, &tx);
     while (set.n > 0) pool_drop_ring(&set, 0, &tx);
     pool_unregister_all();
+    if (pool_self_reg != NULL)
+    {
+        pool_close(pool_self_fd, pool_self_reg);
+        pool_self_reg = NULL;
+        pool_self_fd  = -1;
+    }
     proc_exit(0);
 }
 

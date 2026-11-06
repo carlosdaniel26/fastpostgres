@@ -21,4 +21,5 @@ bool fastpostgres_rows_native(TupleDesc td);
  * kept and delivered first by the next call. */
 uint64 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity);
 
+
 #endif

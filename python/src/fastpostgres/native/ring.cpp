@@ -737,6 +737,18 @@ Ring_post(RingObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* The backend serving this ring, as the worker publishes it into the segment.
+ * 0 before a worker attaches; mostly useful to tests and tracers that need to
+ * know which rings a pool worker multiplexes. */
+static PyObject *
+Ring_worker_pid(RingObject *self, PyObject *)
+{
+    FastpostgresRing *r = self->ring;
+
+    if (r == nullptr) return PyLong_FromLong(0);
+    return PyLong_FromUnsignedLong(__atomic_load_n(&r->tally.worker_pid, __ATOMIC_ACQUIRE));
+}
+
 /* Collect the response to the request last sent. */
 static PyObject *
 Ring_wait(RingObject *self, PyObject *)
@@ -812,6 +824,8 @@ static PyMethodDef Ring_methods[] = {
     {"wait", (PyCFunction)Ring_wait, METH_NOARGS, "wait() -> int rows for the request last sent"},
     {"close", (PyCFunction)Ring_close, METH_NOARGS, "close(): end the stream"},
     {"stop", (PyCFunction)Ring_stop, METH_NOARGS, "stop(): ask the worker to exit"},
+    {"worker_pid", (PyCFunction)Ring_worker_pid, METH_NOARGS,
+     "worker_pid() -> int: the process serving this ring (0 before attach)"},
     {nullptr},
 };
 

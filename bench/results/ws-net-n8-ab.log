@@ -1,0 +1,160 @@
+# ws/net-n8 — scheduling and per-stream isolation in the eventfd pool
+
+Three questions, three answers in one table:
+
+1. **Does the eventfd pool still lose at N=8 after scheduling?** Yes, against
+   the 1:1 path on the same tree: 34.93M against 54.26M (−35.6%), even though it
+   serves 8/8 rings where the 1:1 path serves 7/8.
+2. **Did this branch move N=1,2,4,8?** No, within the host's noise: pre→post at
+   N=8 is +1.3%, and N≤4 is −1% to −5%.
+3. **What is the lever?** Worker slots. With `max_worker_processes=16` the same
+   eventfd image reaches 55.71M at 8/8; with `FASTPOSTGRES_RINGS_PER_WORKER=1`
+   it reproduces the 7/8 shape at 53.60M. A portal is pinned to one worker, so
+   dispatch order cannot remove the shared-worker turn.
+
+Driver: `bench/internals/threads/ring_scaling.py`, N processes × one ring × three
+object-free reads (`Cursor.aggregate`: columnar batches reduced in C++, no
+Python object per row), 100000 rows per read, batch 25000. It is bind-mounted so
+the SAME file runs on every image. Three rounds of six configs, one docker run
+at a time under `/tmp/fpq-bench.lock`; each run is 3 reps and the tables below
+are the medians of the three runs (raw values in brackets). The host had ~2
+cores of background container load, which is the source of the ±5–10% at n≤4
+and the one 42.66M n=8 outlier on the pre image.
+
+### COMMAND (protocol baseline, `fpq-baseline` = main@7e3d2e6)
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -e BENCH_GIT_REV=base \
+      -v $PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro \
+      fpq-baseline python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 3'
+
+### COMMAND (change, `fpq-net-n8` = ws/net-n8)
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -e FASTPOSTGRES_TRANSPORT=eventfd -e BENCH_GIT_REV=post \
+      -v $PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro \
+      fpq-net-n8 python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 3'
+
+The four controls use the same command and image with one extra `-e`:
+`fpq-transport` + eventfd (pre, the same tree before this branch), no
+`FASTPOSTGRES_TRANSPORT` (default shm), `FASTPOSTGRES_RINGS_PER_WORKER=1`, and
+`PG_OPTS='-c max_worker_processes=16'`.
+
+### ENV (all runs)
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+shm: 3.0G
+### END ENV
+
+### RING-SCALING
+rows: 100000
+reads: 3 per process
+reps: 3 per run, 3 rounds (median reported)
+batch: 25000
+shape: fp_ring_scaling_t (the benchmark's six-column row)
+### END RING-SCALING
+
+| config | image | transport | worker/ring policy | n=1 | n=2 | n=4 | n=8 | served |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| base | fpq-baseline | shm (1:1) | default | 6.64M | 13.27M | 24.98M | 34.71M | 7/8 |
+| pre | fpq-transport | eventfd (pool) | default | 9.73M | 19.73M | 36.04M | 34.47M | 8/8 |
+| **post** | **fpq-net-n8** | **eventfd (pool)** | **default** | **9.45M** | **19.29M** | **34.25M** | **34.93M** | **8/8** |
+| post-shm | fpq-net-n8 | shm (1:1) | default | 9.67M | 19.79M | 37.49M | 54.26M | 7/8 |
+| post-rpw1 | fpq-net-n8 | eventfd | 1 ring/worker | 9.61M | 18.78M | 34.38M | 53.60M | 7/8 |
+| post-16 | fpq-net-n8 | eventfd | 16 worker slots | 9.57M | 18.03M | 34.76M | 55.71M | 8/8 |
+
+Raw n=8 values across the three rounds:
+
+     base      32.53, 34.71, 34.74
+     pre       34.18, 42.66, 34.47
+     post      34.09, 34.93, 35.48
+     post-shm  54.26, 54.80, 53.16
+     post-rpw1 53.68, 50.36, 53.60
+     post-16   55.71, 55.69, 62.16
+
+Raw values for the other cells are in `matrix-*.log` in the run's notes; the
+medians above are the reproducible part.
+
+### AB
+
+- **protocol baseline → change** (`base` → `post`): n=1 +42.3%, n=2 +45.4%,
+  n=4 +37.1%, n=8 +0.6% (8/8 served against 7/8). This delta is *not* the
+  scheduling change: `fpq-baseline` is main@7e3d2e6 and the change is
+  merge/transport, whose reduce pushdown and segment work are most of the
+  n≤4 gain. It does establish that the change is not below the old baseline
+  anywhere, including N=8.
+- **same tree, before → after** (`pre` → `post`): n=1 −2.9%, n=2 −2.2%,
+  n=4 −5.0%, n=8 +1.3%. All inside this host's noise. Per-request savepoints
+  cost nothing measurable; scheduling does not change a pinned-stream cell.
+- **same image, eventfd vs default shm at N=8**: 34.93M against 54.26M,
+  **−35.6%**, while serving 8 rings instead of 7. This is the gap the branch
+  set out to close, and it is still there: one worker carries two rings and
+  serialises their batch turns, so the pair finishes at ~2× the singleton wall.
+  The six untasked workers go idle while it does.
+- **the lever** (`post-16`, `max_worker_processes=16`): 55.71M at **8/8**, +1.3%
+  on the same image's 7-worker shm (54.26M) and +59.5% on the sharing cell.
+  With a slot per ring the engine itself is at parity; every point of the N=8
+  deficit is the missing eighth backend.
+- **the 1:1 shape on the new engine** (`post-rpw1`): 53.60M at 7/8, which
+  reproduces the default path's 54.26M. The pool is not slower per ring; it is
+  the second ring on the seventh worker that is.
+
+### Verdict
+
+**Negative on the throughput goal.** Scheduling cannot make eight long streams
+on seven single-threaded backends run faster than seven streams on seven
+backends. A stream is an SPI portal inside one worker's transaction; its batches
+must run on that worker's OS thread, and no dispatch order moves the executor
+turn to a worker that is idle (there is none while all eight read). The only
+measures that close the N=8 gap are more worker slots — which is exactly
+`max_worker_processes`, the control above — or splitting one stream across
+workers, which the portal model does not do.
+
+**What the branch does deliver, measured:**
+
+- per-request **savepoints**, so a PG error on one ring no longer aborts the
+  worker's transaction and every other stream it serves; the failing ring loses
+  only its own stream (`python/tests/test_eventfd.py` finds a worker carrying
+  two rings, fails one stream, and proves its neighbour's cursor still fetches);
+- **idle-aware overflow**: registry v2 publishes a `busy` hint and
+  `last_service_ms`, and the attach policy prefers a quiet worker over one in
+  the middle of a read (useful when many rings are mostly idle, the pool's real
+  deployment shape; it cannot help the all-busy cell);
+- **round-robin dispatch**: each worker serves every ready ring once per turn,
+  starting after the last one served, so the lowest index no longer owns the
+  head of the loop; one batch is the time slice.
+- N≤4 is neutral within noise, and N=8 keeps 8/8 service at the old baseline
+  image's throughput. If the eighth reader matters more than ~36%, raise
+  `max_worker_processes` (or accept the 7/8 fallback); that is a deployment
+  choice, not a scheduler bug.
+
+### Tests
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g fpq-net-n8 tests.sh'
+      -> Ran 61 tests ... OK (skipped=2; the eventfd module is opt-in)
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+        -e FASTPOSTGRES_TRANSPORT=eventfd fpq-net-n8 tests.sh'
+      -> Ran 61 tests ... OK (including the new 8-ring isolation test)
+    extension: make installcheck 1/1 in both runs
+
+### Reproduce
+
+    docker build -q --target dev -t fpq-net-n8 -f docker/Dockerfile .
+    docker run --rm --shm-size=3g -e FASTPOSTGRES_TRANSPORT=eventfd \
+      -v "$PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro" \
+      fpq-net-n8 python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 5
+    # and the lever:
+    docker run --rm --shm-size=3g -e FASTPOSTGRES_TRANSPORT=eventfd \
+      -e PG_OPTS='-c max_worker_processes=16' \
+      -v "$PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro" \
+      fpq-net-n8 python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 5

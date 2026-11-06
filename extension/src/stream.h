@@ -17,6 +17,10 @@ void   fastpostgres_stream_open(const char *stream, const char *query);
 uint64 fastpostgres_stream_next(const char *stream, const char *seg, int64 batch, size_t capacity);
 void   fastpostgres_stream_close(const char *stream);
 
+/* After a failed request's savepoint has rolled back: drop this stream's
+ * carried row (the portal died with the savepoint) and leave the others'. */
+void   fastpostgres_stream_forget(const char *stream);
+
 /* The next batch as FPROWS: the result tuples themselves, for a client that
  * wants rows. Falls back to the columnar frame when an attribute's storage is
  * not something the client can walk. */

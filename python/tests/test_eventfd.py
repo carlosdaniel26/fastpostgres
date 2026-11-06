@@ -92,6 +92,59 @@ class EventfdPoolTest(unittest.TestCase):
             while time.monotonic() < deadline and ring_workers() > before:
                 time.sleep(0.1)
 
+    def test_a_failed_stream_does_not_take_its_neighbour(self):
+        """A savepoint, not a transaction: the sibling ring keeps its cursor.
+
+        Eight rings need fewer than eight workers, so at least one worker serves
+        two of them. An OPEN that errors on one ring must roll back only that
+        ring's savepoint; the other stream on the same worker must still be able
+        to fetch its next batch.
+        """
+        conn = fp.Connection(CONNINFO)
+        before = ring_workers()
+        rings = [fp.Ring(f"fp_efd_iso_{i}", 0, "eventfd") for i in range(N)]
+
+        try:
+            for ring in rings:
+                ring.start(conn)
+
+            pids = [ring.worker_pid() for ring in rings]
+            groups = {}
+            for i, pid in enumerate(pids):
+                groups.setdefault(pid, []).append(i)
+            shared = next((members for members in groups.values() if len(members) > 1), None)
+            self.assertIsNotNone(shared, f"no worker carried two rings: {pids}")
+
+            good, bad = shared[0], shared[1]
+            rings[good].open(
+                f"fp_efd_iso_good_{good}", "SELECT g::int AS id FROM generate_series(1, 500) g"
+            )
+            self.assertEqual(rings[good].next(100), 100)
+
+            with self.assertRaises(Exception):
+                rings[bad].open(
+                    f"fp_efd_iso_bad_{bad}",
+                    "SELECT no_such_column FROM generate_series(1, 10)",
+                )
+
+            # Same worker, same transaction: the healthy stream must survive.
+            self.assertEqual(rings[good].next(100), 100)
+        finally:
+            for i, ring in enumerate(rings):
+                try:
+                    ring.close()
+                except Exception:
+                    pass
+                try:
+                    ring.stop()
+                except Exception:
+                    pass
+            conn.close()
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and ring_workers() > before:
+                time.sleep(0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

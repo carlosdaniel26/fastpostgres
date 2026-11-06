@@ -87,6 +87,19 @@ fastpostgres_stream_close(const char *stream)
     SPI_finish();
 }
 
+/* A request failed inside its savepoint: the portal, if any, is gone with the
+ * savepoint, so only the carry remains, keyed by the cursor's name. Drop that
+ * stream's carry and leave the other rings' carries untouched. Called after the
+ * subtransaction has rolled back, so it must not touch SPI. */
+void
+fastpostgres_stream_forget(const char *stream)
+{
+    char *name = cursor_name(stream);
+
+    fastpostgres_carry_drop_name(name);
+    pfree(name);
+}
+
 /* The same batch as the result tuples themselves: the executor's bytes are
  * copied into the segment once, and the client walks them. */
 uint64

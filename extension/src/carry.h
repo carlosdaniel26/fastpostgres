@@ -5,9 +5,11 @@
  * segment cannot take would otherwise be lost - and the portal would read the
  * short fetch as end-of-data besides (see the atEnd note in
  * fastpostgres_rows_fetch). A worker can serve several rings at once, each with
- * its own portal, so the carry is keyed by portal: a row carried from stream A
- * must never be written into stream B's batch. It lives in TopMemoryContext
- * because the executor's context dies with the portal.
+ * its own portal, so the carry is keyed by the portal's stream name: a row
+ * carried from stream A must never be written into stream B's batch. The name
+ * (rather than the Portal pointer) survives a savepoint abort, which destroys
+ * the portal but leaves the name the stream is known by. It lives in
+ * TopMemoryContext because the executor's context dies with the portal.
  *
  * It is a queue, not a single row: a batch can be cut short by the segment size
  * before the receiver has finished sampling the rows it already holds, and all
@@ -22,6 +24,7 @@
 typedef struct FastpostgresCarry
 {
     Portal  portal;
+    char    name[NAMEDATALEN]; /* the stream name; survives a savepoint abort */
     char   *buf;   /* [u32 len][row bytes] ... */
     uint32  len;   /* bytes used in buf */
     uint32  cap;   /* bytes allocated */
@@ -45,6 +48,11 @@ void fastpostgres_carry_pop(FastpostgresCarry *c);
 
 /* Drop one portal's queue (its buffer and its slot). */
 void fastpostgres_carry_drop(Portal portal);
+
+/* Drop a queue by stream name. Used after a savepoint abort destroyed the
+ * portal: the name still identifies the stream whose rows must not leak into a
+ * later batch. */
+void fastpostgres_carry_drop_name(const char *name);
 
 /* Drop every queue; an error aborts the worker's transaction, so no carried row
  * can still belong to a live portal. */
