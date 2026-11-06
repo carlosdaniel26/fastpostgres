@@ -5,16 +5,21 @@ and the engine takes a URL or a conninfo — the call shape SQLAlchemy users kno
 minus the per-row machinery: no result proxy, no ``Row`` objects, no attribute
 mapping. ``execute()`` compiles the statement once (SQLAlchemy's compiler, and
 cached) and runs the SQL through the DB-API driver, so ``.all()`` is the
-driver's list of tuples.
+driver's columnar result: a row is decoded only when it is read. Pass
+``force_tuples=True`` (or set ``FASTPOSTGRES_MATERIALIZE=1``) for the old list
+of tuples.
 
     from fastpostgres.core import create_engine
     engine = create_engine("host=/tmp dbname=postgres user=postgres")
     with engine.connect() as conn:
-        rows = conn.execute(select(Row.id, Row.sku)).all()   # [(1, 'SKU-1'), ...]
+        result = conn.execute(select(Row.id, Row.sku))   # lazy ResultSet
+        rows = result.all()                              # same object
+        row = rows[0]                                    # (1, 'SKU-1') now
 
-Rows are tuples: index them, unpack them, or ask ``result.keys()`` for the names.
-``row.sku`` is the one thing this does not do, because that wrapper is the per-row
-cost it exists to avoid.
+Read a row and it is a tuple: index it or unpack it; ask ``result.keys()`` for
+the names. ``row.sku`` is the one thing this does not do, because that wrapper
+is the per-row cost it exists to avoid. ``result.to_tuples()`` materialises the
+whole result in C when a plain list is needed.
 
 One connection, reused (no pool): a read path does not need one, and opening a
 libpq connection per ``connect()`` would cost milliseconds. Nothing here is
@@ -27,7 +32,7 @@ __all__ = ["create_engine", "Engine", "Connection", "Result"]
 
 
 class Result:
-    """The rows, already a list, and their names."""
+    """The rows (a lazy ResultSet) and their names."""
 
     __slots__ = ("_rows", "_keys", "_rowcount")
 
@@ -43,6 +48,13 @@ class Result:
 
     def first(self):
         return self._rows[0] if self._rows else None
+
+    def to_tuples(self):
+        """Materialise the result as a plain list of tuples."""
+        convert = getattr(self._rows, "to_tuples", None)
+        return convert() if convert is not None else list(self._rows)
+
+    materialize = to_tuples
 
     def keys(self):
         return self._keys

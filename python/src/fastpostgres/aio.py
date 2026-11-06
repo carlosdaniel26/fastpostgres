@@ -262,8 +262,8 @@ class AsyncCursor:
     async def fetchmany(self, size=None):
         return self._sync().fetchmany(size)
 
-    async def fetchall(self):
-        return self._sync().fetchall()
+    async def fetchall(self, force_tuples=None):
+        return self._sync().fetchall(force_tuples)
 
     def stream(self, operation, parameters=None, size=dbapi._SHM_BATCH) -> AsyncStream:
         sql = operation if parameters is None else dbapi._inline(operation, parameters)
@@ -300,10 +300,12 @@ class AsyncConnection:
     first, so a partition is never left checked out.
     """
 
-    def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = True, **kwargs):
+    def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = True,
+                 force_tuples=None, **kwargs):
         self._conninfo = conninfo
         self._shm = shm
         self._wait = wait
+        self._force_tuples = force_tuples
         self._kwargs = kwargs
         self._tier = _Tier(os.getpid())
         self._conn = None
@@ -323,7 +325,8 @@ class AsyncConnection:
             if self._closed:
                 raise InterfaceError("fastpostgres.aio: connection is closed")
             self._conn = await self._submit(
-                lambda: dbapi.Connection(self._conninfo, shm=self._shm, wait=self._wait, **self._kwargs)
+                lambda: dbapi.Connection(self._conninfo, shm=self._shm, wait=self._wait,
+                                         force_tuples=self._force_tuples, **self._kwargs)
             )
         return self._conn
 
@@ -347,15 +350,15 @@ class AsyncConnection:
             statement = statement.params(**params)
         return dbapi._compiled(statement)
 
-    async def fetchall(self, statement, **params) -> list:
-        """Run a SQLAlchemy statement (or SQL text) and return the driver's rows."""
+    async def fetchall(self, statement, force_tuples=None, **params):
+        """Run a SQLAlchemy statement (or SQL text) and return its rows."""
         sql = self.compile(statement, **params)
         conn = await self._open()
 
         def job():
             cur = conn.cursor()
             cur.execute(sql)
-            return cur.fetchall()
+            return cur.fetchall(force_tuples)
 
         return await self._submit(job)
 
