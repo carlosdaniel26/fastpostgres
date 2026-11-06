@@ -90,7 +90,7 @@ def meta(path):
     """cpu / rows / git from a log, for the footer."""
     text = Path(path).read_text(errors="replace")
     out = {}
-    for key in ("cpu", "mem", "rows", "git"):
+    for key in ("cpu", "mem", "shm", "rows", "git"):
         m = re.search(rf"^{key}: (.*)$", text, re.M)
         if m:
             out[key] = m.group(1).strip()
@@ -479,6 +479,7 @@ def main():
     m = meta(args.after_matrix) or meta(args.before_matrix)
     meta_text = " · ".join(x for x in (
         m.get("cpu", ""), m.get("rows", "") + " rows" if m.get("rows") else "",
+        f"shm {m['shm']}" if m.get("shm") else "",
         f"git {m.get('git', '?')}", "before -> after",
     ) if x)
 

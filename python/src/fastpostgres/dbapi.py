@@ -27,6 +27,7 @@ import datetime
 import decimal
 import math
 import os
+import sys
 import queue
 import re
 import threading
@@ -744,6 +745,14 @@ class ResultSet:
 _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
 _SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
 _SEGMENT_BYTES = int(_SEGMENT_ENV) if _SEGMENT_ENV else 0
+# The whole shared-memory budget this process may spend on data segments, in
+# bytes; "3g"/"512m" are accepted. It is split across the pool's rings (two
+# segments each), so the number is a cap, not an allocation: the pages appear as
+# batches are written. FASTPOSTGRES_SEGMENT_BYTES (an exact per-segment size)
+# wins over it. Unset means the worker's 1 GiB default per segment.
+_BUDGET_ENV = os.environ.get("FASTPOSTGRES_SHM_BYTES")
+_SEGMENT_MIN = 64 << 10
+_SEGMENT_MAX = 1 << 30
 # The doorbell engine. "shm" is the original semaphore ring (one background
 # worker per ring); "eventfd" lets a small pool of workers serve many rings, so
 # the ring count is no longer bounded by max_worker_processes. Default stays
@@ -819,6 +828,66 @@ def _threads_per_core():
     except (OSError, ValueError):
         pass
     return 1
+
+
+def _parse_bytes(text):
+    """'3g', '512m', '1 GiB', or a plain byte count; None when it is not one."""
+    if text is None:
+        return None
+    t = str(text).strip().lower().replace(" ", "")
+    for suffix, scale in (("gib", 1 << 30), ("gb", 1 << 30), ("g", 1 << 30),
+                          ("mib", 1 << 20), ("mb", 1 << 20), ("m", 1 << 20),
+                          ("kib", 1 << 10), ("kb", 1 << 10), ("k", 1 << 10)):
+        if t.endswith(suffix):
+            t = t[: -len(suffix)]
+            break
+    else:
+        scale = 1
+    try:
+        return max(0, int(float(t) * scale))
+    except (TypeError, ValueError):
+        return None
+
+
+_SHM_BUDGET = _parse_bytes(_BUDGET_ENV)
+_shm_reported = False
+
+
+def _segment_bytes() -> int:
+    """Bytes of data segment per ring: the exact override, else the budget split
+    over two segments per ring in the pool, else the worker's 1 GiB default."""
+    if _SEGMENT_BYTES:
+        return _SEGMENT_BYTES
+    if _SHM_BUDGET:
+        rings = max(1, pool_size())
+        return max(_SEGMENT_MIN, min(_SEGMENT_MAX, _SHM_BUDGET // (2 * rings)))
+    return 0  # 0: the worker's FASTPOSTGRES_SEGMENT_BYTES
+
+
+def _human_bytes(n: int) -> str:
+    for scale, unit in ((1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}".replace(".0 ", " ")
+    return f"{n} B"
+
+
+def shm_config() -> dict:
+    """What this process resolved for shared memory, for logs and charts.
+
+    ``budget`` is the configured total (None when unset), ``segment`` the size a
+    ring asks the worker for (0 = the worker's default), ``rings`` the pool, and
+    ``text`` a one-line summary a chart footer can print.
+    """
+    segment = _segment_bytes()
+    rings = pool_size()
+    budget = _SHM_BUDGET
+    if segment:
+        text = f"{_human_bytes(segment)}/ring · {rings} rings"
+        if budget:
+            text += f" · {_human_bytes(budget)} budget"
+    else:
+        text = f"worker default · {rings} rings"
+    return {"budget": budget, "segment": segment, "rings": rings, "text": text}
 
 
 def _machine_streams() -> int:
@@ -954,6 +1023,21 @@ def _note_fallback(reason, detail=None, warn=True):
         )
 
 
+def _report_shm():
+    """One line per process naming the shared-memory budget, into the run's log.
+
+    A benchmark container sets BENCH_GIT_REV, and every chart parses `key: value`
+    lines out of the log, so this is how the figure footer states how much
+    shared memory the run was given instead of leaving it implicit.
+    """
+    global _shm_reported
+
+    if _shm_reported or not os.environ.get("BENCH_GIT_REV"):
+        return
+    _shm_reported = True
+    print(f"shm: {shm_config()['text']}", file=sys.stderr)
+
+
 def _try_acquire(bootstrap, prefix):
     """The idle queue, else a fresh ring while the pool may still grow."""
     global _pool_created
@@ -972,8 +1056,9 @@ def _try_acquire(bootstrap, prefix):
 
     name = f"{prefix}_{index}"
     try:
-        ring = _client.Ring(name, _SEGMENT_BYTES, _TRANSPORT)
+        ring = _client.Ring(name, _segment_bytes(), _TRANSPORT)
         ring.start(bootstrap)
+        _report_shm()
     except Exception as exc:
         with _pool_lock:
             _pool_created -= 1

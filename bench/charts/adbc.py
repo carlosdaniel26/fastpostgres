@@ -311,7 +311,8 @@ def spec(env, keys):
 
 
 DRIVER_KEYS = [
-    ("cpu", "{}"), ("shape", "shape {}"), ("postgres", "PostgreSQL {}"),
+    ("cpu", "{}"), ("shape", "shape {}"), ("shm", "shm {}"),
+    ("postgres", "PostgreSQL {}"),
     ("python", "Python {}"), ("pyarrow", "pyarrow {}"), ("adbc", "ADBC {}"),
 ]
 
