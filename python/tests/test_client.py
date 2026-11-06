@@ -362,6 +362,26 @@ class DbapiTest(unittest.TestCase):
         self.assertEqual(row[1:], ("x", 7, None))
         self.assertEqual(cur.description[0][1], 1700)
 
+    def test_columnar_text_after_the_capacity_sample(self):
+        """The columnar writer reserves text areas from the first rows; a text
+        column that grows later takes the exact-size retry, and NULL/empty
+        values still keep their offsets. numeric forces the columnar frame."""
+        sql = (
+            "SELECT g::int AS id, 1.5::numeric AS n, "
+            "CASE WHEN g <= 8 THEN 'a' "
+            "     WHEN g % 7 = 0 THEN NULL "
+            "     ELSE repeat('z', 1000 + g % 300) END::text AS s "
+            "FROM generate_series(1, 3000) g"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        self.assertGreater(self.conn.shm_reads, 0, "the shm path should have served this read")
+
+        plain = fp.Connection(CONNINFO).exec(sql).rows
+        self.assertEqual(rows, plain)
+        self.assertEqual(len(rows), 3000)
+
     def test_core_read_without_core(self):
         """The CORE stand-in compiles a statement with SQLAlchemy's own compiler
         and hands back the driver's tuples: same SQL, same values, no Row."""
