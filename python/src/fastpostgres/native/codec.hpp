@@ -10,6 +10,11 @@
 /* Import decimal/datetime once (call from module init). */
 bool fp_codec_init(void);
 
+/* Bring up the safe per-chunk object pool (call from module init). Returns
+ * false when it is disabled or the interpreter layout failed verification; the
+ * decoders then use the normal constructors. */
+bool fp_objpool_init(void);
+
 /* Decode one libpq text value (PQgetvalue is NUL-terminated). */
 PyObject *fp_decode_value(PGresult *res, int row, int col);
 

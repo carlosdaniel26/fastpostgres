@@ -15,6 +15,8 @@
 
 #include <atomic>
 #include <datetime.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 /* These are written once by fp_codec_init and only read afterwards, so decoder
  * threads can share the borrowed references without a lock. Nothing here may
@@ -313,6 +315,497 @@ fp_decode_value(PGresult *res, int row, int col)
     }
 }
 
+/* ---- the per-chunk object pool (safe object reuse) ------------------------
+ *
+ * The immortal arena this replaces was worth ~2x on the object-birth step and
+ * had to be append-only: an object whose storage belongs to the arena can never
+ * be deallocated, so every read added resident pages and nothing gave them back
+ * (~791 MiB after a 10M-row read). This is the same birth (write the CPython
+ * header around a value written on the spot) with a real lifetime:
+ *
+ *   - values are born as a private *subtype* of float/int/str, whose tp_free
+ *     returns the cell to a size-class free list. A subtype is what makes a
+ *     differently-allocated object safe: the base type's deallocator calls
+ *     Py_TYPE(self)->tp_free, so the free hook runs before anything assumes
+ *     PyObject_Free. isinstance(x, float/int/str) stays true; type(x) is the
+ *     private subtype, and the types are deliberately not instantiable.
+ *   - cells come from one 512 MiB reservation, taken in 2 MiB chunks and reused
+ *     from thread-local free lists afterwards. A second read of the same shape
+ *     allocates no new pages; the footprint is the peak of concurrently-live
+ *     values, not the sum of every read. A process-wide cap
+ *     (FASTPOSTGRES_OBJ_ARENA=<bytes>, 0 turns it off) makes the worst case
+ *     fixed: past it every value falls back to the normal constructor.
+ *
+ * The layouts are the part that can rot with a CPython release, so nothing is
+ * hard-coded if the interpreter can tell us: the compact-ASCII header is copied
+ * from a real string, the int tags from real longs, and fp_objpool_init()
+ * proves the born values (repr, hash, compare, round trip) before the pool is
+ * used. Anything unexpected leaves it off and the decoder uses the normal
+ * constructors.
+ */
+#define FP_CELL_ALIGN ((size_t)16)
+#define FP_CELL_MAX ((size_t)64 * 1024)
+#define FP_CELL_BUCKETS (FP_CELL_MAX / FP_CELL_ALIGN)
+#define FP_ARENA_BLOCK ((size_t)2 * 1024 * 1024)
+#define FP_OBJPOOL_DEFAULT_BYTES ((size_t)512 * 1024 * 1024)
+
+static PyTypeObject FpFloatType   = {PyVarObject_HEAD_INIT(nullptr, 0)};
+static PyTypeObject FpLongType    = {PyVarObject_HEAD_INIT(nullptr, 0)};
+static PyTypeObject FpUnicodeType = {PyVarObject_HEAD_INIT(nullptr, 0)};
+
+/* copy/deepcopy/pickle should keep working: a born value reduces to a plain
+ * exact float/int/str holding the same value, not to the private subtype (which
+ * is deliberately not importable or instantiable). */
+static PyObject *
+fp_reduce_exact(PyObject *self, PyObject *type)
+{
+    PyObject *value = PyObject_CallFunctionObjArgs(type, self, nullptr);
+    PyObject *args;
+    PyObject *out;
+
+    if (value == nullptr) return nullptr;
+    args = PyTuple_Pack(1, value);
+    Py_DECREF(value);
+    if (args == nullptr) return nullptr;
+    out = PyTuple_Pack(2, type, args);
+    Py_DECREF(args);
+    return out;
+}
+
+static PyObject *
+fp_float_reduce(PyObject *self, PyObject *)
+{
+    return fp_reduce_exact(self, (PyObject *)&PyFloat_Type);
+}
+
+static PyObject *
+fp_long_reduce(PyObject *self, PyObject *)
+{
+    return fp_reduce_exact(self, (PyObject *)&PyLong_Type);
+}
+
+static PyObject *
+fp_unicode_reduce(PyObject *self, PyObject *)
+{
+    return fp_reduce_exact(self, (PyObject *)&PyUnicode_Type);
+}
+
+static PyMethodDef fp_float_methods[] = {
+    {"__reduce__", fp_float_reduce, METH_NOARGS, nullptr},
+    {"__reduce_ex__", fp_float_reduce, METH_VARARGS, nullptr},
+    {nullptr},
+};
+
+static PyMethodDef fp_long_methods[] = {
+    {"__reduce__", fp_long_reduce, METH_NOARGS, nullptr},
+    {"__reduce_ex__", fp_long_reduce, METH_VARARGS, nullptr},
+    {nullptr},
+};
+
+static PyMethodDef fp_unicode_methods[] = {
+    {"__reduce__", fp_unicode_reduce, METH_NOARGS, nullptr},
+    {"__reduce_ex__", fp_unicode_reduce, METH_VARARGS, nullptr},
+    {nullptr},
+};
+
+static uintptr_t  g_long_tag[4][2]; /* [ndigits][negative] */
+static char       g_str_hdr[sizeof(PyASCIIObject)];
+static Py_ssize_t g_str_data = (Py_ssize_t)sizeof(PyASCIIObject);
+static bool       g_pool_on;
+static char      *g_pool_base;      /* one reservation; every cell lives in it */
+static size_t     g_pool_cap;
+static std::atomic<size_t> g_pool_used{0};
+
+/* Per thread, not shared: the decoder runs on one thread and the free lists
+ * only ever hold cells that thread may hand out again. Cells are carved from
+ * the one process-wide reservation, so a short-lived thread cannot make the
+ * footprint unbounded: its blocks stay inside g_pool_cap. */
+struct CellPool {
+    void  *free_head[FP_CELL_BUCKETS];
+    char  *cur;
+    size_t left;
+    size_t births;
+    size_t fallbacks;
+};
+
+static thread_local CellPool t_cells;
+
+static inline size_t
+cell_round(size_t n)
+{
+    return (n + FP_CELL_ALIGN - 1) & ~(FP_CELL_ALIGN - 1);
+}
+
+/* Take the next chunk of the reservation. The chunks are consecutive, so a
+ * pointer is ours iff it lies inside [base, base+cap): tp_free needs exactly
+ * that test to tell an arena cell from an instance some caller built with the
+ * base type's own __new__ (which the allocator owns and must free normally). */
+static bool
+cell_block(size_t need)
+{
+    size_t want = FP_ARENA_BLOCK;
+    size_t off;
+
+    if (want < need) want = cell_round(need);
+
+    off = g_pool_used.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (off + want > g_pool_cap) return false;
+        if (g_pool_used.compare_exchange_weak(off, off + want, std::memory_order_relaxed)) break;
+    }
+    t_cells.cur  = g_pool_base + off;
+    t_cells.left = want;
+    return true;
+}
+
+static inline void *
+cell_take(size_t n)
+{
+    size_t need = cell_round(n);
+    size_t bucket;
+
+    if (need == 0 || need > FP_CELL_MAX) return nullptr;
+    bucket = need / FP_CELL_ALIGN - 1;
+    if (t_cells.free_head[bucket] != nullptr)
+    {
+        void *p              = t_cells.free_head[bucket];
+        t_cells.free_head[bucket] = *(void **)p;
+        return p;
+    }
+    if (t_cells.left < need && !cell_block(need)) return nullptr;
+    void *p = t_cells.cur;
+    t_cells.cur += need;
+    t_cells.left -= need;
+    return p;
+}
+
+/* The size of a cell we born, from the object itself. Only our three private
+ * types reach here (they are not instantiable and not exported). */
+static inline size_t
+cell_held(PyObject *op)
+{
+    PyTypeObject *tp = Py_TYPE(op);
+
+    if (tp == &FpFloatType) return sizeof(PyFloatObject);
+    if (tp == &FpLongType)
+    {
+        PyLongObject *l = (PyLongObject *)op;
+        return offsetof(PyLongObject, long_value.ob_digit) +
+               ((size_t)(l->long_value.lv_tag >> 3) * sizeof(digit));
+    }
+    if (tp == &FpUnicodeType) return sizeof(PyASCIIObject) + (size_t)((PyASCIIObject *)op)->length + 1;
+    return 0;
+}
+
+static void
+cell_free(void *v)
+{
+    PyObject *op = (PyObject *)v;
+    size_t    n;
+
+    /* A base-slot allocator or an embedding caller could still hand us an
+     * instance the normal allocator built, even though the type itself is not
+     * instantiable. Such an instance lives outside the reservation and belongs
+     * to PyObject_Free; anything inside it is a cell of ours, so no per-object
+     * header is needed. */
+    uintptr_t p    = (uintptr_t)v;
+    uintptr_t base = (uintptr_t)g_pool_base;
+    if (p < base || p >= base + g_pool_cap)
+    {
+        PyObject_Free(v);
+        return;
+    }
+    n = cell_held(op);
+    if (n == 0 || cell_round(n) > FP_CELL_MAX)
+    {
+        PyObject_Free(v); /* not a shape we handed out: never free it as one */
+        return;
+    }
+    size_t bucket = cell_round(n) / FP_CELL_ALIGN - 1;
+    *(void **)v                = t_cells.free_head[bucket];
+    t_cells.free_head[bucket]  = v;
+}
+
+static inline PyObject *
+cell_birth(size_t size, PyTypeObject *tp)
+{
+    void *p = cell_take(size);
+
+    if (p == nullptr) return nullptr;
+    PyObject *o = (PyObject *)p;
+    Py_SET_TYPE(o, tp);
+    Py_SET_REFCNT(o, 1);
+    return o;
+}
+
+static PyObject *
+birth_float(double v)
+{
+    PyObject *o;
+
+    if (!g_pool_on) return PyFloat_FromDouble(v);
+    o = cell_birth(sizeof(PyFloatObject), &FpFloatType);
+
+    if (o != nullptr)
+    {
+        ((PyFloatObject *)o)->ob_fval = v;
+        t_cells.births++;
+        return o;
+    }
+    t_cells.fallbacks++;
+    return PyFloat_FromDouble(v);
+}
+
+static PyObject *
+birth_long(long long v)
+{
+    uint64_t  mag;
+    int       nd = 1, neg;
+    PyObject *o;
+    digit    *d;
+
+    /* the interpreter's small-int cache is already immortal: nothing to gain */
+    if (v >= -5 && v <= 256) return PyLong_FromLong((long)v);
+    if (!g_pool_on) return PyLong_FromLongLong(v);
+    neg = v < 0;
+    mag = neg ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v;
+    if (mag >> 30) nd = 2;
+    if (mag >> 60) nd = 3;
+
+    o = cell_birth(offsetof(PyLongObject, long_value.ob_digit) + (size_t)nd * sizeof(digit), &FpLongType);
+    if (o == nullptr)
+    {
+        t_cells.fallbacks++;
+        return PyLong_FromLongLong(v);
+    }
+    memcpy((char *)o + offsetof(PyLongObject, long_value.lv_tag), &g_long_tag[nd][neg], sizeof(uintptr_t));
+    d = (digit *)((char *)o + offsetof(PyLongObject, long_value.ob_digit));
+    for (int i = 0; i < nd; i++)
+        d[i] = (digit)((mag >> (PyLong_SHIFT * i)) & (uint64_t)PyLong_MASK);
+    t_cells.births++;
+    return o;
+}
+
+static PyObject *
+birth_text(const char *p, Py_ssize_t n)
+{
+    size_t     cell;
+    PyObject  *o;
+    Py_ssize_t i = 0;
+
+    if (n <= 0) goto fallback; /* the empty string is the interpreter's singleton */
+    if (!g_pool_on) goto fallback;
+
+    /* the cell layout below is compact ASCII; every other form uses the real
+     * constructor, which owns whatever storage that encoding needs */
+    for (; i + 8 <= n; i += 8)
+    {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w & 0x8080808080808080ULL) goto fallback;
+    }
+    for (; i < n; i++)
+        if (((unsigned char)p[i] & 0x80) != 0) goto fallback;
+
+    cell = (size_t)n + (size_t)g_str_data + 1;
+    o    = cell_birth(cell, &FpUnicodeType);
+    if (o == nullptr) goto fallback;
+    {
+        char *c = (char *)o;
+        memcpy(c, g_str_hdr, sizeof(PyASCIIObject));
+        Py_SET_TYPE(o, &FpUnicodeType);
+        Py_SET_REFCNT(o, 1);
+        ((PyASCIIObject *)o)->length = n;
+        ((PyASCIIObject *)o)->hash   = -1;
+        memcpy(c + g_str_data, p, (size_t)n);
+        c[g_str_data + n] = 0;
+    }
+    t_cells.births++;
+    return o;
+
+fallback:
+    t_cells.fallbacks++;
+    return PyUnicode_FromStringAndSize(p, n);
+}
+
+static bool
+pool_templates(void)
+{
+    static const long long probe[4] = {0, 12345, ((long long)1 << 30) + 7, ((long long)1 << 60) + 7};
+    PyObject              *ref;
+    const char            *ascii = "abc";
+    int                    nd, neg;
+
+    ref = PyUnicode_FromStringAndSize(ascii, 3);
+    if (ref == nullptr) return false;
+    if (!PyUnicode_IS_COMPACT_ASCII(ref) ||
+        (char *)PyUnicode_DATA(ref) - (char *)ref != (Py_ssize_t)sizeof(PyASCIIObject))
+    {
+        Py_DECREF(ref);
+        return false;
+    }
+    g_str_data = (char *)PyUnicode_DATA(ref) - (char *)ref;
+    memcpy(g_str_hdr, ref, sizeof(PyASCIIObject));
+    Py_DECREF(ref);
+
+    for (nd = 1; nd <= 3; nd++)
+    {
+        for (neg = 0; neg <= 1; neg++)
+        {
+            long long v = neg ? -probe[nd] : probe[nd];
+            uintptr_t tag;
+
+            ref = PyLong_FromLongLong(v);
+            if (ref == nullptr) return false;
+            memcpy(&tag, (const char *)ref + offsetof(PyLongObject, long_value.lv_tag), sizeof(tag));
+            if ((tag >> 3) != (uintptr_t)nd)
+            {
+                Py_DECREF(ref);
+                return false;
+            }
+            g_long_tag[nd][neg] = tag;
+            Py_DECREF(ref);
+        }
+    }
+    return true;
+}
+
+static bool
+pool_verify(void)
+{
+    static const long long longs[] = {
+        12345, -12345, ((long long)1 << 30) + 7, -(((long long)1 << 30) + 7), ((long long)1 << 60) + 7};
+    PyObject *o;
+    size_t    i;
+
+    o = birth_float(1.2345);
+    if (o == nullptr || !PyFloat_Check(o) || PyFloat_AsDouble(o) != 1.2345) return false;
+    PyObject *fr = PyObject_Repr(o);
+    if (fr == nullptr || PyUnicode_CompareWithASCIIString(fr, "1.2345") != 0)
+    {
+        Py_XDECREF(fr);
+        return false;
+    }
+    Py_DECREF(fr);
+    Py_DECREF(o);
+    o = birth_float(1.2345); /* prove the returned cell is reusable */
+    if (o == nullptr || PyFloat_AsDouble(o) != 1.2345) return false;
+    Py_DECREF(o);
+
+    for (i = 0; i < sizeof(longs) / sizeof(longs[0]); i++)
+    {
+        PyObject *ref = PyLong_FromLongLong(longs[i]);
+        PyObject *cmp;
+
+        o = birth_long(longs[i]);
+        if (o == nullptr || ref == nullptr || !PyLong_Check(o)) return false;
+        if (PyLong_AsLongLong(o) != longs[i]) return false;
+        if (PyObject_RichCompareBool(o, ref, Py_EQ) != 1) return false;
+        if (PyObject_Hash(o) != PyObject_Hash(ref)) return false;
+        cmp = PyObject_Repr(o);
+        if (cmp == nullptr) return false;
+        Py_DECREF(cmp);
+        Py_DECREF(ref);
+        Py_DECREF(o);
+    }
+
+    o = birth_text("hello world", 11);
+    if (o == nullptr || !PyUnicode_Check(o)) return false;
+    if (PyUnicode_GET_LENGTH(o) != 11) return false;
+    if (PyUnicode_CompareWithASCIIString(o, "hello world") != 0) return false;
+    if (PyUnicode_AsUTF8AndSize(o, nullptr) == nullptr) return false;
+    {
+        PyObject *ref  = PyUnicode_FromString("hello world");
+        int       same = ref != nullptr && PyObject_Hash(o) == PyObject_Hash(ref);
+        Py_XDECREF(ref);
+        if (!same) return false;
+    }
+    Py_DECREF(o);
+    o = birth_text("hello world", 11);
+    if (o == nullptr || PyUnicode_CompareWithASCIIString(o, "hello world") != 0) return false;
+    Py_DECREF(o);
+    return true;
+}
+
+bool
+fp_objpool_init(void)
+{
+#ifdef Py_GIL_DISABLED
+    /* the free-threaded build has a different object header and refcount
+     * protocol; keep the normal constructors rather than guess at it */
+    return false;
+#else
+    const char *env = getenv("FASTPOSTGRES_OBJ_ARENA");
+    size_t      cap = FP_OBJPOOL_DEFAULT_BYTES;
+
+    g_pool_on = false;
+    if (env != nullptr && env[0] != 0)
+    {
+        unsigned long long want = strtoull(env, nullptr, 10);
+
+        if (want == 0) return false;
+        cap = (size_t)want;
+    }
+    cap &= ~(size_t)4095;
+    if (cap < FP_ARENA_BLOCK) return false;
+
+    FpFloatType.tp_name     = "_fastpostgres.born_float";
+    FpFloatType.tp_base     = &PyFloat_Type;
+    FpFloatType.tp_basicsize = sizeof(PyFloatObject);
+    FpFloatType.tp_flags    = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION;
+    FpFloatType.tp_free     = cell_free;
+    FpFloatType.tp_methods  = fp_float_methods;
+
+    FpLongType.tp_name      = "_fastpostgres.born_int";
+    FpLongType.tp_base      = &PyLong_Type;
+    FpLongType.tp_basicsize = sizeof(PyLongObject);
+    FpLongType.tp_itemsize  = sizeof(digit);
+    FpLongType.tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION;
+    FpLongType.tp_free      = cell_free;
+    FpLongType.tp_methods   = fp_long_methods;
+
+    FpUnicodeType.tp_name      = "_fastpostgres.born_str";
+    FpUnicodeType.tp_base      = &PyUnicode_Type;
+    FpUnicodeType.tp_basicsize = sizeof(PyUnicodeObject);
+    FpUnicodeType.tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION;
+    FpUnicodeType.tp_free      = cell_free;
+    FpUnicodeType.tp_methods   = fp_unicode_methods;
+
+    if (PyType_Ready(&FpFloatType) < 0 || PyType_Ready(&FpLongType) < 0 ||
+        PyType_Ready(&FpUnicodeType) < 0)
+        return false;
+
+    g_pool_base = (char *)mmap(nullptr, cap, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (g_pool_base == MAP_FAILED)
+    {
+        g_pool_base = nullptr;
+        return false;
+    }
+#ifdef MADV_HUGEPAGE
+    (void)madvise(g_pool_base, cap, MADV_HUGEPAGE);
+#endif
+    g_pool_cap  = cap;
+    g_pool_used.store(0, std::memory_order_relaxed);
+    g_pool_on   = true; /* the verification births need the real path */
+    if (!pool_templates() || !pool_verify())
+    {
+        g_pool_on = false;
+        t_cells.births = t_cells.fallbacks = 0;
+        return false;
+    }
+    return true;
+#endif
+}
+
+static const char *
+fp_objpool_mode(void)
+{
+    if (!g_pool_on) return "off";
+    return "reuse";
+}
+
 /* The row decode's cost in TSC cycles: two rdtsc per batch, free at this scale,
  * and the one number that says whether the loop is worth hand-writing (perf
  * cannot run in the container, so this stands in for it). Relaxed atomics: the
@@ -340,6 +833,10 @@ fp_stats_report(void)
                 (double)dec_cycles / (double)(dec_rows ? dec_rows : 1),
                 (double)(read_cycles - dec_cycles) / (double)read_rows);
     }
+    if (g_pool_base != nullptr)
+        fprintf(stderr, "objpool: %s cap=%zu MiB used=%zu KiB born=%zu fallbacks=%zu\n", fp_objpool_mode(),
+                g_pool_cap >> 20, g_pool_used.load(std::memory_order_relaxed) >> 10, t_cells.births,
+                t_cells.fallbacks);
 }
 
 /* ---- decoding a whole batch ----------------------------------------------
@@ -361,27 +858,27 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
         case FASTPOSTGRES_KIND_INT16: {
             int16_t v;
             memcpy(&v, c->data + row * 2, 2);
-            return PyLong_FromLongLong(v);
+            return birth_long(v);
         }
         case FASTPOSTGRES_KIND_INT32: {
             int32_t v;
             memcpy(&v, c->data + row * 4, 4);
-            return PyLong_FromLongLong(v);
+            return birth_long(v);
         }
         case FASTPOSTGRES_KIND_INT64: {
             int64_t v;
             memcpy(&v, c->data + row * 8, 8);
-            return PyLong_FromLongLong(v);
+            return birth_long(v);
         }
         case FASTPOSTGRES_KIND_FLOAT4: {
             float v;
             memcpy(&v, c->data + row * 4, 4);
-            return PyFloat_FromDouble((double)v);
+            return birth_float((double)v);
         }
         case FASTPOSTGRES_KIND_FLOAT8: {
             double v;
             memcpy(&v, c->data + row * 8, 8);
-            return PyFloat_FromDouble(v);
+            return birth_float(v);
         }
         case FASTPOSTGRES_KIND_DATE:
             return date_from_days(load_le32(c->data + row * 4));
@@ -407,7 +904,7 @@ decode_value(const FastpostgresColumn *c, uint64_t row)
             int32_t        s0   = off[row];
             int32_t        s1   = off[row + 1];
 
-            return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+            return birth_text(base + s0, (Py_ssize_t)(s1 - s0));
         }
     }
 }
@@ -441,31 +938,31 @@ row_value(const FastpostgresColumn *c, uint64_t r)
     {
         int16_t v;
         memcpy(&v, data + r * 2, 2);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT32)
     {
         int32_t v;
         memcpy(&v, data + r * 4, 4);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT64)
     {
         int64_t v;
         memcpy(&v, data + r * 8, 8);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
     {
         float v;
         memcpy(&v, data + r * 4, 4);
-        return PyFloat_FromDouble((double)v);
+        return birth_float((double)v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
     {
         double v;
         memcpy(&v, data + r * 8, 8);
-        return PyFloat_FromDouble(v);
+        return birth_float(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_DATE)
         return date_from_days(load_le32(data + r * 4));
@@ -487,7 +984,7 @@ row_value(const FastpostgresColumn *c, uint64_t r)
         if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
             return PyBytes_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
         else
-            return PyUnicode_FromStringAndSize(base + s0, (Py_ssize_t)(s1 - s0));
+            return birth_text(base + s0, (Py_ssize_t)(s1 - s0));
     }
 }
 
@@ -696,31 +1193,31 @@ tuple_fixed(const uint8_t *p)
     {
         int16_t v;
         memcpy(&v, p, 2);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT32)
     {
         int32_t v;
         memcpy(&v, p, 4);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_INT64)
     {
         int64_t v;
         memcpy(&v, p, 8);
-        return PyLong_FromLongLong(v);
+        return birth_long(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT4)
     {
         float v;
         memcpy(&v, p, 4);
-        return PyFloat_FromDouble((double)v);
+        return birth_float((double)v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_FLOAT8)
     {
         double v;
         memcpy(&v, p, 8);
-        return PyFloat_FromDouble(v);
+        return birth_float(v);
     }
     else if constexpr (K == FASTPOSTGRES_KIND_DATE)
         return date_from_days(load_le32(p));
@@ -741,7 +1238,7 @@ tuple_varlena(const uint8_t *data, uint32_t len)
     if constexpr (K == FASTPOSTGRES_KIND_BYTEA)
         return PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)len);
     else
-        return PyUnicode_FromStringAndSize((const char *)data, (Py_ssize_t)len);
+        return birth_text((const char *)data, (Py_ssize_t)len);
 }
 
 /* One column of a block, in row order, for a fixed-width kind. STATIC_OFF says

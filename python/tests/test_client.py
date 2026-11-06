@@ -8,6 +8,9 @@ the mapped segment, which the worker rewrites on the next chunk — decode (or
 copy) before the next ``ring.next()``.
 """
 import os
+import copy
+import gc
+import pickle
 import struct
 import unittest
 
@@ -474,6 +477,41 @@ class DbapiTest(unittest.TestCase):
         self.assertIs(b, True)
         self.assertEqual((ts.year, ts.month, ts.day, ts.hour), (2026, 10, 30, 12))
         self.assertGreater(self.conn.shm_reads, 0)
+
+    def test_shm_row_values_are_reusable_and_copyable(self):
+        """The row decoder may hand out values born in a reused cell. They must
+        still behave like their base type: compare, copy, deep-copy, pickle,
+        and survive a second read that reuses the first read's storage."""
+        from fastpostgres import dbapi
+
+        sql = (
+            "SELECT (g::int8 * 1000000000) AS big, (g * 1.5)::float8 AS f, "
+            "('v' || g)::text AS s FROM generate_series(1, 200) g"
+        )
+        conn = dbapi.connect(CONNINFO, force_tuples=True)
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)  # the eager path: cursor.execute() calls read_rows()
+            rows = cur.fetchall()
+            self.assertEqual(rows[0], (1000000000, 1.5, "v1"))
+            self.assertEqual(rows[-1], (200000000000, 300.0, "v200"))
+            for value in rows[0]:
+                self.assertIsInstance(value, (int, float, str))
+            self.assertEqual(copy.copy(rows[0]), rows[0])
+            self.assertEqual(copy.deepcopy(rows), rows)
+            self.assertEqual(pickle.loads(pickle.dumps(rows)), rows)
+
+            cur.close()  # drops the cursor's reference to the rows too
+            del rows  # release the cells; the next read must reuse them
+            gc.collect()
+            cur = conn.cursor()
+            cur.execute(sql)
+            again = cur.fetchall()
+            self.assertEqual(again[0], (1000000000, 1.5, "v1"))
+            self.assertEqual(again[-1], (200000000000, 300.0, "v200"))
+            cur.close()
+        finally:
+            conn.close()
 
     def test_shm_binary_types_match_libpq(self):
         """The same query over /dev/shm and over libpq must agree value for

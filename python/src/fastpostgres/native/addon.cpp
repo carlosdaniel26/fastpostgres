@@ -94,6 +94,7 @@ PyMODINIT_FUNC
 PyInit__client(void)
 {
     if (!fp_codec_init()) return nullptr;
+    fp_objpool_init(); /* optional: values fall back to the normal constructors */
     if (!fp_types_init()) return nullptr;
     Py_AtExit(fp_stats_report); /* one line per process: how the row decode cost */
 

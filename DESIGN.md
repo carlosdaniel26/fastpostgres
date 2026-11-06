@@ -428,3 +428,99 @@ the exact reason it is parity of shape and laziness, not of storage or speed.
 - **The libpq lazy result holds a whole `PGresult`.** A streaming cursor over
   libpq would need `PQsendQuery`/`PQgetResult` plumbing, which is a different
   path; this change only removes the eager Python tuple build.
+
+# Safe object reuse for decoded values (workstream `ws/object-reuse`)
+
+Status: implemented and measured, opt-out via `FASTPOSTGRES_OBJ_ARENA=0`.
+Client-only; no wire change.
+
+## Why not the immortal arena
+
+The removed H11 arena was worth ~2x on the object-birth step because it wrote
+the CPython header around a value on the spot and stamped the refcount immortal.
+It could only be append-only: an object whose storage belongs to an arena can
+never be deallocated, so every read added resident pages (~791 MiB after one
+10M-row read, ~3.9 GiB after several). The speed was real; the lifetime was not.
+
+The safe version keeps the birth and gives the object a lifetime. Values from
+the row frame (and the columnar fallback) are born into cells of a private
+subtype of `float`, `int` or `str`, whose `tp_free` returns the cell to a
+size-class free list. The allocation is reused across reads, and the whole pool
+is a fixed reservation whose worst case is capped.
+
+## Mechanism
+
+`python/src/fastpostgres/native/codec.cpp`:
+
+- **Private subtypes.** `_fastpostgres.born_float`, `.born_int`, `.born_str`
+  are static types based on `PyFloat_Type`, `PyLong_Type` and `PyUnicode_Type`.
+  Their `tp_free` is `cell_free`, so `float_dealloc` / `long_dealloc` /
+  `unicode_dealloc` hand the cell back instead of calling `PyObject_Free`.
+  `isinstance(x, float/int/str)` is true and all comparison/hash/repr/number
+  slots are inherited. The types are not importable and have
+  `Py_TPFLAGS_DISALLOW_INSTANTIATION`; `__reduce__`/`__reduce_ex__` reduce a
+  born value to the exact built-in type, so copy, deepcopy and pickle keep
+  working and never see the subtype.
+- **One reservation, bump + free lists.** `fp_objpool_init()` reserves
+  `FASTPOSTGRES_OBJ_ARENA` bytes (default 512 MiB) with
+  `MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE`. Each thread takes 2 MiB chunks from
+  it with an atomic bump pointer; cells are rounded to 16 B and drawn from
+  thread-local size-class free lists (up to 64 KiB, larger values use the real
+  constructor). `tp_free` first tests whether the pointer is inside the
+  reservation; a normally allocated subtype instance (for example via
+  `base.__new__`) is outside it and gets `PyObject_Free`. Inside, the cell size
+  is recovered from the object itself (`PyFloatObject`, the int digit count in
+  `lv_tag`, the compact-ASCII length), so there is no per-object header.
+- **Layout verification at init.** Nothing about CPython's layout is assumed
+  blindly: the compact-ASCII header is copied from a string the interpreter
+  built, the int tags come from real longs, and `pool_verify()` proves repr,
+  hash, compare, round-trip and cell reuse for each type. Any mismatch leaves
+  the pool off and the normal constructors run. The free-threaded build
+  (`Py_GIL_DISABLED`) keeps the pool off.
+- **Bounded fallback.** When the reservation is full, or a value is not compact
+  ASCII / is larger than 64 KiB, the decoder calls the ordinary constructor.
+  Correctness never depends on the arena having room.
+
+## Measurement
+
+Full record: `bench/results/ws-object-reuse-ab.log`. Same image, same command,
+pool off vs on, 1M rows (`FASTPOSTGRES_MATERIALIZE=1`, eager row values):
+
+| metric | pool off | pool on | delta |
+|---|---|---|---|
+| DB-API eager rows/s | 3.77M | 4.89M | +29.7% |
+| core interface rows/s | 3.84M | 4.86M | +26.6% |
+| `read_rows` cycles/row | 676.4 | 418.7 | −38.1% |
+| `stream()` rows/s (control) | 9.18M | 9.26M | +0.9% (noise) |
+| peak RSS at 1M | 379.0 MiB | 378.0 MiB | flat |
+
+The RSS check is ten consecutive 1M-row reads in one process: 49.3M values
+born, arena `used` stays at 202752 KiB and peak RSS at 377.6 MiB, unchanged
+from the first read. That is the property the immortal arena did not have.
+Against `fpq-baseline` (main) the same run is +22.9% DB-API rows/s and −28.7%
+`read_rows` cycles/row at the same ~378 MiB.
+
+`tests.sh` is green: extension `make installcheck`, then 61 client tests
+(`OK`, one skipped). The added test covers compare/copy/deepcopy/pickle and a
+second read reusing the first read's cells.
+
+## What remains
+
+- **Cardinality-aware dictionary.** Values are reused as *storage*, not by
+  value: a repeated low-cardinality column still gets one object per row. A
+  per-chunk open-addressed dictionary (H10) keyed by the wire bytes could share
+  the object itself for `bool`/status/repeated text. That needs either a scan to
+  decide it is worth it or a bounded insert-then-disable policy; it is a
+  separate win and would compose with this pool.
+- **Text encoding.** Only compact ASCII and the three value types are born in
+  place; non-ASCII text, `bytea`, `date`/`time`/`timestamp` and `uuid` still use
+  their constructors. The compact-ASCII case is the benchmark's shape; a
+  Latin-1/UTF-8 cell layout is the next sizeable slice but adds more
+  version-specific header knowledge.
+- **Free-list classes.** The current free lists are per exact 16 B size class.
+  Fragmentation across a long-lived process with many different text lengths is
+  bounded by the cap, but a size-class ladder would use the reservation better.
+- **Per-type opt-out.** There is one process switch. A deployment that cares
+  about `type(x)` being the exact built-in (some serializers do) can set
+  `FASTPOSTGRES_OBJ_ARENA=0`; a per-kind switch would let it keep the float/int
+  win without text.
