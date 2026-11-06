@@ -382,6 +382,22 @@ fp_segment_payload(const char *name, uint64_t *payload_len)
     return (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
 }
 
+/* The silent twin of fp_segment_payload(): same cache lookup, same header
+ * validation, no Python API. The parallel aggregate's worker threads run with
+ * the GIL released, so they cannot raise; a nullptr is their only failure
+ * signal and the caller turns it into "this ring failed", not an exception. */
+const uint8_t *
+fp_segment_payload_raw(const char *name, uint64_t *payload_len)
+{
+    std::string path = "/" + std::string(name);
+    size_t      size = 0;
+    void       *map  = read_map_get(path.c_str(), name, &size);
+
+    if (map == nullptr) return nullptr;
+    if (!fastpostgres_shm_validate(map, size, payload_len)) return nullptr;
+    return (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+}
+
 /* segment_fd(segName) -> int | None
  *
  * A duplicate of the memfd the segment is mapped from, for diagnostics: the

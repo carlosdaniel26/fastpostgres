@@ -507,20 +507,16 @@ columnar_reduce_handle(PyObject *, PyObject *args)
     return reduce_payload(payload, payload_len, plan);
 }
 
-/* read_reduce(seg) -> [value, ...] in plan order: the worker's FPREDUCE frame,
- * one slot per planned op. The whole point of the frame is that it is tiny, so
- * this is a handful of Python objects per batch, not per row. */
+/* One FPREDUCE payload -> [value, ...] in plan order: the worker's frame, one
+ * slot per planned op. The whole point of the frame is that it is tiny, so this
+ * is a handful of Python objects per batch, not per row.
+ *
+ * Shared by read_reduce() (a segment the worker just published) and
+ * read_reduce_bytes() (a frame the parallel aggregate's threads copied out).
+ * The bytes are only read here; nothing keeps a reference to them. */
 static PyObject *
-aggregate_read_reduce(PyObject *, PyObject *args)
+read_reduce_payload(const uint8_t *payload, uint64_t payload_len)
 {
-    const char *name;
-
-    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
-
-    uint64_t       payload_len = 0;
-    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
-    if (payload == nullptr) return nullptr;
-
     FastpostgresReduceReader rd;
     if (!fastpostgres_reduce_init(&rd, payload, payload_len)) {
         PyErr_SetString(PyExc_ValueError, "not a fastpostgres reduce payload");
@@ -561,11 +557,47 @@ aggregate_read_reduce(PyObject *, PyObject *args)
     return out;
 }
 
+/* read_reduce(seg) -> [value, ...]: decode the FPREDUCE frame the worker just
+ * published into that segment. */
+static PyObject *
+aggregate_read_reduce(PyObject *, PyObject *args)
+{
+    const char *name;
+
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return read_reduce_payload(payload, payload_len);
+}
+
+/* read_reduce_bytes(buf) -> [value, ...]: the same decode over a frame the
+ * caller holds as bytes, never a segment. The parallel aggregate's threads copy
+ * each batch's frame out of its ring under a length prefix, and this is how the
+ * Python side turns those copies back into scalars. "y*" takes anything the
+ * buffer protocol exposes contiguously — bytes, bytearray, memoryview. */
+static PyObject *
+aggregate_read_reduce_bytes(PyObject *, PyObject *args)
+{
+    Py_buffer view;
+
+    if (!PyArg_ParseTuple(args, "y*", &view)) return nullptr;
+
+    PyObject *out = read_reduce_payload((const uint8_t *)view.buf, (uint64_t)view.len);
+
+    PyBuffer_Release(&view);
+    return out;
+}
+
 static PyMethodDef aggregate_methods[] = {
     {"reduce", aggregate_reduce, METH_VARARGS,
      "reduce(seg, [(agg_op, column_index), ...]) -> list of scalars (no Python objects per row)"},
     {"read_reduce", aggregate_read_reduce, METH_VARARGS,
      "read_reduce(seg) -> list of scalars from the worker's FPREDUCE frame"},
+    {"read_reduce_bytes", aggregate_read_reduce_bytes, METH_VARARGS,
+     "read_reduce_bytes(buf) -> list of scalars from one FPREDUCE frame held as bytes/memoryview"},
     {"columnar_reduce", columnar_reduce, METH_VARARGS,
      "columnar_reduce(pid, fd, size, [(agg_op, column_index), ...]) -> list of scalars"},
     {"columnar_reduce_handle", columnar_reduce_handle, METH_VARARGS,

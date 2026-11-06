@@ -15,6 +15,12 @@ bool fp_register_segment(PyObject *module);
  * why the caller must be the stream's owner. */
 const uint8_t *fp_segment_payload(const char *name, uint64_t *payload_len);
 
+/* The same mapping and validation, but silent: it never touches PyErr_*, so it
+ * is callable with the GIL released (the parallel aggregate's threads re-map
+ * after every batch). nullptr means the segment is not mapped or not ours; the
+ * caller decides what that means. Reuses the one mapping cache. */
+const uint8_t *fp_segment_payload_raw(const char *name, uint64_t *payload_len);
+
 /* Register the AF_UNIX connection on which this ring's worker hands over its
  * data segments' memfds (SCM_RIGHTS). read()/read_rows() consult it by segment
  * name; without one they use /dev/shm. Ring start/teardown own the socket. */

@@ -58,6 +58,7 @@ setup(
                 "src/fastpostgres/native/segment.cpp",
                 "src/fastpostgres/native/materialize.cpp",
                 "src/fastpostgres/native/aggregate.cpp",
+                "src/fastpostgres/native/parallel.cpp",
                 "src/fastpostgres/native/codec.cpp",
                 "src/fastpostgres/native/types.cpp",
                 # The engine and its name resolution: the client speaks the
