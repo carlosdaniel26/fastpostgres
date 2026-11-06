@@ -95,7 +95,7 @@ they are what decides whether this belongs in an application.
 
 The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreSQL driver, whose results arrive as Arrow record batches - and each comparison asks both stacks for the same rows, consumed by neither.
 
-![FastPostgres vs ADBC + Arrow: the same read, nothing consumed](docs/assets/zerocopy-read.png)
+![FastPostgres vs ADBC + Arrow: the same read, nothing consumed — 637% at 10M rows](docs/assets/zerocopy-read.png)
 
 That is **6.2-6.6x faster on the same read — 625% at 100K, 655% at 1M, 638% at 10M** (the benchmark's own `vs arrow` ratio). The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first. The default DB-API read is now the same lazy columnar path (one copy per column, a tuple only for a row that is read), so it lands at the same rate as `stream()` instead of paying a Python object per value.
 
@@ -107,7 +107,7 @@ The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the v
 | 1M | 14.75M | 2.25M | **6.55x (655%)** |
 | 10M | 14.90M | 2.34M | **6.38x (638%)** |
 
-The figure is the original record; the integrated numbers are in the table.
+The figure is the integrated run: at 10M rows `stream()` delivers 14.9M rows/s against ADBC + Arrow's 2.34M, **637%**.
 
 The same read also reports the rest of what FastPostgres does with its rows, against its own default DBAPI read:
 
