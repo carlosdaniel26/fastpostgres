@@ -1,0 +1,74 @@
+# team/unix — native ORM materializer, A/B
+
+A small harness (`bench/orm/materialize_bench.py`) reads the same 100k rows
+through stock SQLAlchemy ORM and through the native materializer. The script is
+mounted into both images at the same path, so baseline and change run the exact
+same file; only the image tag and `BENCH_GIT_REV` differ. On the baseline image
+`fastpostgres.orm` does not exist, so the script reports the stock ORM cell and
+the materializer as unavailable.
+
+## Command
+
+```
+flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=<rev> -v /home/carlos/.local/share/opencode/worktree/b2743c/team-unix/bench/orm/materialize_bench.py:/tmp/materialize_bench.py:ro fpq-<image> python3 /tmp/materialize_bench.py 100000 3'
+```
+
+## Baseline — fpq-baseline (main@7e3d2e6), BENCH_GIT_REV=baseline
+
+```
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+
+### ORM MATERIALIZE
+rows: 100000  reps: 3  shape: bench
+engine: postgresql+fastpostgres://postgres@/postgres?host=/tmp
+driver tuples            209.2 ns/row     4.78M rows/s
+stock ORM               3361.0 ns/row     0.30M rows/s
+materialize:        unavailable (No module named 'fastpostgres.orm')
+### END ORM MATERIALIZE
+read_rows: 631.9 cycles/row over 900001 rows (decode 630.6, frame+desc+list 1.3)
+```
+
+## Change — fpq-unix (team/unix), BENCH_GIT_REV=unix
+
+```
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: unix
+shm: 3.0G
+### END ENV
+
+### ORM MATERIALIZE
+rows: 100000  reps: 3  shape: bench
+engine: postgresql+fastpostgres://postgres@/postgres?host=/tmp
+driver tuples            215.4 ns/row     4.64M rows/s
+stock ORM               3293.5 ns/row     0.30M rows/s
+materialize e2e          421.3 ns/row     2.37M rows/s
+materialize only         168.9 ns/row     5.92M rows/s
+speedup e2e:        7.82x  entity-only: 19.50x
+### END ORM MATERIALIZE
+read_rows: 626.1 cycles/row over 1500001 rows (decode 624.8, frame+desc+list 1.3)
+```
+
+### AB: stock ORM 3361.0 -> materialize e2e 421.3 ns/row (-87.5%), 0.30M -> 2.37M rows/s (+7.98x); the fill alone is 168.9 ns/row (19.9x the stock ORM row), and against the same driver read (215.4 ns/row) SQLAlchemy's ORM share is ~3.1 us/row. The stock ORM control moved 3361.0 -> 3293.5 ns/row (-2.0%) between runs; a second pair was 3362.3 -> 3471.7 (+3.3%), materialize e2e 421.4 ns/row.
