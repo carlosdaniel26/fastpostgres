@@ -1,14 +1,15 @@
 ### ENV
 cpu: AMD Ryzen 7 7700 8-Core Processor
 shape: bench
+threads: 7 rings / 7 connections (both sides, one per core less one)
 postgres: 18.6
 python: 3.13.5
 pyarrow: 26.0.0
 adbc: 1.13.0
 shm: worker default · 8 rings
-max_worker_processes: 10
+max_worker_processes: 12
+fastpostgres_parallel: 7
 fastpostgres_shm_pool: 8
-arrow_threads: 7
 arrow_options: use_copy, jemalloc pool, cpu_count
 git: 5762e1a
 ### END ENV
@@ -17,32 +18,32 @@ git: 5762e1a
 
 ZERO-COPY READ (rows/s): stream()     arrow, 7 conns arrow table  vs arrow    
   (the same read: the columnar form each stack lands, nothing consumed)
-  100K           14.65M       11.12M        2.31M    131.8%  ok
-  spread: stream() ±1.2%  arrow, 7 conns ±1.5%  arrow table ±1.1%
-  1M             62.10M       12.32M        2.24M    504.1%  ok
-  spread: stream() ±6.9%  arrow, 7 conns ±3.1%  arrow table ±0.7%
-  10M            59.21M       12.52M        2.29M    473.0%  ok
-  spread: stream() ±16.4%  arrow, 7 conns ±3.5%  arrow table ±0.5%
+  100K           14.39M       10.74M        2.33M    133.9%  ok
+  spread: stream() ±4.1%  arrow, 7 conns ±4.0%  arrow table ±1.3%
+  1M             66.54M       12.64M        2.30M    526.6%  ok
+  spread: stream() ±15.2%  arrow, 7 conns ±1.1%  arrow table ±1.1%
+  10M            62.98M       12.32M        2.37M    511.2%  ok
+  spread: stream() ±19.4%  arrow, 7 conns ±2.3%  arrow table ±1.1%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  100K     fastpostgres, DBAPI                11.15M          
-  100K     fastpostgres, stream()             15.26M      137%
-  100K     fastpostgres, core interface       11.25M      101%
-  100K     fastpostgres, 4 processes          31.73M      284%
-  100K     adbc+arrow, arrow table             2.31M       21%
-  100K     adbc+arrow, fetchall()              0.15M        1%
-  100K     adbc+arrow, table+to_pylist         1.32M       12%
-  1M       fastpostgres, DBAPI                27.79M          
-  1M       fastpostgres, stream()             50.95M      183%
-  1M       fastpostgres, core interface       27.07M       97%
-  1M       fastpostgres, 4 processes          45.52M      164%
-  1M       adbc+arrow, arrow table             2.32M        8%
+  100K     fastpostgres, DBAPI                11.60M          
+  100K     fastpostgres, stream()             14.12M      122%
+  100K     fastpostgres, core interface       11.27M       97%
+  100K     fastpostgres, 4 processes          32.30M      278%
+  100K     adbc+arrow, arrow table             2.34M       20%
+  100K     adbc+arrow, fetchall()              0.14M        1%
+  100K     adbc+arrow, table+to_pylist         1.37M       12%
+  1M       fastpostgres, DBAPI                28.50M          
+  1M       fastpostgres, stream()             73.80M      259%
+  1M       fastpostgres, core interface       29.00M      102%
+  1M       fastpostgres, 4 processes          43.58M      153%
+  1M       adbc+arrow, arrow table             2.34M        8%
   1M       adbc+arrow, fetchall()              0.14M        1%
-  1M       adbc+arrow, table+to_pylist         1.25M        4%
-  10M      fastpostgres, DBAPI                31.59M          
-  10M      fastpostgres, stream()             63.88M      202%
-  10M      fastpostgres, core interface       35.56M      113%
-  10M      fastpostgres, 4 processes          56.54M      179%
-  10M      adbc+arrow, arrow table             2.32M        7%
-  10M      adbc+arrow, fetchall()              0.14M        0%
-  10M      adbc+arrow, table+to_pylist         1.27M        4%
+  1M       adbc+arrow, table+to_pylist         1.31M        5%
+  10M      fastpostgres, DBAPI                28.86M          
+  10M      fastpostgres, stream()             60.30M      209%
+  10M      fastpostgres, core interface       40.64M      141%
+  10M      fastpostgres, 4 processes          59.44M      206%
+  10M      adbc+arrow, arrow table             2.29M        8%
+  10M      adbc+arrow, fetchall()              0.15M        1%
+  10M      adbc+arrow, table+to_pylist         1.29M        4%

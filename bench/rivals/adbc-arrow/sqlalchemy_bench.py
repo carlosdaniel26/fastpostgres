@@ -186,9 +186,22 @@ def read_arrow_table(conn):
 # on both sides, so the difference measured is delivery.
 
 ARROW_MT = "adbc+arrow, threads"
-# One per physical core less one, the same budget the ring's fan-out leaves
-# (its own client thread and the server both need somewhere to run).
-ARROW_THREADS = max(2, min(8, (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 4)) // 2 - 1))
+
+
+def _physical_cores() -> int:
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 4)
+    return max(1, n // 2)
+
+
+# Both players get the same width, from the same number: one physical core less
+# one, because the client process and the server both need somewhere to run.
+# fast-postgres is told to fan its read out over exactly THREADS rings (the
+# environment is inherited by the per-player children), and ADBC gets exactly
+# THREADS connections. Neither side can be the only one using the machine.
+THREADS = max(2, min(8, _physical_cores() - 1))
+ARROW_THREADS = THREADS
+os.environ["FASTPOSTGRES_PARALLEL"] = str(THREADS)
+os.environ.setdefault("FASTPOSTGRES_SHM_POOL", str(min(8, THREADS + 1)))
 
 # The rival's own performance configuration, so the comparison is not a
 # settings mismatch: COPY rather than row-by-row in the wire protocol, an
