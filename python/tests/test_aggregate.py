@@ -5,6 +5,7 @@ disagree with SQL over the same rows, the walk is wrong.
 """
 import os
 import unittest
+from unittest import mock
 
 import fastpostgres as fp
 from fastpostgres import aio, dbapi
@@ -107,6 +108,21 @@ class AggregateTest(unittest.TestCase):
         by_name = self.cur.aggregate(f"SELECT id, price FROM {TABLE}", {"s": ("sum", "price")})
         by_index = self.cur.aggregate(f"SELECT id, price FROM {TABLE}", {"s": ("sum", 1)})
         self.assertEqual(by_name, by_index)
+
+    def test_pushdown_matches_the_client_side_reduce(self):
+        """The worker's FPREDUCE and the client's walked segment must agree."""
+        ops = {
+            "price_sum": ("sum", "price"),
+            "price_min": ("min", "price"),
+            "price_max": ("max", "price"),
+            "rows": ("count_all", None),
+            "stock_seen": ("count", "stock"),
+            "id_max": ("max", "id"),
+        }
+        with mock.patch.object(dbapi, "_AGG_PUSHDOWN", False):
+            client = self.cur.aggregate(f"SELECT id, price, stock FROM {TABLE}", ops, size=30000)
+        pushed = self.cur.aggregate(f"SELECT id, price, stock FROM {TABLE}", ops, size=30000)
+        self.assertEqual(pushed, client)
 
     def test_unsupported_kind_is_refused(self):
         with self.assertRaises(dbapi.ProgrammingError):

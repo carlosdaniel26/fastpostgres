@@ -49,7 +49,8 @@ enum FastpostgresRingOp
     FASTPOSTGRES_OP_NEXT      = 2, /* the columnar frame */
     FASTPOSTGRES_OP_CLOSE     = 3,
     FASTPOSTGRES_OP_STOP      = 5,
-    FASTPOSTGRES_OP_NEXT_ROWS = 6 /* the row frame (falls back to columnar) */
+    FASTPOSTGRES_OP_NEXT_ROWS = 6, /* the row frame (falls back to columnar) */
+    FASTPOSTGRES_OP_REDUCE    = 7  /* aggregate the batch in the worker: a scalar frame */
 };
 
 /* One side's handoff tally: the client's row counts what it posted, the

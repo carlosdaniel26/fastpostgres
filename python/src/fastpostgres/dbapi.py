@@ -295,6 +295,42 @@ _AGG_OPS = {
     "max": _client.AGG_MAX,
 }
 
+# Ask the worker to reduce each batch where the tuples are (FASTPOSTGRES_OP_REDUCE)
+# instead of shipping the batch and reducing it in C++. 0 keeps the client-side
+# path, which is also the automatic fallback for an extension that predates the op.
+_AGG_PUSHDOWN = os.environ.get("FASTPOSTGRES_AGG_PUSHDOWN", "1") != "0"
+
+
+def _agg_plan(plan) -> str:
+    """The worker's plan string: ``op[:i<index>|n<name>]``, comma separated.
+
+    Names escape ',' and '\\'; an integer column is explicit so a column literally
+    named like an index cannot be mistaken for one.
+    """
+    parts = []
+    for _name, op, column in plan:
+        if column is None:
+            parts.append(str(op))
+        elif isinstance(column, int):
+            parts.append(f"{op}:i{column}")
+        else:
+            col = str(column).replace("\\", "\\\\").replace(",", "\\,")
+            parts.append(f"{op}:n{col}")
+    return ",".join(parts)
+
+
+def _agg_combine(acc, ops, values):
+    """Fold one batch's scalars into the running accumulators, in plan order."""
+    for i, op in enumerate(ops):
+        v = values[i]
+        if op in (_client.AGG_MIN, _client.AGG_MAX):
+            if v is None:
+                continue
+            if acc[i] is None or (v < acc[i] if op == _client.AGG_MIN else v > acc[i]):
+                acc[i] = v
+        else:
+            acc[i] = (acc[i] or 0) + v
+
 
 def _is_read_only(sql: str) -> bool:
     """True for statements the ring's read-only cursor can serve."""
@@ -1074,8 +1110,12 @@ class Cursor:
 
         Operations are ``sum``, ``min``, ``max``, ``count`` (non-NULL values) and
         ``count_all`` (rows, no column needed — pass ``None``); a column is a name
-        or an index. The segment is walked by the extension with the GIL released
-        and no Python object built per row, so a thread reducing its own
+        or an index. The reduce runs in the worker by default
+        (``FASTPOSTGRES_OP_REDUCE``): it accumulates each batch where the tuples
+        are and publishes a few scalars, so the client never receives the rows.
+        Set ``FASTPOSTGRES_AGG_PUSHDOWN=0`` to force the older client-side walk;
+        an extension that predates the op falls back to it automatically. Either
+        way no Python object is built per row, so a thread reducing its own
         partition runs in parallel with the others on any interpreter — the
         decode that materializes rows is what serializes, and this never does it.
 
@@ -1114,54 +1154,78 @@ class Cursor:
             raise NotSupportedError("aggregate() needs the fastpostgres extension (ring unavailable)")
         ring, seg, _pid = info
 
-        seen = False
         try:
             ring.open(seg, sql)
-            resolved = None  # [(op, column index)], once the metadata is known
-            acc = [None] * len(plan)
-            while True:
-                n = ring.next(size)
-                if n == 0 and seen:
-                    break
-                if resolved is None:
-                    if any(column is not None for _, _, column in plan):
-                        batch = _client.read(seg)  # metadata only: the names and their order
-                        index = {c.name: i for i, c in enumerate(batch.columns)}
-                        resolved = []
-                        for name, op, column in plan:
-                            if column is None:
-                                resolved.append((op, -1))
-                                continue
-                            if isinstance(column, int):
-                                at = column if column >= 0 else len(index) + column
-                                if not 0 <= at < len(index):
-                                    raise ProgrammingError(f"aggregate: column index {column} is out of range")
-                            else:
-                                try:
-                                    at = index[column]
-                                except KeyError:
-                                    raise ProgrammingError(
-                                        f"aggregate: no column {column!r} in the result"
-                                    ) from None
-                            resolved.append((op, at))
-                    else:
-                        resolved = [(op, -1) for _, op, _ in plan]
+            acc = None
+
+            # The pushdown: the worker accumulates the plan over each batch and
+            # publishes one scalar per op (FPREDUCE), so the full result never
+            # enters the segment. An older extension answers "unknown op" to the
+            # first request without consuming a row; the client-side reduce
+            # below is then the fallback, unchanged.
+            if _AGG_PUSHDOWN and hasattr(_client, "read_reduce") and hasattr(ring, "reduce"):
+                plan_str = _agg_plan(plan)
+                ops = [op for _, op, _ in plan]
+                acc = [None] * len(plan)
+                seen = False
                 try:
-                    values = _client.reduce(seg, resolved)
-                except ValueError as exc:
-                    raise ProgrammingError(str(exc)) from exc
-                for i, (op, _at) in enumerate(resolved):
-                    v = values[i]
-                    if op in (_client.AGG_MIN, _client.AGG_MAX):
-                        if v is None:
-                            continue
-                        if acc[i] is None or (v < acc[i] if op == _client.AGG_MIN else v > acc[i]):
-                            acc[i] = v
+                    while True:
+                        n = ring.reduce(seg, plan_str, size)
+                        values = _client.read_reduce(seg)
+                        if len(values) != len(plan):
+                            raise ProgrammingError("aggregate: the worker returned a different plan")
+                        _agg_combine(acc, ops, values)
+                        seen = True
+                        if n == 0:
+                            break
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    if not seen and "unknown op" in msg:
+                        acc = None
+                    elif msg.startswith("reduce: "):
+                        raise ProgrammingError(msg) from None
                     else:
-                        acc[i] = (acc[i] or 0) + v
-                seen = True
-                if n == 0:
-                    break
+                        raise
+
+            if acc is None:
+                seen = False
+                resolved = None  # [(op, column index)], once the metadata is known
+                acc = [None] * len(plan)
+                while True:
+                    n = ring.next(size)
+                    if n == 0 and seen:
+                        break
+                    if resolved is None:
+                        if any(column is not None for _, _, column in plan):
+                            batch = _client.read(seg)  # metadata only: the names and their order
+                            index = {c.name: i for i, c in enumerate(batch.columns)}
+                            resolved = []
+                            for name, op, column in plan:
+                                if column is None:
+                                    resolved.append((op, -1))
+                                    continue
+                                if isinstance(column, int):
+                                    at = column if column >= 0 else len(index) + column
+                                    if not 0 <= at < len(index):
+                                        raise ProgrammingError(f"aggregate: column index {column} is out of range")
+                                else:
+                                    try:
+                                        at = index[column]
+                                    except KeyError:
+                                        raise ProgrammingError(
+                                            f"aggregate: no column {column!r} in the result"
+                                        ) from None
+                                resolved.append((op, at))
+                        else:
+                            resolved = [(op, -1) for _, op, _ in plan]
+                    try:
+                        values = _client.reduce(seg, resolved)
+                    except ValueError as exc:
+                        raise ProgrammingError(str(exc)) from exc
+                    _agg_combine(acc, [op for op, _at in resolved], values)
+                    seen = True
+                    if n == 0:
+                        break
         finally:
             try:
                 ring.close()

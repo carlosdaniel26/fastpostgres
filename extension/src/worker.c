@@ -32,6 +32,7 @@
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
 #include "fastpostgres/fastpostgres_shm.h"
@@ -119,15 +120,22 @@ begin_txn(void)
     have_snapshot = true;
 }
 
-/* Copy the pending error into the ring (must be called inside PG_CATCH). */
+/* Copy the pending error into the ring (must be called inside PG_CATCH).
+ *
+ * errfinish leaves CurrentMemoryContext in ErrorContext, and CopyErrorData
+ * allocates in whatever context is current; FlushErrorState then resets
+ * ErrorContext. Copying there would hand FreeErrorData a dangling pointer, so
+ * the copy is made in TopMemoryContext and freed before the handler resumes. */
 static void
 ring_set_error(FastpostgresRing *r)
 {
-    ErrorData *edata = CopyErrorData();
+    MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+    ErrorData  *edata        = CopyErrorData();
 
     r->status = 1;
     strlcpy(r->error, edata->message ? edata->message : "error", sizeof(r->error));
     FlushErrorState();
+    MemoryContextSwitchTo(oldcontext);
     FreeErrorData(edata);
 }
 
@@ -153,11 +161,18 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
     char       *a2 = (char *)fastpostgres_ring_arg2(r->arg);
     const char *data;
     uint64      n = 0;
+    /* The pre-request context: errfinish leaves CurrentMemoryContext in
+     * ErrorContext, and a transaction context dies with its abort, so handlers
+     * resume here instead of either. */
+    MemoryContext oldcontext = CurrentMemoryContext;
 
     /* never let a batch clobber the ring itself: it is published into the segment
-     * the NEXT names */
+     * the NEXT names. REDUCE names its data segment in a1 and its plan in a2,
+     * because the plan is the request payload and the segment is the answer. */
     if (r->op == FASTPOSTGRES_OP_NEXT || r->op == FASTPOSTGRES_OP_NEXT_ROWS)
         data = a2;
+    else if (r->op == FASTPOSTGRES_OP_REDUCE)
+        data = a1;
     else
         data = NULL;
 
@@ -189,6 +204,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_CATCH();
             {
+                MemoryContextSwitchTo(oldcontext);
                 ring_set_error(r);
                 abort_txn();
             }
@@ -210,6 +226,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_CATCH();
             {
+                MemoryContextSwitchTo(oldcontext);
                 ring_set_error(r);
                 abort_txn();
             }
@@ -231,6 +248,31 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_CATCH();
             {
+                MemoryContextSwitchTo(oldcontext);
+                ring_set_error(r);
+                abort_txn();
+            }
+            PG_END_TRY();
+            break;
+
+        case FASTPOSTGRES_OP_REDUCE:
+            if (!have_stream)
+            {
+                r->status = 1;
+                strlcpy(r->error, "no open stream", sizeof(r->error));
+                break;
+            }
+            PG_TRY();
+            {
+                /* a1 is both the stream and the data segment (the pool names them
+                 * alike); a2 is the plan. */
+                n = fastpostgres_stream_next_reduce(a1, a1, (int64)r->batch, ring_data_capacity(r), a2);
+                r->status = 0;
+                r->nrows  = (int64)n;
+            }
+            PG_CATCH();
+            {
+                MemoryContextSwitchTo(oldcontext);
                 ring_set_error(r);
                 abort_txn();
             }
@@ -246,6 +288,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             }
             PG_CATCH();
             {
+                MemoryContextSwitchTo(oldcontext);
                 ring_set_error(r);
                 abort_txn();
             }

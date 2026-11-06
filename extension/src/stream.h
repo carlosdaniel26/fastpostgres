@@ -22,4 +22,10 @@ void   fastpostgres_stream_close(const char *stream);
  * not something the client can walk. */
 uint64 fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch, size_t capacity);
 
+/* The same batch, reduced in the worker: `plan` is reduce.h's op/column plan and
+ * the segment receives an FPREDUCE frame (one scalar per op), not the rows.
+ * Returns the batch's row count, so the caller knows when the stream ended. */
+uint64 fastpostgres_stream_next_reduce(const char *stream, const char *seg, int64 batch, size_t capacity,
+                                       const char *plan);
+
 #endif
