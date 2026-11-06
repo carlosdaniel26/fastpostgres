@@ -775,7 +775,13 @@ columnar_receive(TupleTableSlot *slot, DestReceiver *self)
 
     if (rx->laid_out)
     {
-        columnar_drain_carry(rx);
+        if (!columnar_drain_carry(rx))
+        {
+            /* a queued row still cannot fit: it must keep its place, so this
+             * newly consumed row joins the tail and the batch ends here */
+            columnar_enqueue_slot(rx, slot);
+            return false;
+        }
         if (rx->nrows >= rx->cap)
         {
             /* the frame is full: keep this row (it is already the executor's to
