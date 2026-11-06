@@ -91,7 +91,15 @@ class ParallelTest(unittest.TestCase):
             self.skipTest(f"the server has {slots} free ring slots; this test needs 2")
         print(f"[test_parallel] {n} partitions (slots free: {slots})")
 
-        env = dict(os.environ, FASTPOSTGRES_SHM_POOL=str(n), N=str(n), QUERY=QUERY)
+        # The program counts /dev/shm entries, so it opts out of the default
+        # sealed memfd (whose data segments have no named file by design).
+        env = dict(
+            os.environ,
+            FASTPOSTGRES_SHM_POOL=str(n),
+            FASTPOSTGRES_MEMFD="0",
+            N=str(n),
+            QUERY=QUERY,
+        )
         proc = subprocess.run(
             [sys.executable, "-c", PROGRAM], env=env, capture_output=True, text=True, timeout=120
         )

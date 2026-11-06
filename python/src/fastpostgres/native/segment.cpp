@@ -36,6 +36,7 @@ typedef struct {
     void       *base;
     size_t      size;
     uint64_t    handoff_gen; /* 0: the mapping came from /dev/shm/<name> */
+    int         fd;          /* memfd kept for diagnostics, or -1 for /dev/shm */
 } ReadMap;
 
 /* One mapping per segment name, for the process lifetime. Decoder threads share
@@ -306,10 +307,18 @@ read_map_get(const char *path, const std::string &name, size_t *size_out)
         {
             munmap(m.base, m.size);
             m.base = nullptr;
+            if (m.fd >= 0)
+            {
+                close(m.fd);
+                m.fd = -1;
+            }
             if (fd >= 0)
             {
                 m.base = fp_map_fd_ro(fd, &m.size);
-                close(fd);
+                if (m.base != nullptr)
+                    m.fd = fd;
+                else
+                    close(fd);
             }
             else
                 m.base = fp_map_ro(path, &m.size);
@@ -326,18 +335,22 @@ read_map_get(const char *path, const std::string &name, size_t *size_out)
      * socket this returns immediately and the named file is used. */
     if (fd == -2) fd = handoff_take(name, 1000, &gen);
 
-    size_t size = 0;
-    void  *base;
+    size_t size   = 0;
+    void  *base   = nullptr;
+    int    keepfd = -1;
 
     if (fd >= 0)
     {
         base = fp_map_fd_ro(fd, &size);
-        close(fd);
+        if (base != nullptr)
+            keepfd = fd; /* the descriptor is how segment_fd() inspects the seal */
+        else
+            close(fd);
     }
     else
         base = fp_map_ro(path, &size);
     if (base == nullptr) return nullptr;
-    g_read_maps.push_back({name, base, size, gen});
+    g_read_maps.push_back({name, base, size, gen, keepfd});
     *size_out = size;
     return base;
 }
@@ -361,6 +374,42 @@ fp_segment_payload(const char *name, uint64_t *payload_len)
         return nullptr;
     }
     return (const uint8_t *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+}
+
+/* segment_fd(segName) -> int | None
+ *
+ * A duplicate of the memfd the segment is mapped from, for diagnostics: the
+ * regression test reads F_GET_SEALS and proves both shrink and grow are
+ * refused. None means this segment came from /dev/shm (the fallback), which
+ * has no descriptor to inspect. */
+static PyObject *
+segment_fd(PyObject *, PyObject *args)
+{
+    const char *name;
+
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
+
+    std::string path = "/" + std::string(name);
+    size_t      size = 0;
+
+    if (read_map_get(path.c_str(), name, &size) == nullptr) return nullptr;
+
+    std::lock_guard<std::mutex> held(g_read_maps_lock);
+    for (ReadMap &m : g_read_maps)
+    {
+        int fd;
+
+        if (m.name != name) continue;
+        if (m.fd < 0) Py_RETURN_NONE;
+        fd = dup(m.fd);
+        if (fd < 0)
+        {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return nullptr;
+        }
+        return PyLong_FromLong(fd);
+    }
+    Py_RETURN_NONE;
 }
 
 /* The field names and type OIDs every Result carries. */
@@ -1012,6 +1061,8 @@ decode_row(PyObject *, PyObject *args)
 static PyMethodDef segment_methods[] = {
     {"read", segment_read, METH_VARARGS, "read(segName) -> Segment (zero-copy column views)"},
     {"read_rows", segment_read_rows, METH_VARARGS, "read_rows(segName) -> Result (typed tuple rows)"},
+    {"segment_fd", segment_fd, METH_VARARGS,
+     "segment_fd(segName) -> duplicated memfd for inspection, or None for /dev/shm"},
     {"column", column_from_buffers, METH_VARARGS,
      "column(name, kind, pgtype, nrows, data, bytes, nulls) -> Column over caller-owned buffers"},
     {"decode_frame", decode_frame, METH_VARARGS,

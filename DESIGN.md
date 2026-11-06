@@ -656,3 +656,114 @@ the change is the semantics, not a new speed record.
   winning bytes into the scalar frame; a value larger than the ring's segment
   fails with `reduce: result does not fit the segment` rather than falling
   back. That is the same capacity contract as the columnar frame.
+
+# Sealed-memfd data segments: the default
+
+Status: default. `FASTPOSTGRES_MEMFD=0` (or `off`/`false`/`no`) restores the
+named `/dev/shm/<seg>` data segment. The measurement and the test matrix are in
+`bench/results/ws-memfd-default-ab.log`.
+
+## Why
+
+The data segment used to be a named `/dev/shm/<seg>` file. That made every
+reader's trust boundary a mode bit: the worker had to widen the file to 0666 so
+a client running as another user could map it, and any local process that could
+open the name could also read (or, depending on the ring, drive) the segment.
+The ring's control segment stays 0600 and is still a named file; the payload no
+longer has to be.
+
+## Mechanism
+
+For each data segment the worker:
+
+1. `memfd_create("fastpostgres-seg", MFD_CLOEXEC | MFD_ALLOW_SEALING)`,
+2. one `ftruncate` to the capacity the client asked for,
+3. `mmap` read-write and `MADV_HUGEPAGE` before the first write,
+4. `F_ADD_SEALS(F_SEAL_SHRINK | F_SEAL_GROW)`,
+5. `sendmsg(SCM_RIGHTS)` on the ring's existing AF_UNIX `SOCK_SEQPACKET`
+   handoff connection.
+
+The client maps the descriptor read-only, keeps the mapping (and the memfd
+descriptor) for the process lifetime, and revalidates the header per batch. A
+request that grows past the sealed capacity makes the worker replace the object
+and send a new descriptor with a new handoff generation; the client's cache sees
+the generation and remaps. There is no path that widens an existing object, so
+a reader's size and identity cannot change under it.
+
+`F_SEAL_WRITE` is deliberately not set: the ring recycles one mapping for every
+batch, and a write seal would fault the next publish. Shrink/grow are the seals
+that matter to a reader.
+
+## Authentication
+
+The handoff socket is a second trust boundary, because the descriptor (not a
+path) is what the client maps. Both ends check `SO_PEERCRED`:
+
+- the worker connects to the client's abstract address and only sends
+  descriptors when the peer pid is the ring's `client_pid`; a mismatch logs once
+  and keeps the `/dev/shm` path;
+- the client accepts the queued connection and only registers it when the peer
+  pid is the worker pid the worker published (`srv_pid`) before `worker_ready`.
+
+`GET_SEALS`/`ftruncate` are exposed to the regression test through
+`_client.segment_fd(seg)`; the test proves both seal bits and that shrinking and
+growing are refused with `EPERM`.
+
+## Fallback, never silent
+
+The named segment remains for the cases that need it:
+
+- `FASTPOSTGRES_MEMFD=0` (cross-user clients, debugging, a kernel without
+  sealing);
+- the eventfd engine, whose pool worker polls many rings and has no per-worker
+  handoff socket/segment cache. Instead of opening a listener the pool will
+  never connect to (and then reading `/dev/shm` after a 2 s accept), the client
+  now chooses `/dev/shm` before the bootstrap and emits one `RuntimeWarning`.
+  The whole suite is green in that mode;
+- a failed `memfd_create`/`ftruncate`/`mmap`/`F_ADD_SEALS`/handoff. The worker
+  logs the reason once and creates the named segment; it does not hand over an
+  unsealed object.
+
+## What the measurement says
+
+Same command, baseline vs this branch, three alternating runs per size, plus a
+`fpq-transport` (merge/transport) control on the same host. Medians:
+
+| cell | baseline | change | delta |
+|---|---|---|---|
+| 100K stream() zero-copy | 8.14M | 9.02M | +10.8% |
+| 100K DBAPI | 3.62M | 7.64M | +111.0% |
+| 100K core | 3.56M | 7.49M | +110.4% |
+| 100K 4 processes | 8.52M | 23.44M | +175.1% |
+| 3K stream() zero-copy | 6.21M | 11.02M | +77.5% |
+| 3K DBAPI | 7.35M | 10.62M | +44.5% |
+| 3K core | 4.80M | 5.21M | +8.5% |
+| 3K 4 processes | 3.82M | 4.35M | +13.9% |
+
+The baseline is `main`, so those gains are mostly the merge/transport work this
+branch builds on. Against `fpq-transport` (the actual base, same host) the
+medians overlap: 100K stream 9.02M vs 9.03M, DBAPI 7.64M vs 7.85M, core 7.49M
+vs 7.66M, 4 processes 23.44M vs 23.07M; the 3K stream/DBApi cells are inside
+that host's spread. **The default memfd costs nothing measurable.** The 3K read
+stays below baseline latency, where the data-segment handoff is a larger share
+of the work.
+
+## What remains
+
+- **eventfd + memfd.** The eventfd pool could carry memfds too, but `shm.c`'s
+  segment cache and handoff socket are per-worker globals today. Supporting it
+  needs a per-ring handoff registry (and a per-ring segment cache key) in the
+  pool. Until then the fallback is explicit, not silent.
+- **Cross-user clients.** The memfd default assumes the client and worker can
+  pass descriptors and that the worker's peer is the client pid; the named
+  0666 segment remains the cross-user answer. A same-UID check is not enforced
+  on the client side because the kernel already scopes abstract-socket delivery
+  and the pid check is the stronger statement.
+- **Descriptor lifetime.** The client keeps one memfd per mapped segment for
+  the process lifetime so `segment_fd()` can inspect the seal. That is a few
+  descriptors per ring; tying it to the ring's teardown would let a long-lived
+  process that churns ring names reclaim them.
+- **Seal diagnostics.** `F_ADD_SEALS` failure is logged once per worker and
+  falls back. A future version could expose the chosen backing in the ring
+  header so a tool can see which path a running ring took without looking at
+  `/dev/shm`.

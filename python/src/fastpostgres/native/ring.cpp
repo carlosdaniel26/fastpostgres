@@ -26,6 +26,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <strings.h>
 
 #include "connection.hpp"
 #include "fastpostgres/fastpostgres_shm.h"
@@ -43,6 +44,22 @@
 #define RING_READY_MS 10000
 #define RING_POST_MS  1000
 #define RING_STOP_MS  1000
+
+/* Sealed-memfd data segments are the default. The named /dev/shm segment is
+ * still reachable: FASTPOSTGRES_MEMFD=0 (or off/false/no) selects it, and it
+ * is also the automatic fallback when the listener or the worker's handoff is
+ * unavailable. A client that runs as a different user than the server needs
+ * the named segment, so the opt-out is part of the contract, not a debug
+ * switch. */
+static bool
+ring_memfd_enabled(void)
+{
+    const char *v = getenv("FASTPOSTGRES_MEMFD");
+
+    if (v == nullptr || v[0] == 0) return true;
+    return strcasecmp(v, "0") != 0 && strcasecmp(v, "off") != 0 &&
+           strcasecmp(v, "false") != 0 && strcasecmp(v, "no") != 0;
+}
 
 /* An OSError carrying the engine's errno text: a failed sem_post or wait. */
 static void
@@ -219,12 +236,10 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
-    /* Sealed-memfd data segments are opt-in (FASTPOSTGRES_MEMFD=1). The default
-     * stays the named /dev/shm segment, which is what a client running as a
-     * different user than the server needs. */
-    const char *memfd_env = getenv("FASTPOSTGRES_MEMFD");
-
-    self->memfd     = memfd_env != nullptr && memfd_env[0] != 0 && memfd_env[0] != '0';
+    /* The sealed-memfd data segment is the default; FASTPOSTGRES_MEMFD=0 keeps
+     * the named /dev/shm file, which is what a client running as a different
+     * user than the server needs. */
+    self->memfd     = ring_memfd_enabled();
     self->fd_listen = -1;
     self->fd_sock   = -1;
 
@@ -481,11 +496,36 @@ Ring_start(RingObject *self, PyObject *conn)
     /* Before the worker starts: publish where it should connect to hand over
      * its data segment. If the listener cannot be made, the ring falls back to
      * the named segment without failing the session. */
+    if (self->memfd && self->ops->id == FASTPOSTGRES_TRANSPORT_EVENTFD)
+    {
+        /* The eventfd pool's worker never runs the per-worker memfd handoff
+         * (shm.c keeps one socket and one segment cache for a 1:1 worker).
+         * Asking for it here would make the client wait for a connection that
+         * never comes and then read /dev/shm anyway, so choose the fallback up
+         * front and say so. */
+        if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                         "fastpostgres: memfd data segments are not supported by the eventfd "
+                         "engine; using /dev/shm",
+                         1) < 0)
+        {
+            ring_unclaim(self);
+            return nullptr;
+        }
+        self->memfd           = 0;
+        self->ring->fd_handoff = 0;
+        self->ring->fd_pathlen = 0;
+    }
     if (self->memfd && self->fd_sock < 0 && ring_listen(self) != 0)
     {
         self->memfd           = 0;
         self->ring->fd_handoff = 0;
         self->ring->fd_pathlen = 0;
+        if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                         "fastpostgres: cannot listen for the memfd handoff; using /dev/shm", 1) < 0)
+        {
+            ring_unclaim(self);
+            return nullptr;
+        }
     }
 
     /* The bootstrap asks the server to register the worker over libpq, as it
@@ -553,9 +593,34 @@ Ring_start(RingObject *self, PyObject *conn)
 
             if (s >= 0)
             {
-                fcntl(s, F_SETFD, FD_CLOEXEC);
-                self->fd_sock = s;
-                fp_handoff_register(s);
+                /* The accept is authenticated: the descriptor stream is a
+                 * second trust boundary (the memfd, not a 0666 name). The
+                 * worker publishes its pid before worker_ready, so a peer that
+                 * is not that process is refused. A legitimate worker is the
+                 * only one that can be connected at this point; an attacker
+                 * gets the /dev/shm fallback on the worker side instead. */
+                uint32_t srv = __atomic_load_n(&self->ring->srv_pid, __ATOMIC_ACQUIRE);
+#ifdef SO_PEERCRED
+                struct ucred cred;
+                socklen_t    clen = sizeof(cred);
+                int          ok   = getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0;
+
+                if (!ok || (srv != 0 && (uint32_t)cred.pid != srv))
+                {
+                    PySys_WriteStderr("fastpostgres: fd handoff peer is not the ring's worker; "
+                                      "falling back to /dev/shm\n");
+                    close(s);
+                    s = -1;
+                }
+#else
+                (void)srv;
+#endif
+                if (s >= 0)
+                {
+                    fcntl(s, F_SETFD, FD_CLOEXEC);
+                    self->fd_sock = s;
+                    fp_handoff_register(s);
+                }
             }
         }
         close(self->fd_listen);

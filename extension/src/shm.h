@@ -2,9 +2,10 @@
  *
  * A worker keeps one mapping per segment name for its lifetime. The default
  * backing is an anonymous sealed memfd handed to the client once over an
- * AF_UNIX socket (ring.h fd_handoff); the original /dev/shm/<seg> file is the
- * fallback when the client did not ask for the handoff, or the kernel cannot
- * make a memfd.
+ * AF_UNIX socket (ring.h fd_handoff); the socket's peer is authenticated with
+ * SO_PEERCRED. The original /dev/shm/<seg> file is the fallback when the client
+ * opted out (FASTPOSTGRES_MEMFD=0), uses the eventfd engine, or the kernel
+ * cannot make a sealed memfd; the reason is logged once, never silent.
  */
 #ifndef FASTPOSTGRES_SHM_UTIL_H
 #define FASTPOSTGRES_SHM_UTIL_H

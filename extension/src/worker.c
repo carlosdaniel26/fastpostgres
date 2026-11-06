@@ -14,10 +14,12 @@
  * and multiplexing it onto an existing one only when the budget is spent.
  *
  * SECURITY: the ring is an SQL-execution endpoint — any local process that can
- * open /dev/shm/<seg> can execute SQL through it. The client creates the segment
- * 0600; fastpostgres_shm_map_rw widens it to 0666 (shm.c) so a client running as
- * a different user can map it. Keep the segment name out of shared trees and
- * treat the segment itself as the boundary. Not for production.
+ * open /dev/shm/<seg> can execute SQL through it. The client creates the control
+ * segment 0600. Data segments default to sealed memfds handed over SCM_RIGHTS on
+ * a socket whose peer is checked with SO_PEERCRED (shm.c); the /dev/shm fallback
+ * is still widened to 0666 so a client running as a different user can map it.
+ * Keep the segment name out of shared trees and treat the segment itself as the
+ * boundary. Not for production.
  */
 #include "postgres.h"
 

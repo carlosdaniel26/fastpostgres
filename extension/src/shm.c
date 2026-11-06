@@ -12,12 +12,17 @@
  * two seals that matter for a reader: the object's size and identity cannot
  * change under it.
  *
+ * The handoff socket is authenticated with SO_PEERCRED: only the ring's owning
+ * client pid may receive descriptors, and the client checks the worker pid
+ * before it accepts the stream.
+ *
  * The original /dev/shm/<seg> protocol is the fallback, used when the client
- * did not ask for a handoff or the kernel cannot make a memfd (ENOSYS). It
- * keeps its 0666 widening there, because a client running as a different user
- * still has to reach it. Both paths keep one mapping per segment name for the
- * worker's lifetime; the old code mapped and unmapped the whole segment on
- * every batch.
+ * opted out (FASTPOSTGRES_MEMFD=0), asked for the eventfd engine (whose pool
+ * worker has no per-worker handoff), or the kernel cannot make a sealed memfd.
+ * It keeps its 0666 widening there, because a client running as a different
+ * user still has to reach it. A fallback is logged once, never silent. Both
+ * paths keep one mapping per segment name for the worker's lifetime; the old
+ * code mapped and unmapped the whole segment on every batch.
  */
 #include "postgres.h"
 
@@ -61,6 +66,7 @@ static FastpostgresWorkerSeg worker_segs[FASTPOSTGRES_WORKER_SEGS];
 static int                   worker_nsegs;
 static int                   worker_memfd;
 static int                   worker_fd_sock = -1;
+static int                   worker_memfd_warned;
 
 char *
 fastpostgres_shm_path(const char *seg)
@@ -127,8 +133,21 @@ seg_destroy(FastpostgresWorkerSeg *s)
     s->path[0] = 0;
 }
 
+/* Say once why the memfd path could not be used. The fallback itself is
+ * normal (an old kernel, a client that opted out); repeating it per segment
+ * would drown the log. */
+static void
+memfd_fallback_warn(const char *why)
+{
+    if (worker_memfd_warned) return;
+    worker_memfd_warned = 1;
+    elog(WARNING, "fastpostgres: sealed memfd unavailable (%s); data segments use /dev/shm", why);
+}
+
 /* Fill `s` with one segment: a sealed memfd first, /dev/shm only if the memfd
- * (or handing it over) is not possible. */
+ * (or handing it over) is not possible. The fallback is deliberate and said
+ * once, never silent: a client that believes it has a sealed object must not
+ * be handed a named one without a record. */
 static int
 seg_fill(FastpostgresWorkerSeg *s, const char *path, size_t size, size_t *cap_out)
 {
@@ -139,20 +158,27 @@ seg_fill(FastpostgresWorkerSeg *s, const char *path, size_t size, size_t *cap_ou
 
     if (worker_memfd)
     {
-        int   fd = memfd_create("fastpostgres-seg", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-        void *map;
+        int         fd  = memfd_create("fastpostgres-seg", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        void       *map = MAP_FAILED;
+        const char *why = NULL;
 
-        if (fd >= 0 && ftruncate(fd, (off_t)size) == 0 &&
-            (map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED)
+        if (fd < 0)
+            why = "memfd_create";
+        else if (ftruncate(fd, (off_t)size) != 0)
+            why = "ftruncate";
+        else if ((map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)
+            why = "mmap";
+        else
         {
             (void)madvise(map, size, MADV_HUGEPAGE); /* before the first write */
 
             /* The size and the object stay fixed; writes stay allowed because
-             * the worker rewrites this same mapping for the next batch. */
+             * the worker rewrites this same mapping for the next batch. An
+             * unsealed object is not the contract, so it falls back rather
+             * than being handed over with a warning. */
             if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) != 0)
-                elog(WARNING, "fastpostgres: F_ADD_SEALS failed: %m");
-
-            if (handoff_send(name, fd, size) == 0)
+                why = "F_ADD_SEALS";
+            else if (handoff_send(name, fd, size) == 0)
             {
                 snprintf(s->path, sizeof(s->path), "%s", path);
                 s->fd  = fd;
@@ -161,9 +187,12 @@ seg_fill(FastpostgresWorkerSeg *s, const char *path, size_t size, size_t *cap_ou
                 *cap_out = size;
                 return 0;
             }
+            else
+                why = "fd handoff";
             munmap(map, size);
         }
         if (fd >= 0) close(fd);
+        if (why != NULL) memfd_fallback_warn(why);
 
         /* A descriptor is not coming for this segment: tell the client now so
          * it maps /dev/shm instead of spending its handoff wait. */
@@ -232,6 +261,36 @@ fastpostgres_shm_map_rw(const char *path, size_t size, size_t *cap_out)
     return NULL;
 }
 
+/* The handoff socket is a second trust boundary: its abstract address is
+ * reachable by any local process, and whatever is sent over it becomes the
+ * client's mapped object. The worker verifies the peer is the process that
+ * owns the ring before it sends a descriptor; a mismatch keeps the named
+ * /dev/shm path, which the ring's lifecycle already governs. */
+static int
+handoff_peer_ok(int s, const FastpostgresRing *ring)
+{
+#ifdef SO_PEERCRED
+    struct ucred cred;
+    socklen_t    len = sizeof(cred);
+
+    if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0)
+    {
+        elog(WARNING, "fastpostgres: fd handoff SO_PEERCRED failed: %m; using /dev/shm");
+        return 0;
+    }
+    if (ring->client_pid != 0 && cred.pid != (pid_t)ring->client_pid)
+    {
+        elog(WARNING, "fastpostgres: fd handoff peer pid %d is not the ring's client %u; using /dev/shm",
+             (int)cred.pid, ring->client_pid);
+        return 0;
+    }
+#else
+    (void)s;
+    (void)ring;
+#endif
+    return 1;
+}
+
 void
 fastpostgres_shm_worker_begin(FastpostgresRing *ring)
 {
@@ -245,18 +304,27 @@ fastpostgres_shm_worker_begin(FastpostgresRing *ring)
         struct sockaddr_un addr;
         socklen_t          len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + ring->fd_pathlen);
         int                s   = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        int                rc;
 
         if (s < 0) return;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
         memcpy(addr.sun_path, ring->fd_path, ring->fd_pathlen);
-        if (connect(s, (struct sockaddr *)&addr, len) == 0)
+        rc = connect(s, (struct sockaddr *)&addr, len);
+        if (rc == 0 && handoff_peer_ok(s, ring))
         {
+            /* The client's accept checks this pid, and it must be visible
+             * before worker_ready. */
+            __atomic_store_n(&ring->srv_pid, (uint32_t)getpid(), __ATOMIC_RELEASE);
             worker_fd_sock = s;
             worker_memfd   = 1;
         }
         else
+        {
+            if (rc != 0)
+                elog(WARNING, "fastpostgres: fd handoff connect failed: %m; using /dev/shm");
             close(s);
+        }
 
         /* If the connect fails, worker_memfd stays 0 and both sides use
          * /dev/shm: the client's accept times out and it maps by name. */
