@@ -272,7 +272,7 @@ columnar_write_row(ColumnPlan *plans, int ncols, uint64 r, Datum *vals, bool *is
     int c;
 
     for (c = 0; c < ncols; c++)
-        plans[c].checkpoint = plans[c].varlena ? plans[c].text_p : NULL;
+        if (plans[c].varlena) plans[c].checkpoint = plans[c].text_p;
 
     for (c = 0; c < ncols; c++)
     {
@@ -737,18 +737,40 @@ columnar_layout(ColumnarReceiver *rx, uint64 want)
     columnar_flush_samples(rx);
 }
 
+/* Does writing this row need a temporary context? Only a value that has to be
+ * detoasted, or one whose type goes through its output function, allocates;
+ * plain inline text and every fixed-width value are copied straight from the
+ * slot. Avoids a memory-context switch and reset per row on the common shape. */
+static bool
+columnar_row_needs_tmp(ColumnarReceiver *rx, Datum *vals, bool *isnull)
+{
+    int c;
+
+    for (c = 0; c < rx->ncols; c++)
+    {
+        ColumnPlan *pl = &rx->plans[c];
+
+        if (!pl->varlena || isnull[c]) continue;
+        if (pl->typoutput != InvalidOid) return true;
+        if (VARATT_IS_EXTERNAL(DatumGetPointer(vals[c])) ||
+            VARATT_IS_COMPRESSED(DatumGetPointer(vals[c])))
+            return true;
+    }
+    return false;
+}
+
 static bool
 columnar_receive(TupleTableSlot *slot, DestReceiver *self)
 {
     ColumnarReceiver *rx  = (ColumnarReceiver *)self;
-    MemoryContext     old = MemoryContextSwitchTo(rx->rowctx);
-    bool              ok  = true;
+    MemoryContext     old = NULL;
+    bool              tmp = false;
 
     if (!rx->laid_out && rx->nsample < COLUMNAR_SAMPLE_ROWS)
     {
         rx->samples[rx->nsample++] = columnar_slot_tuple(rx, slot);
         if (rx->nsample == COLUMNAR_SAMPLE_ROWS) columnar_layout(rx, rx->want);
-        goto done;
+        return true;
     }
 
     if (rx->laid_out)
@@ -759,24 +781,28 @@ columnar_receive(TupleTableSlot *slot, DestReceiver *self)
             /* the frame is full: keep this row (it is already the executor's to
              * drop) and stop the scan, so the next request continues from it */
             columnar_enqueue_slot(rx, slot);
-            ok = false;
-            goto done;
+            return false;
         }
 
         slot_getallattrs(slot);
+        tmp = columnar_row_needs_tmp(rx, slot->tts_values, slot->tts_isnull);
+        if (tmp) old = MemoryContextSwitchTo(rx->rowctx);
+
         if (!columnar_write_row(rx->plans, rx->ncols, rx->nrows, slot->tts_values, slot->tts_isnull))
         {
+            if (tmp) MemoryContextSwitchTo(old);
             columnar_enqueue_slot(rx, slot);
-            ok = false;
-            goto done;
+            return false;
         }
         rx->nrows++;
     }
 
-done:
-    MemoryContextSwitchTo(old);
-    MemoryContextReset(rx->rowctx);
-    return ok;
+    if (tmp)
+    {
+        MemoryContextSwitchTo(old);
+        if (MemoryContextMemAllocated(rx->rowctx, false) > 0) MemoryContextReset(rx->rowctx);
+    }
+    return true;
 }
 
 static void
