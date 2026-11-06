@@ -63,6 +63,31 @@ just rivals clickbench --reps 3         # fastest of three per query
 just rivals clickbench --only Q1 Q7     # a subset
 ```
 
+## First record
+
+1,000,000 rows, 4 clients of each player, one rep, medians of the clients'
+fastest runs. Record: [`results/clickbench.log`](results/clickbench.log).
+
+| player | q/s | rows/s |
+| --- | ---: | ---: |
+| fast-postgres | 6.7 | 46 |
+| ADBC + Arrow | 8.9 | 62 |
+| psycopg 3 | 9.0 | 62 |
+
+**The ring loses here, by about 25%**, and the reason is in the query set
+rather than in the transport: 41 of the 43 queries return a handful of
+aggregated rows, so there is almost nothing to deliver — the executor and the
+parse do the work, and the ring's per-statement cost (a stream opened and
+closed, a worker woken) is pure overhead against a backend that already has the
+plan cached. The two queries that do return rows (Q33-Q35's wide scans) are
+where the ring closes the gap and, on the first two, leads.
+
+That is the finding, and it is worth more than the ratio would have been if the
+workload had been chosen to flatter the driver: ClickBench answers "how fast is
+this engine at analytics", and on that question the ring is a delivery layer
+with an execution cost attached. It is the right number to publish next to the
+read-path one, not instead of it.
+
 ## Adaptations
 
 Deviations from upstream's own runner, stated rather than hidden:
