@@ -8,14 +8,8 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 
 | record | what it is | the argument it backs |
 |---|---|---|
-| `main-final-ab.log` | the integrated tree against the untouched baseline, 100K / 1M / 10M, both shapes | [`README.md`](../README.md#measured-results) |
-| `integration-backlog-ab.log` | the nine backlog workstreams merged into one tree, against the baseline | [`INTEGRATION.md`](../INTEGRATION.md) |
 | `fastpostgres-vs-arrow.log`, `-mixed`, `-small` | the read against ADBC + Arrow, at three sizes and two shapes | [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
 | `fastpostgres-vs-arrow-memory.log` | the same reads with the ring's buffer fixed: what each side held | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
-| `codec-transport.log` | the codec x transport matrix: format cost and transport cost, separated | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) |
-| `cache-stat.log` | the host PMU's counters: decodes per row, transports per KiB | [`NOTES.md`](NOTES.md) |
-| `client-scaling.log` | the client itself, on its consumption paths, one shared-memory partition per worker | [`NOTES.md`](NOTES.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
-| `client-scaling-nogil.log` | the same cell plus the client suite on the free-threaded interpreter (3.13t) | [`NOTES.md`](NOTES.md) |
 | `adoption-magicstack-pgbench.log` | a published suite's own seven queries and protocol, with our cell in its roster: MagicStack/pgbench, vendored at a pin | [`ADOPTION.md`](ADOPTION.md) |
 
 ## Housing rules

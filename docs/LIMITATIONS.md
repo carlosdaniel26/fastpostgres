@@ -29,7 +29,6 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 - **Concurrency.** One stream at a time per ring; several processes are shown as
   one aggregate row, not as a latency distribution. No mixed read/write workload
   is measured. The client's thread and asyncio scaling is measured on its own
-  (`just internals client-scaling`), not through the rival benchmark.
 - **The asyncio layer.** A thread-per-connection facade: each connection's tier
   thread runs the blocking ring waits with the GIL released, so the event loop
   stays live, but concurrency is capped by the ring pool. No `PQcancel` yet —
@@ -40,7 +39,6 @@ shape) and [`fastpostgres-vs-arrow-small.log`](../bench/results/fastpostgres-vs-
 - **What parallelizes, and what does not.** With one ring per thread, the paths
   that never build a Python object per row scale: `Cursor.aggregate` (the C++
   reduce) +340%, a numpy reduction +367%, and one process per worker +386% at six
-  workers (`bench/results/client-scaling.log`). Python-tuple materialization is
   the DB-API compatibility path and is not benchmarked: it holds the GIL, and it
   scales only on a free-threaded interpreter (`just nogil`, which also runs the
   whole client suite on CPython 3.13t).

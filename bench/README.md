@@ -3,9 +3,7 @@
 The claim's tree. It holds the apparatus (the harnesses, the dispatchers, the
 chart scripts, the image jobs), the arguments the measurements are for
 ([`WHY-IT-WINS.md`](WHY-IT-WINS.md),
-[`ARROW-MEMORY.md`](ARROW-MEMORY.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md)),
 the method and its threats ([`METHODOLOGY.md`](METHODOLOGY.md)), the lab
-notebook ([`NOTES.md`](NOTES.md)), and the records themselves.
 
 Every number the project quotes is a line in a committed log under
 [`results/`](results/) with a `git:` stamp of the commit it was produced from;
@@ -51,18 +49,11 @@ just rivals cache --quick
 
 These are not benchmarks of the product. They are the meters behind
 [`WHY-IT-WINS.md`](WHY-IT-WINS.md) and
-[`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) - how many instructions a row costs,
 which ports the decode loop uses, what a format costs versus what a transport
 costs - and their results live in the lab notebook rather than in this catalog.
 
 | target | the meter | results in |
 |---|---|---|
-| `decode-cycles` | TSC cycles per row on a fixed shape | [`NOTES.md`](NOTES.md) |
-| `decode-ir` | dynamic instructions, branch and cache misses, IPC (callgrind; profile image) | [`NOTES.md`](NOTES.md) |
-| `decode-mca` | the decode loop's ports and latency, modeled offline (llvm-mca; profile image) | [`NOTES.md`](NOTES.md) |
-| `codec-transport` | format cost and transport cost, separated (2x2 matrix) | [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md), [`codec-transport.log`](results/codec-transport.log) |
-| `cache-stat` | decodes per row and transports per KiB, from the host's PMU | [`cache-stat.log`](results/cache-stat.log) |
-| `client-scaling` | the client itself, on its consumption paths (C++ aggregate, numpy columnar, asyncio, processes), one shared-memory partition per worker | [`client-scaling.log`](results/client-scaling.log), [`client-scaling-nogil.log`](results/client-scaling-nogil.log) |
 
 ## Charts: `just charts [target]`
 
@@ -89,9 +80,6 @@ stay with each chart, because there the color carries the reading.
 |---|---|
 | `just bench` (ADBC + Arrow) | `just rivals adbc` |
 | `just arrow-memory-bench` | `just rivals arrow-memory` |
-| `just decode-cycles`, `-ir`, `-mca` | `just internals decode-cycles` … |
-| `just codec-transport` | `just internals codec-transport` |
-| `just cache-stat` | `just internals cache-stat` |
 | `just charts`, `just codec-charts`, … | `just charts arrow`, `just charts codec`, … |
 
 ## Which numbers should I quote?

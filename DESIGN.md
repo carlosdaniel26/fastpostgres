@@ -823,7 +823,6 @@ semaphore sleep.
 
 The map-cache workstream removed the worker's per-batch `shm_open`/`mmap`
 cost. At a 3000-row fetch the worker still paid a visible fixed cost, and
-bench/NOTES.md ("Where the time is now") priced it at ~25 us. Instrumenting
 `ring.next_rows()` on the base tree splits the worker's 261.3 us per fetch:
 
 | phase | us/fetch |
@@ -998,7 +997,6 @@ forever.
 
 ## What the measurement says
 
-Driver: `bench/internals/threads/ring_scaling.py`, N processes × one ring ×
 three object-free reads (`Cursor.aggregate`, columnar batches reduced in C++,
 no Python object per row), 100k rows per read, batch 25k. Six interleaved
 pairs of container runs, 3 reps per setting per run; the table is the median

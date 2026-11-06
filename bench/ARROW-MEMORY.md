@@ -80,7 +80,6 @@ it does not draw is the reader process's own footprint:
   never needs a buffer larger than this, whatever the result's size".
 - RSS is a footprint reading, not a budget: the interpreter, numpy, pyarrow and
   the driver are in it, and shared/mapped pages are counted per process (the
-  caveat is spelled out in [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md)).
 - The Arrow batch size is the driver's own choice. `adbc.postgresql.batch_size_hint_bytes`
   is the knob — a *statement* option (it is refused as a database option), so a
   harness that wants a different batch size must set it on the statement, and a

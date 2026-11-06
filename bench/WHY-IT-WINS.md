@@ -18,7 +18,6 @@ product, and the one time the ecosystem tried, it built the idea outside Arrow
 and then removed it from Arrow on purpose.
 
 Everything numeric below is from the two logs committed in this repository
-(`bench/results/codec-transport.log` for the format and transport isolation matrix,
 `bench/results/fastpostgres-vs-arrow.log` for the query-level comparison), measured on one
 machine with the versions in the footers: PostgreSQL 18, pyarrow 26.0.0, ADBC
 1.13.0. Where a claim is *not* measured, the text says so. The list of things
@@ -216,8 +215,6 @@ a 1133× range) moves the columnar path from 10.5 to 16.7 cycles/row: it is a
 sequential stream the prefetcher keeps fed, not a working set that fits in cache.
 At 1M rows about 1.2 lines per row come from L3 or beyond, and it still
 costs 17 cycles — the flatness is the result, not residency. The meter is
-`just cache-stat`, the run is `bench/results/cache-stat.log`, and the analysis is the
-cache section of [`NOTES.md`](NOTES.md).
 
 Arrow is zero-copy too, in the part of the path people usually mean: wrapping
 existing buffers in arrays costs nothing, and the record-batch wrap is counted as
@@ -286,7 +283,6 @@ throughput falls back and the median grows roughly linearly with the window,
 because what it then measures is queueing. So the protocol is not optimal for
 throughput; it is optimal for *latency*, which is what the query path needs, since
 it is not transport-bound. `transport_bench --in-flight N` is the experiment, and
-the sweep is in [`NOTES.md`](NOTES.md).
 
 **Costs:** same host only; the segment itself is the interface, so its
 permissions and lifetime are the security boundary (same user, single host, an
@@ -420,12 +416,10 @@ answering in public.
 ## 8. How to check all of it yourself
 
 ```bash
-just codec-transport      # the 2x2 matrix: format and transport, isolated
 just codec-charts         # the four figures from that log
 just bench                # the query-level comparison against ADBC + Arrow
 ```
 
-Then read, in this order: [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md) for the
 method and the "what the first run was actually measuring" section,
 [`METHODOLOGY.md`](METHODOLOGY.md) for the claims-to-evidence table, and
 [`LIMITATIONS.md`](../docs/LIMITATIONS.md) for what is not claimed.

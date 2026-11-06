@@ -85,7 +85,6 @@ and running the combined tree:
 - the OS columnar store attach and its mapped reduce (`segment.cpp`,
   `aggregate.cpp`) — the OS store is still a separate, opt-in path, while the
   ring owns the v3 frame;
-- the compilers deformer (`bench/internals/codec_transport/fpg_codec.cpp`);
 - the client-side reduce (`aggregate.cpp` / `fp_segment_payload`).
 
 No reader was left on a v2 `data_len` walk, so no branch had to be dropped for
@@ -120,7 +119,6 @@ exercised, not assumed.
 ## Benchmarks
 
 Full commands, raw ENV blocks and both images' output are in
-`bench/results/integration-backlog-ab.log`.
 
 | cell (rows/s) | baseline | integration | delta |
 |---|---:|---:|---:|

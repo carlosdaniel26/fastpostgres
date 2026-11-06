@@ -5,7 +5,6 @@
 #
 #   just rivals [target]     the competitive comparisons: ADBC + Arrow, and a
 #   just internals [target]  the meters behind the design notes: decode cycles /
-#                            IR / ports, the codec x transport matrix, PMU counters
 #   just adoption [target]   a published third-party suite, on its own terms:
 #                            MagicStack's pgbench, with our cell in its roster
 #   just charts [target]     one figure per log
@@ -60,26 +59,13 @@ _run *args:
     just _image
     docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e PG_OPTS={{env("PG_OPTS", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}} {{args}}
 
-# the same, in the profile image (callgrind and llvm-mca live there)
-[private]
-_run_profile *args:
-    just _image_profile
-    docker run --rm --shm-size={{shm}} -e MCA_CPU={{env("MCA_CPU", "")}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-profile {{args}}
 
 # build the free-threaded image: the client compiled for CPython 3.13t
 [private]
 _image_nogil:
     docker build -q --target nogil -t {{image}}-nogil -f docker/Dockerfile . >/dev/null
 
-# the same, in the free-threaded image (no GIL: the client's decode parallelizes)
-[private]
-_run_nogil *args:
-    just _image_nogil
-    docker run --rm --shm-size={{shm}} -e SHAPE={{env("SHAPE", "")}} -e BENCH_GIT_REV={{gitrev}} {{image}}-nogil {{args}}
 
-# the client suite and the scaling cell under the free-threaded interpreter
-nogil *args:
-    just _run_nogil client-nogil.sh {{args}}
 
 # both test suites: the extension's SQL surface (pg_regress) and the client's
 test:
@@ -89,9 +75,6 @@ test:
 rivals target="" *args:
     bench/dispatch/rivals.sh {{target}} {{args}}
 
-# the meters behind the design notes: decode-cycles | decode-ir | decode-mca | codec-transport | cache-stat
-internals target="" *args:
-    bench/dispatch/internals.sh {{target}} {{args}}
 
 # a published third-party suite, on its own terms: magicstack-pgbench
 adoption target="" *args:
@@ -101,7 +84,7 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: arrow | arrow-memory | codec | ab
+# one figure per log: arrow | arrow-memory
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
 
@@ -122,39 +105,11 @@ arrow-memory-bench *args:
     bench/harness/arrow_memory_bench.sh {{args}}
 
 
-# the row decode's TSC cycles/row on a fixed shape (internals decode-cycles)
-[private]
-decode-cycles *args:
-    just _run decode-cycles.sh {{args}}
 
-# the decode's dynamic instructions and miss profile (internals decode-ir)
-[private]
-decode-ir *args:
-    just _run_profile decode-ir.sh {{args}}
 
-# the decode loop's ports and latency, modeled offline (internals decode-mca)
-[private]
-decode-mca *args:
-    just _run_profile decode-mca.sh {{args}}
 
-# cache counters on the host's PMU (internals cache-stat)
-[private]
-cache-stat *args:
-    bench/jobs/cache-stat.sh {{args}}
 
-# the client's own scaling: threads and asyncio, one partition per worker
-# (internals client-scaling)
-[private]
-client-scaling *args:
-    just _run client-scaling.sh {{args}}
 
-# the codec x transport isolation matrix (internals codec-transport): sequential
-# by construction (bench/CODEC-TRANSPORT.md); writes bench/results/codec-transport.log as
-# the invoking user so the log is writable
-[private]
-codec-transport *args:
-    just _image
-    docker run --rm --shm-size={{shm}} --entrypoint python3 --user "$(id -u):$(id -g)" -e BENCH_GIT_REV={{gitrev}} -v {{justfile_directory()}}:/src -w /src {{image}} bench/internals/codec_transport/run_matrix.py {{args}}
 
 # the adopted suite in the dev image (adoption magicstack-pgbench): the suite's
 # own protocol over its Python roster, with our cell added to that roster

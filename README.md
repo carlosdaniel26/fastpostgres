@@ -75,7 +75,6 @@ on demand, and `fetchall(force_tuples=True)` when a plain list is required.
 
 ## Measured results
 
-All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md). The read-path headline below is the integrated run in [`bench/results/main-final-ab.log`](bench/results/main-final-ab.log) (`main@a990ca5`, 100K/1M/10M).
 
 > **Headline: 625-655% of ADBC + Arrow** (6.25-6.55x) on the same columnar read, and **655-703%** on the `mixed` shape; `stream()` delivers 14.7-14.9M rows/s where ADBC + Arrow lands 2.3M.
 
@@ -159,7 +158,6 @@ Each command starts a throwaway PostgreSQL with the extension, runs, and exits. 
 | class | command | what it answers |
 |---|---|---|
 | rivals | `just rivals [adbc\|arrow-memory]` | how the ring compares with ADBC + Arrow, at its defaults and under a fixed memory budget |
-| internals | `just internals [decode-cycles\|decode-ir\|decode-mca\|codec-transport\|cache-stat\|client-scaling]` | what the row decode and the transport cost at the instruction, cache and port level, and how the client itself scales across threads, asyncio and processes |
 | adoption | `just adoption [magicstack-pgbench]` | what a published third-party suite's own queries and protocol find, with our cell in its roster |
 
 `just nogil` builds the client against free-threaded CPython 3.13t and runs the
@@ -232,7 +230,6 @@ An async read queues for a free partition (`wait=True`, the default) rather than
 dropping to libpq; the GIL still serializes the decode, so the win is many
 streams in flight, not a faster single read.
 
-Where the parallelism is, measured (`just internals client-scaling`): with one
 ring per thread, the consumption paths scale — `aggregate` (the C++ reduce) +340%,
 the numpy reduction +367%, one process per worker +386% at six workers. The
 benchmark measures those, not Python-tuple materialization: reading rows into

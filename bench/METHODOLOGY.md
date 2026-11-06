@@ -1,7 +1,6 @@
 # Measurement methodology
 
 What this repository measures, how, and what the numbers can and cannot support.
-`NOTES.md` is the decode's lab notebook; this file is the protocol for
 the benchmark and the record of its threats to validity.
 
 ## The claims
@@ -10,7 +9,6 @@ the benchmark and the record of its threats to validity.
 |---|---|---|
 | the columnar path is faster still, and faster than Arrow's columnar path | ZERO-COPY READ in the same log (3.6–3.8×) | `just rivals adbc` |
 | the ranking survives a harder data shape (NULLs, long text, non-ASCII) | ZERO-COPY READ in `bench/results/fastpostgres-vs-arrow-mixed.log` (3.6–4.1×) | `SHAPE=mixed just rivals adbc` |
-| the row decode is stall-bound rather than issue-bound, and the stalls are branch mispredictions and first-touch writes | Ir/row, mispredicts/row, D1/LL misses, IPC | `just decode-cycles`, `just decode-ir`, `just decode-mca` |
 
 ## Systems under test
 
@@ -107,14 +105,10 @@ pages. The `±` lines in each log show the *within-run* spread: typically under
   TOAST-heavy values are not — see
   [`LIMITATIONS.md`](../docs/LIMITATIONS.md) for the full list of what the benchmark
   does not cover and what happens in those cases.
-- **The decode meters are simulation.** `just decode-ir` runs callgrind, which
   simulates instructions and caches and never touches the PMU (which is also why
-  it runs inside the container); `just decode-mca` models an address span with
   llvm-mca, which does not predict branches and models calls at a flat 100
-  cycles. The IPC `decode-ir` prints is against TSC ticks, not core cycles.
 - **No PMU counters.** `perf stat` is unavailable in the container. The
   equivalents above are simulation-based or TSC-based, and the difference
-  matters — see `NOTES.md`.
 
 ## Reproducing
 
@@ -125,9 +119,6 @@ just bench 100000 1000000   # any sizes
 SHAPE=mixed just bench      # the harder data shape (NULLs, long and non-ASCII text)
 just charts                 # runs the benchmark and renders both charts
 just charts --log bench/results/fastpostgres-vs-arrow.log   # the committed run, re-rendered
-just decode-cycles          # the decode's TSC cycles/row (seconds)
-just decode-ir              # its dynamic instructions and miss profile (minutes)
-just decode-mca             # its ports and latency, modelled offline (seconds)
 ```
 
 The runs this repository quotes are committed at

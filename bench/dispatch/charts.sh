@@ -21,8 +21,6 @@ EOF
 case "$target" in
   arrow)        exec bench/charts/adbc.py "$@" ;;
   arrow-memory) exec bench/charts/arrow_memory.py "$@" ;;
-  codec)        exec bench/charts/codec.py "$@" ;;
-  ab)           exec bench/charts/ab.py "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "charts: unknown target '$target'" >&2
