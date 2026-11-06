@@ -18,6 +18,9 @@ typedef struct {
     int                             owned;     /* a thread holds the ring's open stream */
     unsigned long                   owner;     /* which thread that is */
     uint32_t                        pid;       /* the process that made the ring */
+    int                             fd_listen; /* memfd-handoff listener, or -1 */
+    int                             fd_sock;   /* accepted handoff connection, or -1 */
+    int                             memfd;     /* the client asked for memfd segments */
     char                            data[128]; /* the columnar segment of the current stream */
 } RingObject;
 

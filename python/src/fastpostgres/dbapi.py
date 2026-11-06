@@ -488,6 +488,10 @@ class ResultSet:
 # max_worker_processes. FASTPOSTGRES_SHM_POOL overrides it; 0 disables the
 # shared-memory path. FASTPOSTGRES_SEGMENT_BYTES sizes each of the two data
 # segments per ring (0 = the worker's 1 GiB default, clamped to 64 KiB-1 GiB).
+# FASTPOSTGRES_MEMFD=1 makes the worker back those segments with sealed memfds
+# and hand each descriptor to the client once over SCM_RIGHTS, instead of
+# widening a named /dev/shm file to 0666. Default off: the named segment is what
+# a client running as a different user than the server needs.
 #
 # A checked-out ring is a lease: one thread drives it until it hands it back,
 # and the C layer refuses a second driver. That is what lets several threads

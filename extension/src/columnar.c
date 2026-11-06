@@ -423,12 +423,16 @@ uint64
 fastpostgres_publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows,
                                   size_t capacity)
 {
-    size_t cap   = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    void  *map   = fastpostgres_shm_map_cached(path, cap);
-    uint64 total = fastpostgres_columnar_build(tuples, td, nrows, (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE,
-                                               (char *)map + cap);
+    size_t cap = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
+    size_t mapped = 0;
+    void  *map = fastpostgres_shm_map_rw(path, cap, &mapped);
+    uint64 total;
 
-    fastpostgres_shm_publish(map, cap, total);
-    /* the mapping stays cached: the next batch rewrites the same segment */
+    if (map == NULL) elog(ERROR, "fastpostgres: cannot map data segment");
+    total = fastpostgres_columnar_build(tuples, td, nrows, (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE,
+                                        (char *)map + mapped);
+
+    fastpostgres_shm_publish(map, mapped, total);
+    /* the mapping is cached for the worker's lifetime: no per-batch munmap */
     return total;
 }

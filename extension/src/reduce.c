@@ -221,19 +221,21 @@ float_value(Datum d, uint8_t kind, uint32_t pgtype)
 static uint64
 publish(const char *path, const ReduceAcc *accs, int nops, uint64_t nrows, size_t capacity)
 {
-    size_t  cap = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    void   *map = fastpostgres_shm_map_rw(path, cap);
-    char   *out = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
-    char   *p   = out;
+    size_t  cap    = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
+    size_t  mapped = 0;
+    void   *map    = fastpostgres_shm_map_rw(path, cap, &mapped);
+    char   *out;
+    char   *p;
     uint64_t total;
     int      i;
 
-    if (cap < FASTPOSTGRES_SHM_HEADER_SIZE + FASTPOSTGRES_REDUCE_FRAME +
-                  (uint64_t)nops * FASTPOSTGRES_REDUCE_SLOT)
-    {
-        munmap(map, cap);
+    if (map == NULL) elog(ERROR, "fastpostgres: cannot map reduce segment");
+    if (mapped < FASTPOSTGRES_SHM_HEADER_SIZE + FASTPOSTGRES_REDUCE_FRAME +
+                     (uint64_t)nops * FASTPOSTGRES_REDUCE_SLOT)
         ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED), errmsg("fastpostgres: reduce frame exceeds the segment")));
-    }
+
+    out = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+    p   = out;
 
     memcpy(p, FASTPOSTGRES_REDUCE_MAGIC, 8);
     p += 8;
@@ -306,8 +308,8 @@ publish(const char *path, const ReduceAcc *accs, int nops, uint64_t nrows, size_
     }
 
     total = (uint64_t)(p - out);
-    fastpostgres_shm_publish(map, cap, total);
-    munmap(map, cap);
+    fastpostgres_shm_publish(map, mapped, total);
+    /* the mapping is cached for the worker's lifetime: no per-batch munmap */
     return total;
 }
 

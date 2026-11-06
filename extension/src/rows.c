@@ -324,15 +324,18 @@ uint64
 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity)
 {
     size_t                 cap     = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    void                  *map     = fastpostgres_shm_map_cached(path, cap);
-    char                  *payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
+    size_t                 mapped  = 0;
+    void                  *map     = fastpostgres_shm_map_rw(path, cap, &mapped);
+    char                  *payload;
     RowReceiver            rx;
     FastpostgresRowsWrite *w = &rx.w;
     int                    i;
 
+    if (map == NULL) elog(ERROR, "fastpostgres: cannot map data segment");
+    payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
     memset(&rx, 0, sizeof(rx));
     rx.tdesc   = td;
-    rx.end     = (char *)map + cap;
+    rx.end     = (char *)map + mapped;
     rx.tmpctx  = AllocSetContextCreate(CurrentMemoryContext, "fastpostgres_rows_fetch", ALLOCSET_SMALL_SIZES);
     rx.varlena = palloc(sizeof(int) * td->natts);
     rx.values  = palloc(sizeof(Datum) * td->natts);
@@ -379,12 +382,12 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
     if (carry_len > 0) portal->atEnd = false;
 
     fastpostgres_rows_write_end(w);
-    fastpostgres_shm_publish(map, cap, (uint64)(w->p - payload));
+    fastpostgres_shm_publish(map, mapped, (uint64)(w->p - payload));
 
     pfree(rx.varlena);
     pfree(rx.values);
     pfree(rx.isnull);
     MemoryContextDelete(rx.tmpctx);
-    /* the mapping stays cached: the next batch rewrites the same segment */
+    /* the mapping is cached for the worker's lifetime: no per-batch munmap */
     return w->nrows; /* the rows the batch carries, carried row included */
 }

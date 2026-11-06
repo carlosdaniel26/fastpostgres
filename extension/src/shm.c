@@ -1,42 +1,66 @@
-/* shm.c — map a /dev/shm segment read/write or read-only.
+/* shm.c — the data segment's backing store on the worker side.
  *
- * The worker publishes every batch into the same one or two data segments (the
- * pipelined client alternates: <ring>_a, <ring>_b), so the open/mmap/madvise
- * sequence is a per-batch cost paid to map memory that is already mapped. A
- * small keyed cache keeps those mappings for the life of a stream: the lookup
- * is a string compare, the creation happens once per segment. The cache is
- * flushed at a stream boundary (a new stream may name new segments) and on
- * worker exit.
+ * The segment is an anonymous memfd, not a named /dev/shm file: the worker
+ * ftruncates it once, maps it read-write, asks for huge pages before the first
+ * write, seals the capacity (F_SEAL_SHRINK | F_SEAL_GROW) and hands the
+ * descriptor to the client once over an AF_UNIX socket (SCM_RIGHTS). There is
+ * no path to widen and no fchmod: the descriptor is the whole trust boundary.
+ *
+ * F_SEAL_WRITE is deliberately not set. The ring recycles the same mapping for
+ * every batch (that is the point of keeping it mapped), and a write seal makes
+ * the existing writable mapping fault on the next publish. Shrink/grow are the
+ * two seals that matter for a reader: the object's size and identity cannot
+ * change under it.
+ *
+ * The original /dev/shm/<seg> protocol is the fallback, used when the client
+ * did not ask for a handoff or the kernel cannot make a memfd (ENOSYS). It
+ * keeps its 0666 widening there, because a client running as a different user
+ * still has to reach it. Both paths keep one mapping per segment name for the
+ * worker's lifetime; the old code mapped and unmapped the whole segment on
+ * every batch.
  */
 #include "postgres.h"
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "fastpostgres/fastpostgres_shm.h"
+#include "fastpostgres/ring.h"
 
 #include "shm.h"
 
-/* Enough for the client's two pipelined segments and a few stale names, so a
- * capacity change does not evict a mapping the next batch still needs. */
-#define FASTPOSTGRES_SHM_CACHE_MAX 8
-#define FASTPOSTGRES_SHM_PATH_MAX  256
+/* A ring uses two data segments (double buffering); leave room for a few more
+ * so a caller that names its own segments still gets the cache. */
+#define FASTPOSTGRES_WORKER_SEGS 8
 
-typedef struct FastpostgresShmCacheEntry
+typedef struct FastpostgresWorkerSeg
 {
-    char     path[FASTPOSTGRES_SHM_PATH_MAX];
-    size_t   size;
-    void    *map;
-    uint64_t use; /* monotonic tick: the least recently used entry is evicted */
-} FastpostgresShmCacheEntry;
+    char   path[FASTPOSTGRES_RING_ARG]; /* "/<seg>" */
+    int    fd;                          /* memfd, or -1 for /dev/shm */
+    void  *map;
+    size_t cap;
+} FastpostgresWorkerSeg;
 
-/* One backend, one worker: fastpostgres_shm_map_cached() is only called from
- * the ring worker's batch path, which is single-threaded. */
-static FastpostgresShmCacheEntry shm_cache[FASTPOSTGRES_SHM_CACHE_MAX];
-static uint64_t                  shm_cache_tick;
+/* The handoff record: name, size, and an optional descriptor. SOCK_SEQPACKET
+ * preserves the record boundary, so the client reads exactly this one send. */
+typedef struct FastpostgresHandoff
+{
+    uint32_t name_len;
+    int32_t  has_fd;
+    uint64_t size;
+} FastpostgresHandoff;
+
+static FastpostgresWorkerSeg worker_segs[FASTPOSTGRES_WORKER_SEGS];
+static int                   worker_nsegs;
+static int                   worker_memfd;
+static int                   worker_fd_sock = -1;
 
 char *
 fastpostgres_shm_path(const char *seg)
@@ -46,91 +70,211 @@ fastpostgres_shm_path(const char *seg)
     return path;
 }
 
-/* Create/truncate the segment to `size` bytes and map it read-write. */
-void *
-fastpostgres_shm_map_rw(const char *path, size_t size)
+/* Send one segment's descriptor (or fd = -1 for "this one is /dev/shm") to the
+ * client. A failed send is not fatal: the client's bounded wait falls back to
+ * the named segment, and so does this side. */
+static int
+handoff_send(const char *name, int fd, size_t size)
 {
-    int         fd = shm_open(path, O_RDWR | O_CREAT, 0666);
-    struct stat st;
-    void       *map;
+    FastpostgresHandoff hdr;
+    struct msghdr       msg;
+    struct iovec        iov[2];
+    char                control[CMSG_SPACE(sizeof(int))];
+    ssize_t             n;
 
-    if (fd < 0) elog(ERROR, "fastpostgres: shm_open(%s) failed: %m", path);
-    fchmod(fd, 0666); /* world-readable so a separate process can read it */
-    if (fstat(fd, &st) != 0)
+    if (worker_fd_sock < 0) return -1;
+
+    hdr.name_len = (uint32_t)strlen(name);
+    hdr.has_fd   = fd >= 0 ? 1 : 0;
+    hdr.size     = (uint64_t)size;
+
+    memset(&msg, 0, sizeof(msg));
+    iov[0].iov_base = &hdr;
+    iov[0].iov_len  = sizeof(hdr);
+    iov[1].iov_base = (void *)name;
+    iov[1].iov_len  = hdr.name_len;
+    msg.msg_iov     = iov;
+    msg.msg_iovlen  = 2;
+
+    if (fd >= 0)
     {
-        close(fd);
-        elog(ERROR, "fastpostgres: fstat failed: %m");
+        struct cmsghdr *c;
+
+        memset(control, 0, sizeof(control));
+        msg.msg_control    = control;
+        msg.msg_controllen = sizeof(control);
+        c                  = CMSG_FIRSTHDR(&msg);
+        c->cmsg_level      = SOL_SOCKET;
+        c->cmsg_type       = SCM_RIGHTS;
+        c->cmsg_len        = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &fd, sizeof(int));
     }
-    if ((size_t)st.st_size < size && ftruncate(fd, (off_t)size) != 0)
-    {
-        close(fd);
-        elog(ERROR, "fastpostgres: ftruncate failed: %m");
-    }
-    /* map only what is used; the file keeps the full capacity */
-    map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) elog(ERROR, "fastpostgres: mmap failed: %m");
-    (void)madvise(map, size, MADV_HUGEPAGE); /* huge pages: fewer TLB misses */
-    return map;
+
+    do
+        n = sendmsg(worker_fd_sock, &msg, MSG_NOSIGNAL);
+    while (n < 0 && errno == EINTR);
+    return n < 0 ? -1 : 0;
 }
 
 static void
-shm_cache_unmap(FastpostgresShmCacheEntry *e)
+seg_destroy(FastpostgresWorkerSeg *s)
 {
-    if (e->map != NULL) munmap(e->map, e->size);
-    e->map     = NULL;
-    e->size    = 0;
-    e->path[0] = 0;
+    if (s->map != NULL && s->cap != 0) munmap(s->map, s->cap);
+    if (s->fd >= 0) close(s->fd);
+    s->map   = NULL;
+    s->fd    = -1;
+    s->cap   = 0;
+    s->path[0] = 0;
 }
 
-/* Drop every cached mapping. Called when a stream opens (the next stream may
- * use different segment names, or the same names over fresh files) and when the
- * worker exits, so a mapping never outlives the segment it describes. */
-void
-fastpostgres_shm_cache_fini(void)
+/* Fill `s` with one segment: a sealed memfd first, /dev/shm only if the memfd
+ * (or handing it over) is not possible. */
+static int
+seg_fill(FastpostgresWorkerSeg *s, const char *path, size_t size, size_t *cap_out)
+{
+    const char *name = path[0] == '/' ? path + 1 : path;
+
+    memset(s, 0, sizeof(*s));
+    s->fd = -1;
+
+    if (worker_memfd)
+    {
+        int   fd = memfd_create("fastpostgres-seg", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        void *map;
+
+        if (fd >= 0 && ftruncate(fd, (off_t)size) == 0 &&
+            (map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED)
+        {
+            (void)madvise(map, size, MADV_HUGEPAGE); /* before the first write */
+
+            /* The size and the object stay fixed; writes stay allowed because
+             * the worker rewrites this same mapping for the next batch. */
+            if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) != 0)
+                elog(WARNING, "fastpostgres: F_ADD_SEALS failed: %m");
+
+            if (handoff_send(name, fd, size) == 0)
+            {
+                snprintf(s->path, sizeof(s->path), "%s", path);
+                s->fd  = fd;
+                s->map = map;
+                s->cap = size;
+                *cap_out = size;
+                return 0;
+            }
+            munmap(map, size);
+        }
+        if (fd >= 0) close(fd);
+
+        /* A descriptor is not coming for this segment: tell the client now so
+         * it maps /dev/shm instead of spending its handoff wait. */
+        (void)handoff_send(name, -1, size);
+    }
+
+    {
+        int         fd = shm_open(path, O_RDWR | O_CREAT, 0666);
+        struct stat st;
+        void       *map;
+
+        if (fd < 0) return -1;
+        fchmod(fd, 0666); /* the fallback's cross-user trust boundary, unchanged */
+        if (fstat(fd, &st) != 0)
+        {
+            close(fd);
+            return -1;
+        }
+        if ((size_t)st.st_size < size && ftruncate(fd, (off_t)size) != 0)
+        {
+            close(fd);
+            return -1;
+        }
+        map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        close(fd);
+        if (map == MAP_FAILED) return -1;
+        (void)madvise(map, size, MADV_HUGEPAGE);
+
+        snprintf(s->path, sizeof(s->path), "%s", path);
+        s->fd    = -1;
+        s->map   = map;
+        s->cap   = size;
+        *cap_out = size;
+        return 0;
+    }
+}
+
+void *
+fastpostgres_shm_map_rw(const char *path, size_t size, size_t *cap_out)
 {
     int i;
 
-    for (i = 0; i < FASTPOSTGRES_SHM_CACHE_MAX; i++) shm_cache_unmap(&shm_cache[i]);
-    shm_cache_tick = 0;
-}
-
-/* The mapping for (path, size), created on first use. `size` is part of the
- * key: a client that asks for a different capacity gets its own mapping rather
- * than an mmap shorter than the frame it is about to write. */
-void *
-fastpostgres_shm_map_cached(const char *path, size_t size)
-{
-    FastpostgresShmCacheEntry *victim = NULL;
-    int                        free_slot = -1;
-    int                        i;
-
-    for (i = 0; i < FASTPOSTGRES_SHM_CACHE_MAX; i++)
+    for (i = 0; i < worker_nsegs; i++)
     {
-        FastpostgresShmCacheEntry *e = &shm_cache[i];
+        FastpostgresWorkerSeg *s = &worker_segs[i];
 
-        if (e->map != NULL && e->size == size && strcmp(e->path, path) == 0)
+        if (strcmp(s->path, path) != 0) continue;
+        if (s->cap >= size)
         {
-            e->use = ++shm_cache_tick;
-            return e->map;
+            *cap_out = s->cap;
+            return s->map;
         }
-        if (e->map == NULL)
-        {
-            if (free_slot < 0) free_slot = i;
-        }
-        else if (victim == NULL || e->use < victim->use)
-            victim = e;
+
+        /* the ask grew: a sealed memfd cannot grow, so replace the object */
+        seg_destroy(s);
+        if (seg_fill(s, path, size, cap_out) == 0) return s->map;
+        return NULL;
     }
 
-    if (strlen(path) >= FASTPOSTGRES_SHM_PATH_MAX)
-        elog(ERROR, "fastpostgres: segment name too long: %s", path);
+    if (worker_nsegs >= FASTPOSTGRES_WORKER_SEGS) return NULL;
+    if (seg_fill(&worker_segs[worker_nsegs], path, size, cap_out) == 0)
+    {
+        worker_nsegs++;
+        return worker_segs[worker_nsegs - 1].map;
+    }
+    return NULL;
+}
 
-    /* a free slot first, otherwise the least recently used mapping */
-    if (free_slot >= 0) victim = &shm_cache[free_slot];
-    shm_cache_unmap(victim);
-    victim->map  = fastpostgres_shm_map_rw(path, size);
-    victim->size = size;
-    victim->use  = ++shm_cache_tick;
-    strlcpy(victim->path, path, sizeof(victim->path));
-    return victim->map;
+void
+fastpostgres_shm_worker_begin(FastpostgresRing *ring)
+{
+    fastpostgres_shm_worker_end();
+
+    if (ring->fd_handoff != 1 || ring->fd_pathlen == 0 ||
+        ring->fd_pathlen > FASTPOSTGRES_RING_FD_PATH)
+        return;
+
+    {
+        struct sockaddr_un addr;
+        socklen_t          len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + ring->fd_pathlen);
+        int                s   = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+
+        if (s < 0) return;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path, ring->fd_path, ring->fd_pathlen);
+        if (connect(s, (struct sockaddr *)&addr, len) == 0)
+        {
+            worker_fd_sock = s;
+            worker_memfd   = 1;
+        }
+        else
+            close(s);
+
+        /* If the connect fails, worker_memfd stays 0 and both sides use
+         * /dev/shm: the client's accept times out and it maps by name. */
+    }
+}
+
+void
+fastpostgres_shm_worker_end(void)
+{
+    int i;
+
+    for (i = 0; i < worker_nsegs; i++) seg_destroy(&worker_segs[i]);
+    worker_nsegs = 0;
+
+    if (worker_fd_sock >= 0)
+    {
+        close(worker_fd_sock);
+        worker_fd_sock = -1;
+    }
+    worker_memfd = 0;
 }

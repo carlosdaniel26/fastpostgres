@@ -42,6 +42,9 @@
  * bench/ names it in its own reader. */
 #define FASTPOSTGRES_RING_TALLY_OFFSET 4488u
 
+/* sockaddr_un.sun_path bytes the memfd handoff address may use. */
+#define FASTPOSTGRES_RING_FD_PATH 108
+
 enum FastpostgresRingOp
 {
     FASTPOSTGRES_OP_NONE      = 0,
@@ -95,6 +98,22 @@ typedef struct FastpostgresRing
     char     error[FASTPOSTGRES_RING_ERR];
     char     arg[FASTPOSTGRES_RING_ARG]; /* "<seg>\0<query|table>\0" */
     FastpostgresRingTally tally; /* appended: FASTPOSTGRES_RING_TALLY_OFFSET */
+
+    /* ---- sealed-memfd data segments (optional; FPRING05 still reads this) ----
+     *
+     * The client may listen on an AF_UNIX SOCK_SEQPACKET socket before it starts
+     * the worker, and record the abstract-namespace address here. The worker
+     * connects to it once and then hands each data segment's memfd over that
+     * connection (SCM_RIGHTS), so the client never opens a named, world-writable
+     * file to reach the payload. fd_handoff == 0 means the original
+     * /dev/shm/<seg> protocol: the worker creates and widens the segment and
+     * the client maps it by name.
+     *
+     * Appended after the tally, so every offset an older reader parses is
+     * unchanged. */
+    uint32_t fd_handoff;  /* 1: the client is listening for memfd handoff */
+    uint32_t fd_pathlen;  /* bytes of sun_path in fd_path (0 when off) */
+    char     fd_path[FASTPOSTGRES_RING_FD_PATH]; /* abstract name, leading NUL */
 } FastpostgresRing;
 
 /* One side's costs, added to its row where the engine ran the event. Relaxed

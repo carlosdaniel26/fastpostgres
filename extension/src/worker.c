@@ -196,9 +196,6 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             return false;
 
         case FASTPOSTGRES_OP_OPEN:
-            /* the stream's data segments are named by its batches: a mapping
-             * from the last stream must not outlive it */
-            fastpostgres_shm_cache_fini();
             begin_txn(); /* drop any previous stream and open a new transaction */
             PG_TRY();
             {
@@ -350,15 +347,19 @@ fastpostgres_ring_main(Datum main_arg)
     if (fastpostgres_transport_check(r, t) != 0)
     {
         elog(LOG, "fastpostgres_ring_main: ring \"%s\" is not a %s ring", seg, t->name);
-        fastpostgres_shm_cache_fini();
         munmap(r, rsize);
         proc_exit(1);
     }
 
+    /* The data segment's backing store. When the client is listening for a
+     * memfd handoff this connects to it before worker_ready, so the client's
+     * accept after wait_ready finds the connection queued. */
+    fastpostgres_shm_worker_begin(r);
+
     if (t->worker_init(r) < 0)
     {
         elog(LOG, "fastpostgres_ring_main: %s worker_init failed: %m", t->name);
-        fastpostgres_shm_cache_fini();
+        fastpostgres_shm_worker_end();
         munmap(r, rsize);
         proc_exit(1);
     }
@@ -407,11 +408,9 @@ fastpostgres_ring_main(Datum main_arg)
     }
 
     abort_txn();
-    /* the data mappings belong to the segments this worker published into;
-     * they must not survive it */
-    fastpostgres_shm_cache_fini();
     __atomic_store_n(&r->worker_ready, 0, __ATOMIC_RELEASE);
     t->worker_fini(r);
+    fastpostgres_shm_worker_end();
     munmap(r, rsize);
     proc_exit(0);
 }
