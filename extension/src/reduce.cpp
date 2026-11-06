@@ -1,4 +1,4 @@
-/* reduce.c — accumulate SUM/COUNT/MIN/MAX over a batch inside the worker.
+/* reduce.cpp — accumulate SUM/COUNT/MIN/MAX over a batch inside the worker.
  *
  * The columnar path ships every row to the client and lets its C++ reduce walk
  * the mapping. That is the right trade for a client that wants the bytes, and
@@ -27,12 +27,20 @@
  * only be resolved against the cursor's TupleDesc, which arrives with the
  * batch. A malformed plan or an unsupported column rejects the request with a
  * "reduce: " message, never a partial answer.
+ *
+ * PostgreSQL's error path is a longjmp, not an exception, so no destructor runs
+ * on the way out: the accumulators are a stack array and the only allocation is
+ * the palloc'd plan copy, which belongs to the caller's memory context.
  */
-#include "postgres.h"
+#include "pgxx.h"
 
-#include <string.h>
-#include <sys/mman.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
+extern "C" {
 #include "access/htup_details.h"
 #include "access/tupdesc.h"
 #include "catalog/pg_collation.h"
@@ -45,10 +53,16 @@
 #include "varatt.h"
 
 #include "fastpostgres/fastpostgres_shm.h"
-
+}
 #include "columnar.h"
 #include "reduce.h"
 #include "shm.h"
+
+/* The frame opens with the magic, and publish() copies exactly its bytes. */
+static_assert(sizeof(FASTPOSTGRES_REDUCE_MAGIC) - 1 == 8, "the FPREDUCE magic field is 8 bytes");
+
+namespace
+{
 
 /* The plan's op codes; the client exports the same numbers as AGG_*. */
 enum
@@ -60,20 +74,23 @@ enum
     FP_AGG_MAX       = 5
 };
 
-typedef struct ReduceAcc
-{
+constexpr int kMaxOps = FASTPOSTGRES_REDUCE_MAX_OPS;
+
+/* One planned aggregate. The array is value-initialised before the plan is
+ * parsed, so every field starts at the identity its op needs. */
+struct ReduceAcc {
     int      op;
-    int      column;   /* -1 for COUNT_ALL */
-    bool     by_name;  /* column is a name at name_off, not an index yet */
+    int      column;  /* -1 for COUNT_ALL */
+    bool     by_name; /* column is a name at name_off, not an index yet */
     uint32_t name_off;
     uint8_t  kind;
     bool     is_numeric;
-    bool     is_varlena; /* the Datum is text/varchar/bpchar/bytea, not an output-function fallback */
-    Oid      collation;  /* text/bytea comparison */
+    bool     is_varlena;     /* the Datum is text/varchar/bpchar/bytea, not an output-function fallback */
+    Oid      collation;      /* text/bytea comparison */
 
-    unsigned __int128 isum; /* SUM over the integer kinds: exact, 128 bits */
-    double            fsum; /* SUM over the float kinds */
-    Datum             nsum; /* SUM over numeric */
+    unsigned __int128 isum;  /* SUM over the integer kinds: exact, 128 bits */
+    double            fsum;  /* SUM over the float kinds */
+    Datum             nsum;  /* SUM over numeric */
     Datum             nbest; /* MIN/MAX over numeric */
     long long         imin;
     long long         imax;
@@ -81,11 +98,11 @@ typedef struct ReduceAcc
     double            fmax;
     const char       *best; /* MIN/MAX over text/bytea */
     int               best_len;
-    unsigned long long count;
-    bool               seen; /* at least one non-NULL value */
-} ReduceAcc;
+    std::uint64_t     count;
+    bool              seen; /* at least one non-NULL value */
+};
 
-static bool
+bool
 kind_is_int(uint8_t kind)
 {
     switch (kind)
@@ -100,13 +117,13 @@ kind_is_int(uint8_t kind)
     }
 }
 
-static bool
+bool
 kind_is_float(uint8_t kind)
 {
     return kind == FASTPOSTGRES_KIND_FLOAT4 || kind == FASTPOSTGRES_KIND_FLOAT8;
 }
 
-static bool
+bool
 kind_is_temporal(uint8_t kind)
 {
     return kind == FASTPOSTGRES_KIND_DATE || kind == FASTPOSTGRES_KIND_TIME ||
@@ -115,7 +132,7 @@ kind_is_temporal(uint8_t kind)
 
 /* What the server can do with this kind, op by op. COUNT reads no value, so it
  * is legal for every kind; SUM is numbers only, including exact numeric. */
-static bool
+bool
 op_supported(int op, uint8_t kind, bool is_numeric, bool is_varlena)
 {
     switch (op)
@@ -134,61 +151,60 @@ op_supported(int op, uint8_t kind, bool is_numeric, bool is_varlena)
     }
 }
 
-static const char *
+const char *
 op_name(int op)
 {
     switch (op)
     {
-        case FP_AGG_SUM: return "sum";
-        case FP_AGG_MIN: return "min";
-        case FP_AGG_MAX: return "max";
-        default: return "aggregate";
+        case FP_AGG_SUM:
+            return "sum";
+        case FP_AGG_MIN:
+            return "min";
+        case FP_AGG_MAX:
+            return "max";
+        default:
+            return "aggregate";
     }
 }
 
 /* Resolve a plan column against the batch's descriptor. */
-static int
+int
 resolve_column(TupleDesc td, bool by_index, int index, const char *name)
 {
-    int i;
-
     if (by_index)
     {
         if (index < 0) index += td->natts;
-        if (index < 0 || index >= td->natts) ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                                                             errmsg("reduce: column index out of range")));
+        if (index < 0 || index >= td->natts)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: column index out of range")));
         return index;
     }
-    for (i = 0; i < td->natts; i++)
+    for (int i = 0; i < td->natts; i++)
     {
         Form_pg_attribute att = TupleDescAttr(td, i);
 
         if (att->attisdropped) continue;
-        if (strcmp(NameStr(att->attname), name) == 0) return i;
+        if (std::strcmp(NameStr(att->attname), name) == 0) return i;
     }
-    ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: no column \"%s\" in the result", name)));
+    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                    errmsg("reduce: no column \"%s\" in the result", name)));
     return -1;
 }
 
 /* Split the plan on unescaped commas and unescape each entry in place. `copy`
  * is palloc'd in the caller's context and lives until SPI_finish. */
-static int
+int
 parse_plan(char *copy, ReduceAcc *accs)
 {
     char *p = copy;
     int   n = 0;
 
-    while (*p)
+    while (*p != 0)
     {
         char *end = p;
-        char *w;
-        char *colon;
-        bool  esc  = false;
-        bool  last;
-        int   op;
+        bool  esc = false;
 
-        while (*end)
+        while (*end != 0)
         {
             if (esc)
                 esc = false;
@@ -198,49 +214,59 @@ parse_plan(char *copy, ReduceAcc *accs)
                 break;
             end++;
         }
-        last = (*end == 0);
+        const bool last = (*end == 0);
+
         if (!last) *end = 0;
 
-        w = p;
-        for (char *q = p; *q; q++)
+        /* Unescape in place: `w` never trails `q`, so the entry shrinks over
+         * itself and every later offset stays valid. */
+        char *w = p;
+
+        for (char *q = p; *q != 0; q++)
         {
             if (*q == '\\' && q[1] != 0) q++;
             *w++ = *q;
         }
         *w = 0;
 
-        if (n >= FASTPOSTGRES_REDUCE_MAX_OPS)
+        if (n >= kMaxOps)
             ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                            errmsg("reduce: too many operations (max %d)", FASTPOSTGRES_REDUCE_MAX_OPS)));
+                            errmsg("reduce: too many operations (max %d)", kMaxOps)));
 
-        colon = strchr(p, ':');
-        if (colon != NULL) *colon++ = 0;
+        char *colon = std::strchr(p, ':');
 
-        op = atoi(p);
-        if (op < FP_AGG_COUNT_ALL || op > FP_AGG_MAX || (op != FP_AGG_COUNT_ALL && (colon == NULL || colon[0] == 0)))
+        if (colon != nullptr) *colon++ = 0;
+
+        const int op = std::atoi(p);
+
+        if (op < FP_AGG_COUNT_ALL || op > FP_AGG_MAX ||
+            (op != FP_AGG_COUNT_ALL && (colon == nullptr || colon[0] == 0)))
             ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: malformed plan")));
 
-        accs[n].op = op;
+        ReduceAcc &a = accs[n];
+
+        a.op = op;
         if (op == FP_AGG_COUNT_ALL)
         {
-            if (colon != NULL && colon[0] != 0)
+            if (colon != nullptr && colon[0] != 0)
                 ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                                 errmsg("reduce: count_all takes no column")));
-            accs[n].column = -1;
+            a.column = -1;
         }
         else if (colon[0] == 'i')
         {
-            char *after = NULL;
-            long  idx   = strtol(colon + 1, &after, 10);
+            char *after = nullptr;
+            long  idx   = std::strtol(colon + 1, &after, 10);
 
             if (after == colon + 1 || *after != 0)
-                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: malformed column index")));
-            accs[n].column = (int)idx;
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: malformed column index")));
+            a.column = static_cast<int>(idx);
         }
         else if (colon[0] == 'n')
         {
-            accs[n].by_name  = true;
-            accs[n].name_off = (uint32_t)(colon + 1 - copy);
+            a.by_name  = true;
+            a.name_off = static_cast<uint32_t>(colon + 1 - copy);
         }
         else
             ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("reduce: malformed column")));
@@ -252,7 +278,7 @@ parse_plan(char *copy, ReduceAcc *accs)
     return n;
 }
 
-static long long
+long long
 int_value(Datum d, uint8_t kind)
 {
     switch (kind)
@@ -260,51 +286,51 @@ int_value(Datum d, uint8_t kind)
         case FASTPOSTGRES_KIND_BOOL:
             return DatumGetBool(d) ? 1 : 0;
         case FASTPOSTGRES_KIND_INT16:
-            return (long long)DatumGetInt16(d);
+            return static_cast<long long>(DatumGetInt16(d));
         case FASTPOSTGRES_KIND_INT32:
-            return (long long)DatumGetInt32(d);
+            return static_cast<long long>(DatumGetInt32(d));
         case FASTPOSTGRES_KIND_INT64:
-            return (long long)DatumGetInt64(d);
+            return static_cast<long long>(DatumGetInt64(d));
         case FASTPOSTGRES_KIND_DATE:
-            return (long long)DatumGetDateADT(d);
+            return static_cast<long long>(DatumGetDateADT(d));
         case FASTPOSTGRES_KIND_TIME:
-            return (long long)DatumGetTimeADT(d);
+            return static_cast<long long>(DatumGetTimeADT(d));
         case FASTPOSTGRES_KIND_TIMESTAMP:
-            return (long long)DatumGetTimestamp(d);
+            return static_cast<long long>(DatumGetTimestamp(d));
         case FASTPOSTGRES_KIND_TIMESTAMPTZ:
-            return (long long)DatumGetTimestampTz(d);
+            return static_cast<long long>(DatumGetTimestampTz(d));
         default:
             return 0;
     }
 }
 
-static double
+double
 float_value(Datum d, uint8_t kind)
 {
-    if (kind == FASTPOSTGRES_KIND_FLOAT4) return (double)DatumGetFloat4(d);
+    if (kind == FASTPOSTGRES_KIND_FLOAT4) return static_cast<double>(DatumGetFloat4(d));
     return DatumGetFloat8(d);
 }
 
 /* Text/bytea bytes, detoasted. The pointer lives in the caller's memory
  * context for the rest of this batch. */
-static void
+void
 varlena_value(Datum d, const char **data, int *len)
 {
-    struct varlena *v = pg_detoast_datum_packed((struct varlena *)DatumGetPointer(d));
+    struct varlena *v = pg_detoast_datum_packed(reinterpret_cast<struct varlena *>(DatumGetPointer(d)));
 
     *data = VARDATA_ANY(v);
-    *len  = (int)VARSIZE_ANY_EXHDR(v);
+    *len  = static_cast<int>(VARSIZE_ANY_EXHDR(v));
 }
 
 /* MIN/MAX ordering for the textual kinds. text uses the column's collation,
  * exactly like the server's aggregate; bytea uses memcmp, which is also what
  * its btree opclass does. Returns <0, 0, >0 for a against b. */
-static int
+int
 textual_cmp(const char *a, int alen, const char *b, int blen, uint8_t kind, Oid collation)
 {
     if (kind == FASTPOSTGRES_KIND_BYTEA)
     {
-        int cmp = memcmp(a, b, Min(alen, blen));
+        const int cmp = std::memcmp(a, b, static_cast<std::size_t>(std::min(alen, blen)));
 
         if (cmp != 0) return cmp;
         return alen < blen ? -1 : alen > blen ? 1 : 0;
@@ -313,86 +339,83 @@ textual_cmp(const char *a, int alen, const char *b, int blen, uint8_t kind, Oid 
 }
 
 /* Write the scalar frame into the segment and publish it. */
-static uint64
-publish(const char *path, ReduceAcc *accs, int nops, uint64_t nrows, size_t capacity)
+uint64
+publish(const char *path, const ReduceAcc *accs, int nops, uint64_t nrows, size_t capacity)
 {
-    size_t   cap    = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    size_t   mapped = 0;
-    void    *map    = fastpostgres_shm_map_rw(path, cap, &mapped);
-    char    *out;
-    char    *p;
-    uint64_t base_bytes;
-    uint64_t aux_total = 0;
-    uint64_t aux_off;
-    uint64_t total;
-    const char *aux_src[FASTPOSTGRES_REDUCE_MAX_OPS];
-    uint32_t    aux_len[FASTPOSTGRES_REDUCE_MAX_OPS];
-    int         i;
+    const size_t cap    = capacity != 0 ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
+    size_t       mapped = 0;
+    void        *map    = fp::shm_map_rw(path, cap, &mapped);
 
-    if (map == NULL) elog(ERROR, "fastpostgres: cannot map reduce segment");
+    if (map == nullptr) elog(ERROR, "fastpostgres: cannot map reduce segment");
+
+    std::array<const char *, kMaxOps> aux_src{};
+    std::array<uint32_t, kMaxOps>     aux_len{};
+    uint64_t                          aux_total = 0;
 
     /* First pass: the aux pool's size (numeric output and text values). */
-    memset(aux_src, 0, sizeof(aux_src));
-    memset(aux_len, 0, sizeof(aux_len));
-    for (i = 0; i < nops; i++)
+    for (int i = 0; i < nops; i++)
     {
-        ReduceAcc *a = &accs[i];
+        const ReduceAcc *a = &accs[i];
 
         if (a->op == FP_AGG_SUM && a->is_numeric)
         {
             Datum n = a->seen ? a->nsum : DirectFunctionCall1(int8_numeric, Int64GetDatum(0));
 
             aux_src[i] = DatumGetCString(DirectFunctionCall1(numeric_out, n));
-            aux_len[i] = (uint32_t)strlen(aux_src[i]);
+            aux_len[i] = static_cast<uint32_t>(std::strlen(aux_src[i]));
         }
         else if ((a->op == FP_AGG_MIN || a->op == FP_AGG_MAX) && a->seen)
         {
             if (a->is_numeric)
             {
                 aux_src[i] = DatumGetCString(DirectFunctionCall1(numeric_out, a->nbest));
-                aux_len[i] = (uint32_t)strlen(aux_src[i]);
+                aux_len[i] = static_cast<uint32_t>(std::strlen(aux_src[i]));
             }
             else if (a->is_varlena)
             {
                 aux_src[i] = a->best;
-                aux_len[i] = (uint32_t)a->best_len;
+                aux_len[i] = static_cast<uint32_t>(a->best_len);
             }
         }
         aux_total += aux_len[i];
     }
 
-    base_bytes = FASTPOSTGRES_REDUCE_FRAME + (uint64_t)nops * FASTPOSTGRES_REDUCE_SLOT;
+    const uint64_t base_bytes =
+        FASTPOSTGRES_REDUCE_FRAME + static_cast<uint64_t>(nops) * FASTPOSTGRES_REDUCE_SLOT;
+
     if (mapped < FASTPOSTGRES_SHM_HEADER_SIZE + base_bytes + aux_total)
         ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                         errmsg("reduce: result does not fit the segment (%llu bytes needed)",
-                               (unsigned long long)(FASTPOSTGRES_SHM_HEADER_SIZE + base_bytes + aux_total))));
+                               static_cast<unsigned long long>(FASTPOSTGRES_SHM_HEADER_SIZE + base_bytes +
+                                                               aux_total))));
 
-    out = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
-    p   = out;
+    char *out = static_cast<char *>(map) + FASTPOSTGRES_SHM_HEADER_SIZE;
+    char *p   = out;
 
-    memcpy(p, FASTPOSTGRES_REDUCE_MAGIC, 8);
+    std::memcpy(p, FASTPOSTGRES_REDUCE_MAGIC, 8);
     p += 8;
-    fastpostgres_put_u32(p, FASTPOSTGRES_REDUCE_VERSION);
+    fp::store_u32(p, FASTPOSTGRES_REDUCE_VERSION);
     p += 4;
-    fastpostgres_put_u32(p, 1); /* flags: little-endian */
+    fp::store_u32(p, 1); /* flags: little-endian */
     p += 4;
-    fastpostgres_put_u32(p, (uint32_t)nops);
+    fp::store_u32(p, static_cast<uint32_t>(nops));
     p += 4;
-    fastpostgres_put_u32(p, 0);
+    fp::store_u32(p, 0);
     p += 4;
-    fastpostgres_put_u64(p, nrows);
+    fp::store_u64(p, nrows);
     p += 8;
 
-    aux_off = base_bytes;
-    for (i = 0; i < nops; i++)
+    uint64_t aux_off = base_bytes;
+
+    for (int i = 0; i < nops; i++)
     {
-        ReduceAcc *a      = &accs[i];
-        uint8_t    rtype  = FASTPOSTGRES_RVAL_INT64;
-        bool       is_null = false;
-        uint64_t   lo     = 0;
-        uint64_t   hi     = 0;
-        uint32_t   this_off = 0;
-        uint32_t   this_len = 0;
+        const ReduceAcc *a        = &accs[i];
+        uint8_t          rtype    = FASTPOSTGRES_RVAL_INT64;
+        bool             is_null  = false;
+        uint64_t         lo       = 0;
+        uint64_t         hi       = 0;
+        uint32_t         this_off = 0;
+        uint32_t         this_len = 0;
 
         switch (a->op)
         {
@@ -408,20 +431,18 @@ publish(const char *path, ReduceAcc *accs, int nops, uint64_t nrows, size_t capa
                 if (a->is_numeric)
                 {
                     rtype    = FASTPOSTGRES_RVAL_NUMERIC;
-                    this_off = (uint32_t)aux_off;
+                    this_off = static_cast<uint32_t>(aux_off);
                     this_len = aux_len[i];
                 }
                 else if (kind_is_float(a->kind))
                 {
-                    double v = a->fsum;
-
-                    memcpy(&lo, &v, 8);
+                    lo    = fp::double_bits(a->fsum);
                     rtype = FASTPOSTGRES_RVAL_DOUBLE;
                 }
                 else
                 {
-                    lo    = (uint64_t)a->isum;
-                    hi    = (uint64_t)(a->isum >> 64);
+                    lo    = static_cast<uint64_t>(a->isum);
+                    hi    = static_cast<uint64_t>(a->isum >> 64);
                     rtype = FASTPOSTGRES_RVAL_INT128;
                 }
                 break;
@@ -435,46 +456,46 @@ publish(const char *path, ReduceAcc *accs, int nops, uint64_t nrows, size_t capa
                 else if (a->is_numeric)
                 {
                     rtype    = FASTPOSTGRES_RVAL_NUMERIC;
-                    this_off = (uint32_t)aux_off;
+                    this_off = static_cast<uint32_t>(aux_off);
                     this_len = aux_len[i];
                 }
                 else if (a->kind == FASTPOSTGRES_KIND_TEXT || a->kind == FASTPOSTGRES_KIND_BYTEA)
                 {
-                    rtype    = a->kind == FASTPOSTGRES_KIND_BYTEA ? FASTPOSTGRES_RVAL_BYTEA
-                                                                  : FASTPOSTGRES_RVAL_TEXT;
-                    this_off = (uint32_t)aux_off;
+                    rtype =
+                        a->kind == FASTPOSTGRES_KIND_BYTEA ? FASTPOSTGRES_RVAL_BYTEA : FASTPOSTGRES_RVAL_TEXT;
+                    this_off = static_cast<uint32_t>(aux_off);
                     this_len = aux_len[i];
                 }
                 else if (a->kind == FASTPOSTGRES_KIND_DATE)
                 {
-                    lo    = (uint64_t)(a->op == FP_AGG_MIN ? a->imin : a->imax);
+                    lo    = static_cast<uint64_t>(a->op == FP_AGG_MIN ? a->imin : a->imax);
                     rtype = FASTPOSTGRES_RVAL_DATE;
                 }
                 else if (a->kind == FASTPOSTGRES_KIND_TIME)
                 {
-                    lo    = (uint64_t)(a->op == FP_AGG_MIN ? a->imin : a->imax);
+                    lo    = static_cast<uint64_t>(a->op == FP_AGG_MIN ? a->imin : a->imax);
                     rtype = FASTPOSTGRES_RVAL_TIME;
                 }
                 else if (a->kind == FASTPOSTGRES_KIND_TIMESTAMP)
                 {
-                    lo    = (uint64_t)(a->op == FP_AGG_MIN ? a->imin : a->imax);
+                    lo    = static_cast<uint64_t>(a->op == FP_AGG_MIN ? a->imin : a->imax);
                     rtype = FASTPOSTGRES_RVAL_TIMESTAMP;
                 }
                 else if (a->kind == FASTPOSTGRES_KIND_TIMESTAMPTZ)
                 {
-                    lo    = (uint64_t)(a->op == FP_AGG_MIN ? a->imin : a->imax);
+                    lo    = static_cast<uint64_t>(a->op == FP_AGG_MIN ? a->imin : a->imax);
                     rtype = FASTPOSTGRES_RVAL_TIMESTAMPTZ;
                 }
                 else if (kind_is_float(a->kind))
                 {
-                    double v = (a->op == FP_AGG_MIN) ? a->fmin : a->fmax;
+                    const double v = (a->op == FP_AGG_MIN) ? a->fmin : a->fmax;
 
-                    memcpy(&lo, &v, 8);
+                    lo    = fp::double_bits(v);
                     rtype = FASTPOSTGRES_RVAL_DOUBLE;
                 }
                 else
                 {
-                    lo    = (uint64_t)((a->op == FP_AGG_MIN) ? a->imin : a->imax);
+                    lo    = static_cast<uint64_t>(a->op == FP_AGG_MIN ? a->imin : a->imax);
                     rtype = FASTPOSTGRES_RVAL_INT64;
                 }
                 break;
@@ -482,95 +503,97 @@ publish(const char *path, ReduceAcc *accs, int nops, uint64_t nrows, size_t capa
                 break;
         }
 
-        *p++ = is_null ? 1 : 0;
-        *p++ = rtype;
+        *p++ = static_cast<char>(is_null ? 1 : 0);
+        *p++ = static_cast<char>(rtype);
         *p++ = 0;
         *p++ = 0;
-        fastpostgres_put_u32(p, this_off);
+        fp::store_u32(p, this_off);
         p += 4;
-        fastpostgres_put_u32(p, this_len);
+        fp::store_u32(p, this_len);
         p += 4;
-        fastpostgres_put_u32(p, 0); /* pad: align lo/hi */
+        fp::store_u32(p, 0); /* pad: align lo/hi */
         p += 4;
-        fastpostgres_put_u64(p, lo);
+        fp::store_u64(p, lo);
         p += 8;
-        fastpostgres_put_u64(p, hi);
+        fp::store_u64(p, hi);
         p += 8;
 
         if (this_len != 0)
         {
-            memcpy(out + aux_off, aux_src[i], this_len);
+            std::memcpy(out + aux_off, aux_src[i], this_len);
             aux_off += this_len;
         }
     }
 
-    total = (uint64_t)(p - out) + aux_total;
+    const uint64_t total = static_cast<uint64_t>(p - out) + aux_total;
+
     fastpostgres_shm_publish(map, mapped, total);
     /* the mapping is cached for the worker's lifetime: no per-batch munmap */
     return total;
 }
 
+} // namespace
+
 uint64
-fastpostgres_reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
-                            size_t capacity)
+fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
+                   size_t capacity)
 {
-    char      *copy = pstrdup(plan);
-    ReduceAcc  accs[FASTPOSTGRES_REDUCE_MAX_OPS];
-    int        nops;
-    int        k;
+    char *copy = fp::pdup(fp::view(plan));
 
-    memset(accs, 0, sizeof(accs));
-    nops = parse_plan(copy, accs);
+    std::array<ReduceAcc, kMaxOps> accs{};
+    const int                      nops = parse_plan(copy, accs.data());
 
-    for (k = 0; k < nops; k++)
+    for (int k = 0; k < nops; k++)
     {
-        ReduceAcc        *a = &accs[k];
-        Form_pg_attribute att;
+        ReduceAcc &a = accs[k];
 
-        if (a->op == FP_AGG_COUNT_ALL)
+        if (a.op == FP_AGG_COUNT_ALL)
         {
-            a->column = -1;
-            a->kind   = FASTPOSTGRES_KIND_INT64;
+            a.column = -1;
+            a.kind   = FASTPOSTGRES_KIND_INT64;
             continue;
         }
-        if (a->by_name)
+        if (a.by_name)
         {
-            const char *name = copy + a->name_off;
+            const char *name = copy + a.name_off;
 
-            a->column = resolve_column(td, false, 0, name);
+            a.column = resolve_column(td, false, 0, name);
         }
         else
-            a->column = resolve_column(td, true, a->column, NULL);
+            a.column = resolve_column(td, true, a.column, nullptr);
 
-        att     = TupleDescAttr(td, a->column);
-        a->kind = fastpostgres_oid_to_kind((uint32_t)att->atttypid);
+        const Form_pg_attribute att = TupleDescAttr(td, a.column);
+
+        a.kind = fastpostgres_oid_to_kind(static_cast<uint32_t>(att->atttypid));
         /* numeric has no wire kind (the columnar path widens it to float8), but
          * this path holds the raw Datum, so it can stay exact. */
-        a->is_numeric = att->atttypid == FASTPOSTGRES_OID_NUMERIC;
-        a->is_varlena = att->atttypid == FASTPOSTGRES_OID_TEXT || att->atttypid == FASTPOSTGRES_OID_VARCHAR ||
-                        att->atttypid == FASTPOSTGRES_OID_BPCHAR || att->atttypid == FASTPOSTGRES_OID_BYTEA;
-        a->collation  = OidIsValid(att->attcollation) ? att->attcollation : DEFAULT_COLLATION_OID;
+        a.is_numeric = att->atttypid == FASTPOSTGRES_OID_NUMERIC;
+        a.is_varlena = att->atttypid == FASTPOSTGRES_OID_TEXT || att->atttypid == FASTPOSTGRES_OID_VARCHAR ||
+                       att->atttypid == FASTPOSTGRES_OID_BPCHAR || att->atttypid == FASTPOSTGRES_OID_BYTEA;
+        a.collation  = OidIsValid(att->attcollation) ? att->attcollation : DEFAULT_COLLATION_OID;
 
-        if (!op_supported(a->op, a->kind, a->is_numeric, a->is_varlena))
+        if (!op_supported(a.op, a.kind, a.is_numeric, a.is_varlena))
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                            errmsg("reduce: %s is not supported for this column type", op_name(a->op))));
+                            errmsg("reduce: %s is not supported for this column type", op_name(a.op))));
     }
 
     /* Only the planned columns are read: a sum over one column of a wide result
      * never deforms the rest. */
-    for (k = 0; k < nops; k++)
+    for (int k = 0; k < nops; k++)
     {
-        ReduceAcc *a = &accs[k];
+        ReduceAcc &a = accs[k];
 
-        if (a->op == FP_AGG_COUNT_ALL || a->column < 0 || a->op == FP_AGG_COUNT)
+        if (a.op == FP_AGG_COUNT_ALL || a.column < 0 || a.op == FP_AGG_COUNT)
         {
-            if (a->op == FP_AGG_COUNT)
+            if (a.op == FP_AGG_COUNT)
                 for (uint64 r = 0; r < nrows; r++)
                 {
                     bool isnull = false;
+                    /* COUNT reads no value: the attribute is only tested for
+                     * NULL, which is also why it works for every kind. */
+                    [[maybe_unused]] Datum ignored = heap_getattr(tuples[r], a.column + 1, td, &isnull);
 
-                    (void)heap_getattr(tuples[r], a->column + 1, td, &isnull);
-                    if (!isnull) a->count++;
+                    if (!isnull) a.count++;
                 }
             continue;
         }
@@ -578,82 +601,83 @@ fastpostgres_reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, u
         for (uint64 r = 0; r < nrows; r++)
         {
             bool  isnull = false;
-            Datum d      = heap_getattr(tuples[r], a->column + 1, td, &isnull);
-            bool  better;
+            Datum d      = heap_getattr(tuples[r], a.column + 1, td, &isnull);
 
             if (isnull) continue;
 
-            if (a->op == FP_AGG_SUM)
+            if (a.op == FP_AGG_SUM)
             {
-                if (a->is_numeric)
+                if (a.is_numeric)
                 {
                     /* Keep the numeric exactly as the server does: numeric_add,
                      * not a cast through double. */
-                    a->nsum = a->seen ? DirectFunctionCall2(numeric_add, a->nsum, d) : d;
-                    a->seen = true;
+                    a.nsum = a.seen ? DirectFunctionCall2(numeric_add, a.nsum, d) : d;
+                    a.seen = true;
                 }
-                else if (kind_is_float(a->kind))
-                    a->fsum += float_value(d, a->kind);
+                else if (kind_is_float(a.kind))
+                    a.fsum += float_value(d, a.kind);
                 else
-                    a->isum += (unsigned __int128)(__int128)int_value(d, a->kind);
+                    a.isum += static_cast<unsigned __int128>(static_cast<__int128>(int_value(d, a.kind)));
                 continue;
             }
 
             /* MIN/MAX */
-            if (a->is_numeric)
+            if (a.is_numeric)
             {
-                int cmp = a->seen ? DatumGetInt32(DirectFunctionCall2(numeric_cmp, d, a->nbest)) : 0;
+                const int  cmp    = a.seen ? DatumGetInt32(DirectFunctionCall2(numeric_cmp, d, a.nbest)) : 0;
+                const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
 
-                better = !a->seen || (a->op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
-                if (better) a->nbest = d;
-                a->seen = true;
+                if (better) a.nbest = d;
+                a.seen = true;
             }
-            else if (a->is_varlena)
+            else if (a.is_varlena)
             {
                 const char *data;
                 int         len;
                 int         cmp = 0;
 
                 varlena_value(d, &data, &len);
-                if (a->seen) cmp = textual_cmp(data, len, a->best, a->best_len, a->kind, a->collation);
-                better = !a->seen || (a->op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
-                if (better)
-                {
-                    a->best     = data;
-                    a->best_len = len;
-                }
-                a->seen = true;
-            }
-            else if (kind_is_float(a->kind))
-            {
-                double v = float_value(d, a->kind);
+                if (a.seen) cmp = textual_cmp(data, len, a.best, a.best_len, a.kind, a.collation);
 
-                better = !a->seen || (a->op == FP_AGG_MIN ? v < a->fmin : v > a->fmax);
+                const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
+
                 if (better)
                 {
-                    if (a->op == FP_AGG_MIN)
-                        a->fmin = v;
-                    else
-                        a->fmax = v;
+                    a.best     = data;
+                    a.best_len = len;
                 }
-                a->seen = true;
+                a.seen = true;
+            }
+            else if (kind_is_float(a.kind))
+            {
+                const double v      = float_value(d, a.kind);
+                const bool   better = !a.seen || (a.op == FP_AGG_MIN ? v < a.fmin : v > a.fmax);
+
+                if (better)
+                {
+                    if (a.op == FP_AGG_MIN)
+                        a.fmin = v;
+                    else
+                        a.fmax = v;
+                }
+                a.seen = true;
             }
             else
             {
-                long long v = int_value(d, a->kind);
+                const long long v      = int_value(d, a.kind);
+                const bool      better = !a.seen || (a.op == FP_AGG_MIN ? v < a.imin : v > a.imax);
 
-                better = !a->seen || (a->op == FP_AGG_MIN ? v < a->imin : v > a->imax);
                 if (better)
                 {
-                    if (a->op == FP_AGG_MIN)
-                        a->imin = v;
+                    if (a.op == FP_AGG_MIN)
+                        a.imin = v;
                     else
-                        a->imax = v;
+                        a.imax = v;
                 }
-                a->seen = true;
+                a.seen = true;
             }
         }
     }
 
-    return publish(path, accs, nops, (uint64_t)nrows, capacity);
+    return publish(path, accs.data(), nops, nrows, capacity);
 }

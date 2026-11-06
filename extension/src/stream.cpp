@@ -1,41 +1,51 @@
 /*
- * stream.c — pull-driven batches over an SPI cursor (a portal in
+ * stream.cpp — pull-driven batches over an SPI cursor (a portal in
  * TopPortalContext). The design is documented in stream.h.
  */
-#include "postgres.h"
+#include "pgxx.h"
 
-#include <string.h>
+#include <cstdio>
+#include <cstring>
 
+extern "C" {
 #include "executor/spi.h"
 #include "nodes/parsenodes.h"
-
-#include "columnar.h"
+}
 #include "carry.h"
+#include "columnar.h"
 #include "reduce.h"
 #include "rows.h"
 #include "shm.h"
 #include "stream.h"
 
-#define FASTPOSTGRES_STREAM_PREFIX "fastpostgres_stream_"
+namespace
+{
 
-static char *
+constexpr char kStreamPrefix[] = "fastpostgres_stream_";
+
+char *
 cursor_name(const char *stream)
 {
-    char *name = palloc(strlen(FASTPOSTGRES_STREAM_PREFIX) + strlen(stream) + 1);
-    sprintf(name, FASTPOSTGRES_STREAM_PREFIX "%s", stream);
+    const std::size_t n    = sizeof(kStreamPrefix) - 1 + std::strlen(stream) + 1;
+    char             *name = static_cast<char *>(palloc(n));
+
+    std::snprintf(name, n, "%s%s", kStreamPrefix, stream);
     return name;
 }
 
+} // namespace
+
 void
-fastpostgres_stream_open(const char *stream, const char *query)
+fp::stream_open(const char *stream, const char *query)
 {
-    char  *name = cursor_name(stream);
-    Portal portal;
+    char *name = cursor_name(stream);
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_open: SPI_connect failed");
 
-    portal = SPI_cursor_open_with_args(name, query, 0, NULL, NULL, NULL, true, CURSOR_OPT_PARALLEL_OK);
-    if (portal == NULL)
+    Portal portal =
+        SPI_cursor_open_with_args(name, query, 0, nullptr, nullptr, nullptr, true, CURSOR_OPT_PARALLEL_OK);
+
+    if (portal == nullptr)
     {
         SPI_finish();
         elog(ERROR, "fastpostgres_stream_open: %s", SPI_result_code_string(SPI_result));
@@ -44,43 +54,42 @@ fastpostgres_stream_open(const char *stream, const char *query)
 }
 
 uint64
-fastpostgres_stream_next(const char *stream, const char *seg, int64 batch, size_t capacity)
+fp::stream_next(const char *stream, const char *seg, int64 batch, size_t capacity)
 {
-    char     *path = fastpostgres_shm_path(seg);
-    char     *name = cursor_name(stream);
-    Portal    portal;
-    TupleDesc td;
-    uint64    nrows;
+    char *path = fp::shm_path(seg);
+    char *name = cursor_name(stream);
 
     if (batch <= 0) elog(ERROR, "fastpostgres_stream_next: batch must be > 0");
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_next: SPI_connect failed");
 
-    portal = SPI_cursor_find(name);
-    if (portal == NULL)
+    Portal portal = SPI_cursor_find(name);
+
+    if (portal == nullptr)
     {
         SPI_finish();
         elog(ERROR, "fastpostgres_stream_next: no open stream \"%s\"", stream);
     }
 
-    td    = portal->tupDesc;
-    nrows = fastpostgres_columnar_fetch(portal, td, path, batch, capacity);
+    TupleDesc td    = portal->tupDesc;
+    uint64    nrows = fp::columnar_fetch(portal, td, path, batch, capacity);
+
     SPI_finish();
     return nrows;
 }
 
 void
-fastpostgres_stream_close(const char *stream)
+fp::stream_close(const char *stream)
 {
-    char  *name = cursor_name(stream);
-    Portal portal;
+    char *name = cursor_name(stream);
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_close: SPI_connect failed");
 
-    portal = SPI_cursor_find(name);
-    if (portal != NULL)
+    Portal portal = SPI_cursor_find(name);
+
+    if (portal != nullptr)
     {
-        fastpostgres_carry_drop(portal); /* the carried rows were this stream's */
+        fp::carry_drop(portal); /* the carried rows were this stream's */
         SPI_cursor_close(portal);
     }
 
@@ -92,45 +101,45 @@ fastpostgres_stream_close(const char *stream)
  * stream's carry and leave the other rings' carries untouched. Called after the
  * subtransaction has rolled back, so it must not touch SPI. */
 void
-fastpostgres_stream_forget(const char *stream)
+fp::stream_forget(const char *stream)
 {
     char *name = cursor_name(stream);
 
-    fastpostgres_carry_drop_name(name);
+    fp::carry_drop_name(name);
     pfree(name);
 }
 
 /* The same batch as the result tuples themselves: the executor's bytes are
  * copied into the segment once, and the client walks them. */
 uint64
-fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch, size_t capacity)
+fp::stream_next_rows(const char *stream, const char *seg, int64 batch, size_t capacity)
 {
-    char     *path = fastpostgres_shm_path(seg);
-    char     *name = cursor_name(stream);
-    Portal    portal;
-    TupleDesc td;
-    uint64    nrows;
+    char *path = fp::shm_path(seg);
+    char *name = cursor_name(stream);
 
     if (batch <= 0) elog(ERROR, "fastpostgres_stream_next_rows: batch must be > 0");
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_next_rows: SPI_connect failed");
 
-    portal = SPI_cursor_find(name);
-    if (portal == NULL)
+    Portal portal = SPI_cursor_find(name);
+
+    if (portal == nullptr)
     {
         SPI_finish();
         elog(ERROR, "fastpostgres_stream_next_rows: no open stream \"%s\"", stream);
     }
-    td = portal->tupDesc;
 
-    if (!fastpostgres_rows_native(td))
+    TupleDesc td = portal->tupDesc;
+
+    if (!fp::rows_native(td))
     {
         /* an attribute the client cannot walk in place: the columnar frame */
         SPI_finish();
-        return fastpostgres_stream_next(stream, seg, batch, capacity);
+        return fp::stream_next(stream, seg, batch, capacity);
     }
 
-    nrows = fastpostgres_rows_fetch(portal, td, path, batch, capacity);
+    uint64 nrows = fp::rows_fetch(portal, td, path, batch, capacity);
+
     SPI_finish();
     return nrows;
 }
@@ -139,32 +148,30 @@ fastpostgres_stream_next_rows(const char *stream, const char *seg, int64 batch, 
  * publishes a scalar frame, so neither the columnar encoder nor the client ever
  * sees the rows. The plan resolves against this cursor's descriptor. */
 uint64
-fastpostgres_stream_next_reduce(const char *stream, const char *seg, int64 batch, size_t capacity,
-                                const char *plan)
+fp::stream_next_reduce(const char *stream, const char *seg, int64 batch, size_t capacity, const char *plan)
 {
-    char      *path = fastpostgres_shm_path(seg);
-    char      *name = cursor_name(stream);
-    Portal     portal;
-    TupleDesc  td;
-    HeapTuple *tuples;
-    uint64     nrows;
+    char *path = fp::shm_path(seg);
+    char *name = cursor_name(stream);
 
     if (batch <= 0) elog(ERROR, "fastpostgres_stream_next_reduce: batch must be > 0");
 
     if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres_stream_next_reduce: SPI_connect failed");
 
-    portal = SPI_cursor_find(name);
-    if (portal == NULL)
+    Portal portal = SPI_cursor_find(name);
+
+    if (portal == nullptr)
     {
         SPI_finish();
         elog(ERROR, "fastpostgres_stream_next_reduce: no open stream \"%s\"", stream);
     }
 
-    SPI_cursor_fetch(portal, true, (long)batch);
-    nrows  = SPI_processed;
-    td     = SPI_tuptable ? SPI_tuptable->tupdesc : portal->tupDesc;
-    tuples = SPI_tuptable ? SPI_tuptable->vals : NULL;
-    fastpostgres_reduce_publish(path, td, tuples, nrows, plan, capacity);
+    SPI_cursor_fetch(portal, true, static_cast<long>(batch));
+
+    uint64     nrows  = SPI_processed;
+    TupleDesc  td     = SPI_tuptable != nullptr ? SPI_tuptable->tupdesc : portal->tupDesc;
+    HeapTuple *tuples = SPI_tuptable != nullptr ? SPI_tuptable->vals : nullptr;
+
+    fp::reduce_publish(path, td, tuples, nrows, plan, capacity);
     SPI_finish();
     return nrows;
 }

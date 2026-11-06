@@ -7,28 +7,30 @@
  * opted out (FASTPOSTGRES_MEMFD=0), uses the eventfd engine, or the kernel
  * cannot make a sealed memfd; the reason is logged once, never silent.
  */
-#ifndef FASTPOSTGRES_SHM_UTIL_H
-#define FASTPOSTGRES_SHM_UTIL_H
+#pragma once
 
-#include <stddef.h>
+#include <cstddef>
 
 #include "fastpostgres/ring.h"
 
+namespace fp
+{
+
 /* "/<seg>" in the caller's memory context. */
-char *fastpostgres_shm_path(const char *seg);
+char *shm_path(const char *seg);
 
 /* Map the data segment named by `path` read-write, creating it on first use.
  * The mapping (and a memfd's descriptor) is cached for the worker's lifetime;
  * `*cap_out` is the capacity the mapping actually has, which is the size the
  * caller must use for its end pointer. */
-void *fastpostgres_shm_map_rw(const char *path, size_t size, size_t *cap_out);
+void *shm_map_rw(const char *path, std::size_t size, std::size_t *cap_out);
 
 /* Open the fd-handoff channel (when the ring asks for one) and reset the
  * segment cache. Called once by the ring worker before its first request. */
-void fastpostgres_shm_worker_begin(FastpostgresRing *ring);
+void shm_worker_begin(FastpostgresRing *ring);
 
 /* Unmap every cached segment, close the memfd descriptors and the handoff
  * socket. Called once as the ring worker exits. */
-void fastpostgres_shm_worker_end(void);
+void shm_worker_end(void);
 
-#endif
+} // namespace fp

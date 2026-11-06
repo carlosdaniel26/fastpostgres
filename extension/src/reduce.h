@@ -1,11 +1,15 @@
 /* reduce.h — the worker-side associative reduce (FPREDUCE). */
-#ifndef FASTPOSTGRES_REDUCE_H
-#define FASTPOSTGRES_REDUCE_H
+#pragma once
 
+extern "C" {
 #include "postgres.h"
 
 #include "access/htup.h"
 #include "access/tupdesc.h"
+}
+
+namespace fp
+{
 
 /* Accumulate `plan` over the batch's tuples and publish the scalar frame into
  * /dev/shm/<path>. The plan is
@@ -17,7 +21,7 @@
  * escapes ',' and '\' with a backslash. Returns the payload size.
  *
  * `capacity` fixes the segment size (0 = FASTPOSTGRES_SEGMENT_BYTES). */
-uint64 fastpostgres_reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows,
-                                   const char *plan, size_t capacity);
+uint64 reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
+                      size_t capacity);
 
-#endif
+} // namespace fp

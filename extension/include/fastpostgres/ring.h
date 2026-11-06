@@ -24,8 +24,7 @@
  * polling. A reader takes the two rows before and after a run; that diff is
  * what a change of wait policy would have to move.
  */
-#ifndef FASTPOSTGRES_RING_H
-#define FASTPOSTGRES_RING_H
+#pragma once
 
 #include <semaphore.h>
 #include <stdint.h>
@@ -64,8 +63,7 @@ enum FastpostgresRingOp
  * The events are counted, never timed by an extra clock: `spin_us` is the
  * measured time a bounded spin spent before falling back to the doorbell, and
  * it is zero when the spin caught the handoff. */
-typedef struct FastpostgresRingSide
-{
+typedef struct FastpostgresRingSide {
     uint64_t handoffs; /* client: requests posted; worker: requests answered */
     uint64_t posts;    /* semaphore posts made: the wake hint sent to the other side */
     uint64_t sleeps;   /* fallbacks to the semaphore: the wait a policy change would remove */
@@ -74,16 +72,14 @@ typedef struct FastpostgresRingSide
 
 /* What a change of wait policy has to move: both rows, and the pid whose CPU
  * /proc/<pid>/stat holds (the worker's; the client's is the reader's own). */
-typedef struct FastpostgresRingTally
-{
+typedef struct FastpostgresRingTally {
     FastpostgresRingSide client;
     FastpostgresRingSide worker;
     uint32_t             worker_pid; /* the callee, published before worker_ready */
     uint32_t             pad;
 } FastpostgresRingTally;
 
-typedef struct FastpostgresRing
-{
+typedef struct FastpostgresRing {
     char     magic[8];     /* "FPRING05" */
     uint32_t version;
     uint32_t worker_ready; /* release-store once the worker has mapped it */
@@ -100,7 +96,7 @@ typedef struct FastpostgresRing
     uint32_t batch;
     char     error[FASTPOSTGRES_RING_ERR];
     char     arg[FASTPOSTGRES_RING_ARG]; /* "<seg>\0<query|table>\0" */
-    FastpostgresRingTally tally; /* appended: FASTPOSTGRES_RING_TALLY_OFFSET */
+    FastpostgresRingTally tally;         /* appended: FASTPOSTGRES_RING_TALLY_OFFSET */
 
     /* ---- sealed-memfd data segments (optional; FPRING05 still reads this) ----
      *
@@ -114,8 +110,8 @@ typedef struct FastpostgresRing
      *
      * Appended after the tally, so every offset an older reader parses is
      * unchanged. */
-    uint32_t fd_handoff;  /* 1: the client is listening for memfd handoff */
-    uint32_t fd_pathlen;  /* bytes of sun_path in fd_path (0 when off) */
+    uint32_t fd_handoff;                         /* 1: the client is listening for memfd handoff */
+    uint32_t fd_pathlen;                         /* bytes of sun_path in fd_path (0 when off) */
     char     fd_path[FASTPOSTGRES_RING_FD_PATH]; /* abstract name, leading NUL */
 
     /* The eventfd engine's worker half, appended after the tally so the
@@ -123,7 +119,7 @@ typedef struct FastpostgresRing
      * process-local and live beside its mapping (engine_eventfd.c); only the
      * worker's received copies are published here, and only that worker reads
      * them. */
-    char     ring_name[64]; /* the client writes it before the worker starts */
+    char     ring_name[64];   /* the client writes it before the worker starts */
     int32_t  worker_req_efd;  /* the worker's received copy of the request bell */
     int32_t  worker_resp_efd; /* the worker's received copy of the response bell */
     uint32_t srv_pid;         /* the worker that attached this ring */
@@ -173,5 +169,3 @@ fastpostgres_ring_arg2(const char *arg)
 {
     return arg + strlen(arg) + 1;
 }
-
-#endif

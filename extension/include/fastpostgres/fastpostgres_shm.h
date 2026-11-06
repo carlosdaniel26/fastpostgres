@@ -12,8 +12,7 @@
  * a memory barrier; the reader checks seq before/after copying the payload to
  * detect a concurrent write (seqlock-style).
  */
-#ifndef FASTPOSTGRES_SHM_H
-#define FASTPOSTGRES_SHM_H
+#pragma once
 
 #include <stdint.h>
 #include <string.h>
@@ -314,8 +313,8 @@ fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
     version = fastpostgres_rd_u32(&r->p);
     if (version != FASTPOSTGRES_COLUMNAR_VERSION) return 0;
     (void)fastpostgres_rd_u32(&r->p); /* flags */
-    r->ncols = fastpostgres_rd_u32(&r->p);
-    r->nrows = fastpostgres_rd_u64(&r->p);
+    r->ncols    = fastpostgres_rd_u32(&r->p);
+    r->nrows    = fastpostgres_rd_u64(&r->p);
     columns_off = fastpostgres_rd_u64(&r->p);
     if (columns_off > len || (uint64_t)r->ncols * 8 > len - columns_off) return 0;
     r->table = p + columns_off;
@@ -774,16 +773,16 @@ fastpostgres_reduce_next(FastpostgresReduceReader *r, FastpostgresReduceSlot *s)
     const uint8_t *p;
 
     if (r->p == NULL || (uint64_t)(r->end - r->p) < FASTPOSTGRES_REDUCE_SLOT) return 0;
-    p           = r->p;
-    s->is_null  = *p++;
-    s->rtype    = *p++;
+    p          = r->p;
+    s->is_null = *p++;
+    s->rtype   = *p++;
     p += 2; /* pad */
     s->aux_off = fastpostgres_rd_u32(&p);
     s->aux_len = fastpostgres_rd_u32(&p);
     p += 4; /* pad before the 8-byte-aligned value */
-    s->lo      = fastpostgres_rd_u64(&p);
-    s->hi      = fastpostgres_rd_u64(&p);
-    r->p       = p;
+    s->lo = fastpostgres_rd_u64(&p);
+    s->hi = fastpostgres_rd_u64(&p);
+    r->p  = p;
     return 1;
 }
 
@@ -917,5 +916,3 @@ fastpostgres_shm_validate(const void *map, size_t size, uint64_t *payload_size)
     *payload_size = h->payload_size;
     return 1;
 }
-
-#endif
