@@ -203,7 +203,11 @@ def figure(section, data, series, colors, labels, title, headline, footer, scale
         theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.92), ncol=len(series),
                      handles=handles, labels=labels)
     theme.footer(fig, footer)
-    fig.subplots_adjust(left=0.20, right=0.97, top=0.79, bottom=0.20)
+    # The footer is packed to the figure width, so a run that carries more
+    # provenance (the ring's shared-memory line) wraps to a third line; give it
+    # the bottom margin it needs instead of letting it collide with the axis.
+    wrapped = theme.fit_caption(footer, fig.get_size_inches()[0], 8).count("\n") + 1
+    fig.subplots_adjust(left=0.20, right=0.97, top=0.79, bottom=0.20 + 0.035 * max(0, wrapped - 2))
     return fig
 
 
