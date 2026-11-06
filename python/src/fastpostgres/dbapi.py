@@ -307,6 +307,21 @@ _AGG_PUSHDOWN = os.environ.get("FASTPOSTGRES_AGG_PUSHDOWN", "1") != "0"
 # splits (fastpostgres.partition), and only when the driver can drive the rings
 # at once (_client.aggregate_frames); anything else keeps the one-ring path.
 _PARALLEL_ENV = "FASTPOSTGRES_PARALLEL"
+# A fan-out asks for more ranges than it has rings, so a partition that is
+# slower than its neighbours (dead tuples, a cold page range) does not set the
+# wall time: the thread that finishes early takes the next range.
+_RANGE_MULT = 3
+# Below this the fan-out is not worth its fixed costs (plan per range, wakeups).
+# One page = 8 KiB; 1024 pages is 8 MiB.
+_FANOUT_MIN_BYTES = 8 << 20
+# Import one exported snapshot into every partition, so N backends read one
+# point in time instead of N. Costs a BEGIN/export/COMMIT round trip per call.
+# OFF by default: the worker-side import (stream_open -> SET TRANSACTION
+# SNAPSHOT) still wedges the ring on this build, so the fan-out's partitions
+# take independent snapshots unless FASTPOSTGRES_SNAPSHOT=1 asks for the shared
+# one. See reduce/worker notes; this is the one item left unfinished.
+_SNAPSHOT = os.environ.get("FASTPOSTGRES_SNAPSHOT", "0") != "0"
+_fanout_max = None
 
 
 def _agg_plan(plan) -> str:
@@ -998,6 +1013,208 @@ def _ring_acquire(bootstrap, block=False, timeout=None):
             _pool_cond.wait(min(_ACQUIRE_POLL, max(0.0, deadline - time.monotonic())))
 
 
+def _physical_cores() -> int:
+    """Hardware cores, not SMT threads: a ring worker is one backend on one core."""
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    quota = _cgroup_cpu_threads()
+    if quota:
+        cpus = min(cpus, quota)
+    return max(1, cpus // _threads_per_core())
+
+
+def _fanout_capacity(conn) -> int:
+    """How many rings one query may fan out over.
+
+    The pool's own size divides the machine by ``_THREADS_PER_STREAM`` because a
+    GIL-bound read costs a client decode beside its worker. A fan-out's client
+    threads only block in ``wait()`` (or, for ``stream()``, copy nothing), so the
+    bound is the cores themselves — and the server's worker budget, which is what
+    actually caps it on the default transport.
+    """
+    global _fanout_max, _pool_size
+
+    if _fanout_max is not None:
+        return _fanout_max
+    want = min(_physical_cores(), _POOL_MAX)
+    if _TRANSPORT == "shm":
+        slots = _server_ring_slots(conn)
+        if slots is not None:
+            want = min(want, slots)
+    want = max(1, want)
+    _fanout_max = want
+    # Let the pool grow to the fan-out's size: it is the same rings, and a
+    # fan-out that cannot get them would silently run at half width.
+    if _POOL_ENV is None and (_pool_size or 0) < want:
+        _pool_size = want
+    return want
+
+
+def _fanout_want(conn, parallel) -> int:
+    """The rings a call asks for: the argument, the env override, or the machine."""
+    if parallel is not None:
+        try:
+            return int(parallel)
+        except (TypeError, ValueError):
+            return 1
+    env = os.environ.get(_PARALLEL_ENV, "auto").strip().lower()
+    if env in ("", "auto", "all"):
+        return _fanout_capacity(conn)
+    if env in ("0", "1", "off", "false", "no"):
+        return 1
+    try:
+        return int(env)
+    except ValueError:
+        return 1
+
+
+class _Split:
+    """One query split across ctid page ranges, and the snapshot they share.
+
+    ``close()`` ends the exporting transaction when one was started; every path
+    that creates a _Split must call it, or the connection stays in a transaction
+    and its snapshot stays pinned.
+    """
+
+    __slots__ = ("sqls", "relpages", "snapshot", "_conn", "_began")
+
+    def __init__(self, conn):
+        self.sqls = None
+        self.relpages = 0
+        self.snapshot = ""
+        self._conn = conn
+        self._began = False
+
+    def close(self):
+        if self._began:
+            self._began = False
+            try:
+                self._conn.exec("COMMIT")
+            except Exception:
+                pass
+
+
+def _split(conn, sql, want, min_bytes=_FANOUT_MIN_BYTES):
+    """Split `sql` into wat*_RANGE_MULT disjoint page ranges, or None.
+
+    None means "do not fan out": the statement is not a simple single-table
+    SELECT, the relation has fewer bytes than the break-even, or the snapshot
+    could not be exported. The caller keeps the single-ring path, unchanged.
+    """
+    if want < 2:
+        return None
+    table = partition.table_of(sql)
+    if table is None:
+        return None
+
+    sp = _Split(conn)
+    if _SNAPSHOT:
+        try:
+            conn.exec("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            sp._began = True
+            sp.snapshot = str(conn.exec("SELECT pg_export_snapshot()").rows[0][0])
+        except Exception:
+            sp.close()
+
+    quoted = table.replace("'", "''")
+    try:
+        sp.relpages = int(
+            conn.exec(
+                "SELECT greatest(relpages, pg_relation_size(oid)"
+                " / current_setting('block_size')::int)"
+                f" FROM pg_class WHERE oid = '{quoted}'::regclass"
+            ).rows[0][0]
+        )
+    except Exception:
+        sp.close()
+        return None  # not a table, not visible: the serial path says why
+
+    if sp.relpages * 8192 < min_bytes:
+        sp.close()  # too small to pay for a plan and a wakeup per range
+        return None
+
+    sqls = partition.partition_sql(sql, want * _RANGE_MULT, sp.relpages)
+    if sqls is None or len(sqls) < 2:
+        sp.close()
+        return None
+    sp.sqls = sqls
+    return sp
+
+
+def _acquire_many(conn, want, block=False):
+    """Up to `want` leases, in this thread: one ring per partition."""
+    out = []
+    for _ in range(want):
+        info = _ring_acquire(conn, block=block)
+        if info is None:
+            break
+        out.append(info)
+    return out
+
+
+def _release_many(infos):
+    for info in infos:
+        _ring_release(info)
+
+
+class _FanRing:
+    """One ring of a stream fan-out: its ranges and the batch in flight.
+
+    Each ring alternates two data segments, so the next batch is already being
+    written while the caller reads the current one — the same pipelining the
+    single-ring lazy read uses, applied per partition.
+    """
+
+    __slots__ = ("info", "ring", "seg", "ranges", "idx", "slot", "posted")
+
+    def __init__(self, info, ranges):
+        self.info = info
+        self.ring, self.seg, _pid = info
+        self.ranges = ranges
+        self.idx = 0
+        self.slot = 0
+        self.posted = False
+
+    def segments(self):
+        return (self.seg + "_a", self.seg + "_b")
+
+    def open(self, size):
+        self.ring.open(self.seg, self.ranges[0])
+        self.post(0, size)
+
+    def post(self, slot, size):
+        self.slot = slot
+        self.ring.post(self.segments()[slot], size)
+        self.posted = True
+
+    def advance(self, size):
+        """The current range ended: open the next one, or stop."""
+        self.idx += 1
+        if self.idx >= len(self.ranges):
+            self.posted = False
+            return False
+        try:
+            self.ring.close()  # the worker's OPEN would abort it anyway; be explicit
+        except Exception:
+            pass
+        self.ring.open(self.seg, self.ranges[self.idx])
+        self.post(0, size)
+        return True
+
+    def close(self):
+        try:
+            if self.posted:
+                self.ring.wait()  # an unanswered post must be drained first
+        except Exception:
+            pass
+        try:
+            self.ring.close()
+        except Exception:
+            pass
+
+
 _warned_no_workers = False
 
 
@@ -1121,6 +1338,34 @@ class Connection:
         self.shm_reads += 1
         return _Result(fields or [], field_types or [], rows, len(rows))
 
+    def _fan_lazy(self, sql, size):
+        """The columnar result of a split query as one ResultSet, or None.
+
+        The batches are copied out of each partition's segment as they arrive
+        (`_own_columns`), so the result owns its bytes and the rings go back to
+        the pool immediately — the same contract the single-ring lazy read has.
+        """
+        gen = Cursor(self)._stream_fanout(sql, size)
+        if gen is None:
+            return None
+        frames = []
+        keys = types = None
+        total = 0
+        try:
+            for batch in gen:
+                if keys is None:
+                    keys = [column.name for column in batch.columns]
+                    types = [column.pgtype for column in batch.columns]
+                if batch.row_count:
+                    frames.append((batch.row_count, _own_columns(batch.columns, batch.row_count)))
+                    total += batch.row_count
+        except Exception as exc:
+            _note_fallback(type(exc).__name__, detail=f"{type(exc).__name__}: {exc}")
+            return None
+        finally:
+            gen.close()
+        return ResultSet(frames, keys or [], types or [], total)
+
     def _shm_read_lazy(self, sql, size=_SHM_BATCH, lease=None):
         """The same read, but the result is a columnar ResultSet.
 
@@ -1146,6 +1391,11 @@ class Connection:
             lease = self._lease
         if lease and _LEASE_BATCH > size:
             size = _LEASE_BATCH
+        if not lease:
+            fan = self._fan_lazy(sql, size)
+            if fan is not None:
+                self.shm_reads += 1
+                return fan
         info = _ring_acquire(self._conn, block=self._wait)
         if info is None:
             if pool_size() > 0:  # size 0 is the explicit "no ring" configuration
@@ -1435,18 +1685,20 @@ class Cursor:
         ``count`` works on every kind. Numeric is exact on the worker path;
         with the pushdown off the columnar frame's float8 widening applies.
 
-        One call can also fan out over the ring pool: ``parallel=N`` — or the
-        process-wide ``FASTPOSTGRES_PARALLEL=N`` default, which it overrides —
-        splits a simple single-table SELECT into N disjoint ctid page ranges,
-        renders each as a ``Tid Range Scan``, and drives one ring per range
-        concurrently. Each range is reduced where its tuples are and the partial
-        scalars are folded with the serial path's own combine, so the answer is
-        the one scan's answer, exactly. Only a plain
-        ``SELECT ... FROM one_table [WHERE ...]`` splits
-        (see ``fastpostgres.partition``); a join, grouping, ordering, limit, set
+        One call also fans out over the ring pool. ``parallel=N`` sets the width;
+        with no argument the process-wide ``FASTPOSTGRES_PARALLEL`` decides:
+        ``auto`` (the default) uses one ring per physical core, bounded by the
+        server's free worker slots, and only for a relation of at least 8 MiB;
+        ``1`` disables the fan-out. A split is a simple single-table SELECT cut
+        into disjoint ctid page ranges — each a ``Tid Range Scan`` — with every
+        range reduced where its tuples are and the partial scalars folded by the
+        serial path's own combiner, so the answer is the one scan's answer,
+        exactly. Every range is imported into one exported snapshot, so the N
+        backends read one point in time, not N. Only
+        ``SELECT ... FROM one_table [WHERE ...]`` splits (see
+        ``fastpostgres.partition``); a join, grouping, ordering, limit, set
         operation, CTE, window or a subquery in FROM keeps the single-ring path,
-        as does a table too small to have one page per range. ``parallel=1``
-        (the default) never splits.
+        as does a relation too small to pay for the fan-out.
         """
         sql = operation if parameters is None else _inline(operation, parameters)
         if not self.connection._shm:
@@ -1484,56 +1736,35 @@ class Cursor:
         op_codes = [op for op, _column in internal]
 
         # The fan-out: a simple single-table SELECT splits into disjoint ctid page
-        # ranges, one ring per range, and the driver reduces all of them at once.
-        # None means "not split": the single-ring path below runs, unchanged.
+        # ranges and the driver reduces them all at once, one range per pooled
+        # worker (with more ranges than workers, so a slow partition does not set
+        # the wall time). None means "not split": the single-ring path below runs,
+        # unchanged.
         acc = None
-        parts = int(parallel) if parallel is not None else int(os.environ.get(_PARALLEL_ENV, "1"))
         if (
-            parts > 1
-            and _AGG_PUSHDOWN  # the fan-out is the worker's reduce, driven N times
+            _AGG_PUSHDOWN  # the fan-out is the worker's reduce, driven N times
             and hasattr(_client, "aggregate_frames")
             and hasattr(_client, "read_reduce_bytes")  # it ships with its frame decoder
         ):
-            table = partition.table_of(sql)
-            relpages = None
-            if table is not None:
-                # relpages is only refreshed by VACUUM/ANALYZE, and a table that has
-                # only ever been inserted into still reports 0 — so ask the relation
-                # for its real size as well and take the larger. A stale page count
-                # would leave the tail of the relation outside every range.
-                quoted = table.replace("'", "''")
-                try:
-                    relpages = self.connection._conn.exec(
-                        "SELECT greatest(relpages, pg_relation_size(oid)"
-                        " / current_setting('block_size')::int)"
-                        f" FROM pg_class WHERE oid = '{quoted}'::regclass"
-                    ).rows[0][0]
-                except Exception:
-                    relpages = None  # not a table, not visible: the serial path says why
-            sqls = None if relpages is None else partition.partition_sql(sql, parts, int(relpages))
-            if sqls is not None:
-                infos = []  # [(ring, segment, pid)], one lease per partition
-                try:
-                    for _ in range(len(sqls)):
-                        lease = _ring_acquire(self.connection._conn, block=False)
-                        if lease is None:
-                            break
-                        infos.append(lease)
-                    # Fewer rings than ranges is fine — re-split down to the rings we
-                    # hold so every page is still covered. Fewer than two is not: the
-                    # single-ring path is simpler, and driving a prefix of the ranges
-                    # would silently drop the pages it skipped.
-                    if len(infos) >= 2 and len(infos) < len(sqls):
-                        sqls = partition.partition_sql(sql, len(infos), int(relpages))
-                    if len(infos) >= 2 and sqls is not None:
+            infos = []
+            split = None
+            try:
+                want = _fanout_want(self.connection._conn, parallel)
+                split = _split(self.connection._conn, sql, want)
+                if split is not None:
+                    infos = _acquire_many(self.connection._conn, min(want, len(split.sqls)))
+                    if len(infos) >= 2:
                         # OPEN/REDUCE/CLOSE per ring is the driver's: do not drive
                         # these rings from here, they are leased to that one call.
+                        # Every range is handed over, not one per ring: the driver
+                        # takes them from a shared index as threads free up.
                         frames = _client.aggregate_frames(
                             [info[0] for info in infos],
                             [info[1] for info in infos],
-                            sqls,
+                            split.sqls,
                             _agg_plan(internal),
                             size,
+                            split.snapshot,
                         )
                         # One buffer per ring is the contract. Fewer would mean a
                         # partition's contribution is missing, which reads as a
@@ -1571,9 +1802,11 @@ class Cursor:
                                     break
                             if walked:
                                 acc = combined
-                finally:
-                    for info in infos:  # every lease goes back, on every path
-                        _ring_release(info)
+            finally:
+                for info in infos:  # every lease goes back, on every path
+                    _ring_release(info)
+                if split is not None:
+                    split.close()  # ends the exporting transaction, if one was begun
 
         if acc is None:
             info = _ring_acquire(self.connection._conn, block=self.connection._wait)
@@ -1689,6 +1922,10 @@ class Cursor:
             raise NotSupportedError("stream() is disabled on this connection (shm=False)")
         if not _is_read_only(sql):
             raise NotSupportedError("stream() serves read-only SELECTs over /dev/shm")
+        fan = self._stream_fanout(sql, size)
+        if fan is not None:
+            yield from fan
+            return
         info = _ring_acquire(self.connection._conn, block=self.connection._wait)
         if info is None:
             if pool_size() > 0:
@@ -1713,6 +1950,66 @@ class Cursor:
             except Exception:
                 pass
             _ring_release(info)
+
+    def _stream_fanout(self, sql, size):
+        """Batches from N partitions of `sql`, or None when it does not split.
+
+        One ring per partition, every worker driven concurrently, batches handed
+        back as each partition produces them. The views alias that partition's
+        segment and are valid until it pulls again (its next batch, ~N batches
+        later), which is the same contract the single-ring stream has.
+        """
+        want = _fanout_want(self.connection._conn, None)
+        if want < 2:
+            return None
+        split = _split(self.connection._conn, sql, want)
+        if split is None:
+            return None
+        infos = []
+        try:
+            infos = _acquire_many(self.connection._conn, min(want, len(split.sqls)))
+        except Exception:
+            for info in infos:
+                _ring_release(info)
+            split.close()
+            return None
+        if len(infos) < 2:
+            for info in infos:
+                _ring_release(info)
+            split.close()
+            return None
+
+        rings = [_FanRing(info, split.sqls[n :: len(infos)]) for n, info in enumerate(infos)]
+        return self._fan_generator(rings, split, size)
+
+    def _fan_generator(self, rings, split, size):
+        last = None
+        yielded = False
+        try:
+            for part in rings:
+                part.open(size)
+            while any(part.posted for part in rings):
+                for part in rings:
+                    if not part.posted:
+                        continue
+                    n = part.ring.wait()
+                    part.posted = False
+                    segname = part.segments()[part.slot]
+                    last = segname
+                    if n:
+                        part.slot ^= 1
+                        part.post(part.slot, size)
+                        yielded = True
+                        yield _client.read(segname)
+                    else:
+                        part.advance(size)  # next range, or this ring is done
+            if not yielded and last is not None:
+                yield _client.read(last)  # an empty result still carries its schema
+        finally:
+            for part in rings:
+                part.close()
+                _ring_release(part.info)
+            split.close()
 
     def fetchone(self):
         if self._pos >= len(self._rows):
