@@ -77,6 +77,8 @@ def col(value, width, right):
     return s.rjust(width) if right else s.ljust(width)
 
 
+from concurrent.futures import ThreadPoolExecutor
+
 # ---- what each player does ------------------------------------------------
 
 
@@ -169,6 +171,63 @@ def read_arrow_table(conn):
     ms = (now() - t0) * 1000
     return ms, table.num_rows
 
+# ---- the same rival, using all the cores it can ---------------------------
+#
+# fetch_arrow_table() is one connection against one backend: one core, which is
+# what the two-player section above measures. Arrow's own answer to more
+# bandwidth is more connections, and PostgreSQL's is more backends, so the fair
+# comparison to the ring's fan-out is the same ctid page ranges fetched by N
+# ADBC connections at once and concatenated into one table. The ranges come
+# from fastpostgres.partition (SQL text only, no transport): identical slicing
+# on both sides, so the difference measured is delivery.
+
+ARROW_MT = "adbc+arrow, threads"
+# One per physical core less one, the same budget the ring's fan-out leaves
+# (its own client thread and the server both need somewhere to run).
+ARROW_THREADS = max(2, min(8, (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 4)) // 2 - 1))
+REL_PAGES = (
+    "SELECT greatest(relpages, pg_relation_size(oid) / current_setting('block_size')::int)"
+    " FROM pg_class WHERE oid = 'fp_bench_rows'::regclass"
+)
+
+
+def open_arrow_pool():
+    """N connections, each with its own page range of the same read."""
+    from fastpostgres import partition
+
+    conns = [adbc.connect(ARROW_URI) for _ in range(ARROW_THREADS)]
+    cur = conns[0].cursor()
+    cur.execute(REL_PAGES)
+    relpages = int(cur.fetchone()[0])
+    cur.close()
+    conns[0].rollback()
+    sqls = partition.partition_sql(CORE_SQL, ARROW_THREADS, relpages)
+    if not sqls or len(sqls) < 2:
+        return [(conn, CORE_SQL) for conn in conns]  # too small to split: all read it all
+    return list(zip(conns, sqls))
+
+
+def _arrow_one(pair):
+    conn, sql = pair
+    cur = conn.cursor()
+    cur.execute(sql)
+    table = cur.fetch_arrow_table()
+    cur.close()
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    return table
+
+
+def read_arrow_table_mt(pairs):
+    """The same read, N connections and N page ranges, one Arrow table out."""
+    t0 = now()
+    with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
+        tables = list(pool.map(_arrow_one, pairs))
+    ms = (now() - t0) * 1000
+    return ms, sum(table.num_rows for table in tables)
+
 
 # ---- the headline section ------------------------------------------------
 #
@@ -182,6 +241,7 @@ SECTIONS = {
         "players": (
             (FPG, "stream()", open_dbapi, read_stream),
             (ARROW, "arrow table", open_arrow, read_arrow_table),
+            (ARROW_MT, f"arrow, {ARROW_THREADS} conns", open_arrow_pool, read_arrow_table_mt),
         ),
         "ratio": "vs arrow",
     },
@@ -236,7 +296,8 @@ def drive(section, key, n, reps):
             times.append(ms)
         return statistics.median(times), count, min(times), max(times)
     finally:
-        handle.close()
+        if hasattr(handle, "close"):
+            handle.close()
 
 
 def spawn(args):
