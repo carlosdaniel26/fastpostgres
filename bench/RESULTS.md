@@ -8,6 +8,8 @@ end: the harness's environment block (`cpu`, `postgres`, `python`, the versions,
 
 | record | what it is | the argument it backs |
 |---|---|---|
+| `main-final-ab.log` | the integrated tree against the untouched baseline, 100K / 1M / 10M, both shapes | [`README.md`](../README.md#measured-results) |
+| `integration-backlog-ab.log` | the nine backlog workstreams merged into one tree, against the baseline | [`INTEGRATION.md`](../INTEGRATION.md) |
 | `fastpostgres-vs-arrow.log`, `-mixed`, `-small` | the read against ADBC + Arrow, at three sizes and two shapes | [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
 | `fastpostgres-vs-arrow-memory.log` | the same reads with the ring's buffer fixed: what each side held | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
 | `fastpostgres-vs-pgcache.log` | against a CDC-maintained result cache, each side at its defaults | [`PG-CACHE.md`](PG-CACHE.md) |

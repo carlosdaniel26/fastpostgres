@@ -36,9 +36,9 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 ## Why FastPostgres
 
-- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks land the same columnar read, that is 3.5-3.7x ADBC + Arrow, at 100K, 1M and 10M rows.
+- **Nothing is parsed on the client, and the ratio says so.** The bytes the executor wrote are the bytes the client reads: no text encoding, no value parsing, no per-row Python object unless the caller wants one. Where both stacks land the same columnar read, that is **6.2-6.6x ADBC + Arrow**, at 100K, 1M and 10M rows (6.5-7.0x on the harder `mixed` shape).
 - **The executor's own tuples.** The row frame carries PostgreSQL's tuples as they lie, one `memcpy` per row, so every type the server can store can be sent; types whose storage is not the wire bytes take the columnar frame instead.
-- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 8.0-8.7M rows/s on the same read where ADBC + Arrow lands 2.3M.
+- **Zero-copy column views.** `stream()` hands back views over the segment's columns, so a sum, a filter or a conversion to numpy touches the shared memory in place: 14.7-14.9M rows/s on the same read where ADBC + Arrow lands 2.3M.
 - **One wire format, defined once.** Reader and writer share the same header, and the benchmark generator includes it too, so the format cannot drift between them.
 - **Composes with a cache, does not compete with one.** A result cache removes execution on repeated queries; this removes delivery on every query. A cached aggregate beats reading the same rows 61x, and the ring beats a cached large result 2.6x; the two are measured against each other in [`bench/PG-CACHE.md`](bench/PG-CACHE.md).
 - **One URL.** No new query language, no annotation, no client rewrite: the same SQLAlchemy application, on a driver whose reads take a different road.
@@ -76,7 +76,7 @@ on demand, and `fetchall(force_tuples=True)` when a plain list is required.
 
 ## Measured results
 
-All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md).
+All numbers below are from committed logs, on an AMD Ryzen 7 7700 (8 cores / 16 threads, 30 GiB RAM), in a Debian container on `postgres:18`, with `/dev/shm` at 3 GiB. Each player runs in a process of its own, one at a time, with a warm read before the timed ones; the protocol and its threats to validity are in [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md), and every record is indexed in [`bench/RESULTS.md`](bench/RESULTS.md). The read-path headline below is the integrated run in [`bench/results/main-final-ab.log`](bench/results/main-final-ab.log) (`main@a990ca5`, 100K/1M/10M).
 
 ### Where it loses
 
@@ -95,18 +95,26 @@ The rival is the Arrow ecosystem's own answer to the same read - ADBC's PostgreS
 
 ![FastPostgres vs ADBC + Arrow: the same read, nothing consumed](docs/assets/zerocopy-read.png)
 
-That is **3.5-3.7x faster on the same read**. The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first. The DB-API's tuple read is not compared: building Python objects is what an application pays on either stack, and no transport changes that.
+That is **6.2-6.6x faster on the same read** (100K 6.25x, 1M 6.55x, 10M 6.38x). The shm bytes are read where they landed, while ADBC converts the wire data into Arrow buffers first. The default DB-API read is now the same lazy columnar path (one copy per column, a tuple only for a row that is read), so it lands at the same rate as `stream()` instead of paying a Python object per value.
 
-The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the columnar comparison reads **3.6-3.7x**: the data costs FastPostgres ~15-20% and ADBC ~16-19%, so the ratio holds.
+The ranking survives a harder shape. With `SHAPE=mixed` - NULLs on ~10% of the values, text on both sides of the 126-byte varlena split, a non-ASCII value every eighth row - the columnar comparison reads **6.5-7.0x** (100K 7.03x, 1M 6.55x), so the ratio holds.
 
-The same read also reports the rest of what FastPostgres does with its rows, against its own driver read:
+| rows (`bench` shape) | FastPostgres `stream()` | ADBC + Arrow | ratio |
+|---|---:|---:|---:|
+| 100K | 14.66M | 2.35M | 6.25x |
+| 1M | 14.75M | 2.25M | 6.55x |
+| 10M | 14.90M | 2.34M | 6.38x |
 
-| path (1M rows, `bench` shape) | vs the plain driver read |
+The figure is the original record; the integrated numbers are in the table.
+
+The same read also reports the rest of what FastPostgres does with its rows, against its own default DBAPI read:
+
+| path (1M rows, `bench` shape) | vs the DBAPI read |
 |---|---|
-| `stream()` | +112-141% |
-| `fastpostgres.core` (the lean interface) | level with the DBAPI |
-| four processes, DBAPI | +122-145% aggregate (the ring pool and memory bandwidth saturate) |
-| ADBC Arrow, for reference | -38-43% |
+| `stream()` (zero-copy views) | level (+4%): the default is the same columnar path |
+| `fastpostgres.core` (the lean interface) | level (-1%) |
+| four processes, DBAPI | +216% aggregate (the ring pool and memory bandwidth saturate) |
+| ADBC Arrow, for reference | -83% |
 
 ### What each side holds: against Arrow under a fixed buffer
 
