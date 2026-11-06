@@ -23,7 +23,12 @@ def setUpModule():
             f"CREATE TABLE {TABLE} AS SELECT g::int4 AS id, (g % 97)::int8 AS part, "
             f"((g * 0.5) - 2500)::float8 AS price, "
             f"(CASE WHEN g % 10 = 0 THEN NULL ELSE (g % 500)::int4 END) AS stock, "
-            f"(g % 2 = 0) AS active "
+            f"(g % 2 = 0) AS active, "
+            f"('item-' || lpad((g % 2000)::text, 4, '0'))::text AS txt, "
+            f"(date '2020-01-01' + (g % 400)::int) AS day, "
+            f"(timestamp '2020-01-01' + (g % 400) * interval '1 hour') AS ts, "
+            f"((g % 1000)::numeric / 7) AS amount, "
+            f"(CASE WHEN g % 2 = 0 THEN 9223372036854775807::int8 ELSE 1::int8 END) AS big "
             f"FROM generate_series(1, 250000) g"
         )
         conn.exec(f"ANALYZE {TABLE}")
@@ -124,9 +129,112 @@ class AggregateTest(unittest.TestCase):
         pushed = self.cur.aggregate(f"SELECT id, price, stock FROM {TABLE}", ops, size=30000)
         self.assertEqual(pushed, client)
 
+    def test_bigint_sum_is_exact(self):
+        """sum(bigint) is numeric on the server: 64-bit wrapping is not an answer."""
+        sql = f"SELECT big FROM {TABLE}"
+        got = self.cur.aggregate(sql, {"s": ("sum", "big"), "avg": ("avg", "big")})
+        want = self.server(f"SELECT sum(big), avg(big) FROM {TABLE}")
+        self.assertGreater(want[0], 2**63)
+        self.assertEqual(got["s"], int(want[0]))
+        self.assertEqual(got["avg"], want[1])
+        with mock.patch.object(dbapi, "_AGG_PUSHDOWN", False):
+            client = self.cur.aggregate(sql, {"s": ("sum", "big")})
+        self.assertEqual(client["s"], int(want[0]))
+
+    def test_negative_bigint_sum_is_exact(self):
+        sql = "SELECT x FROM (VALUES (-9223372036854775807::int8), (-2::int8)) t(x)"
+        got = self.cur.aggregate(sql, {"s": ("sum", "x"), "a": ("avg", "x")})
+        want = self.server(sql.replace("SELECT x", "SELECT sum(x), avg(x)"))
+        self.assertEqual(got["s"], int(want[0]))
+        self.assertEqual(got["a"], want[1])
+        with mock.patch.object(dbapi, "_AGG_PUSHDOWN", False):
+            client = self.cur.aggregate(sql, {"s": ("sum", "x")})
+        self.assertEqual(client["s"], int(want[0]))
+
+    def test_avg_matches_the_server(self):
+        got = self.cur.aggregate(
+            f"SELECT id, price, amount FROM {TABLE}",
+            {
+                "id_avg": ("avg", "id"),
+                "price_avg": ("avg", "price"),
+                "amount_avg": ("avg", "amount"),
+            },
+            size=100000,
+        )
+        want = self.server(f"SELECT avg(id), avg(price), avg(amount) FROM {TABLE}")
+        self.assertEqual(got["id_avg"], want[0])  # numeric on the server -> Decimal here
+        self.assertAlmostEqual(got["price_avg"], want[1], places=9)
+        self.assertEqual(got["amount_avg"], want[2])
+
+    def test_empty_avg_is_null(self):
+        got = self.cur.aggregate(
+            f"SELECT id, price, amount FROM {TABLE} WHERE false",
+            {"id_avg": ("avg", "id"), "price_avg": ("avg", "price"), "amount_avg": ("avg", "amount")},
+        )
+        self.assertIsNone(got["id_avg"])
+        self.assertIsNone(got["price_avg"])
+        self.assertIsNone(got["amount_avg"])
+
+    def test_text_temporal_and_numeric_min_max(self):
+        got = self.cur.aggregate(
+            f"SELECT txt, day, ts, amount FROM {TABLE}",
+            {
+                "txt_lo": ("min", "txt"),
+                "txt_hi": ("max", "txt"),
+                "txt_seen": ("count", "txt"),
+                "day_lo": ("min", "day"),
+                "day_hi": ("max", "day"),
+                "ts_lo": ("min", "ts"),
+                "ts_hi": ("max", "ts"),
+                "amount_lo": ("min", "amount"),
+                "amount_hi": ("max", "amount"),
+                "amount_sum": ("sum", "amount"),
+            },
+            size=100000,
+        )
+        want = self.server(
+            f"SELECT min(txt), max(txt), count(txt), min(day), max(day), "
+            f"min(ts), max(ts), min(amount), max(amount), sum(amount) FROM {TABLE}"
+        )
+        for key, value in zip(
+            ("txt_lo", "txt_hi", "txt_seen", "day_lo", "day_hi", "ts_lo", "ts_hi",
+             "amount_lo", "amount_hi", "amount_sum"),
+            want,
+        ):
+            self.assertEqual(got[key], value, key)
+
+    def test_count_works_on_text(self):
+        got = self.cur.aggregate(f"SELECT txt FROM {TABLE}", {"n": ("count", "txt")})
+        self.assertEqual(got["n"], 250000)
+
+    def test_avg_scale_matches_the_server(self):
+        """PostgreSQL keeps 16 significant base-10000 digits, not 16 decimals."""
+        cases = [
+            "SELECT x FROM (VALUES (0::int), (1::int)) t(x)",
+            "SELECT x FROM (VALUES (-1::int), (-2::int)) t(x)",
+            "SELECT x FROM (VALUES (1::int), (2::int), (4::int)) t(x)",
+            "SELECT x FROM (VALUES (1000000000000000000000::numeric), (3::numeric)) t(x)",
+            "SELECT x FROM (VALUES (1.00::numeric(10, 2)), (2.00::numeric(10, 2))) t(x)",
+            "SELECT x FROM (VALUES (0.0001::numeric), (0.0003::numeric)) t(x)",
+        ]
+        for sql in cases:
+            got = self.cur.aggregate(sql, {"a": ("avg", "x")})["a"]
+            want = self.server(sql.replace("SELECT x", "SELECT avg(x)"))[0]
+            self.assertEqual(got, want, sql)
+
+    def test_text_min_max_uses_the_server_collation(self):
+        sql = "SELECT x FROM (VALUES ('B'), ('a'), ('A'), ('b'), ('aa'), ('z')) t(x)"
+        got = self.cur.aggregate(sql, {"lo": ("min", "x"), "hi": ("max", "x")})
+        want = self.server(sql.replace("SELECT x", "SELECT min(x), max(x)"))
+        self.assertEqual((got["lo"], got["hi"]), tuple(want))
+
     def test_unsupported_kind_is_refused(self):
         with self.assertRaises(dbapi.ProgrammingError):
             self.cur.aggregate(f"SELECT ('x' || id)::text AS s FROM {TABLE}", {"n": ("sum", "s")})
+
+    def test_avg_needs_a_column(self):
+        with self.assertRaises(dbapi.ProgrammingError):
+            self.cur.aggregate(f"SELECT id FROM {TABLE}", {"n": ("avg", None)})
 
     def test_bad_plans_are_refused(self):
         for ops in (

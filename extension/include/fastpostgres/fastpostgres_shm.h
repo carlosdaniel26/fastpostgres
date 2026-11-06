@@ -688,30 +688,59 @@ fastpostgres_rows_reserve(FastpostgresRowsWrite *w, uint32_t len, const char *en
  *
  * A reduce request names a plan (op + column) and the worker accumulates over
  * the fetched batch itself; what lands in the segment is one slot per op, not
- * the batch. The frame is tiny (32 + 16*nops bytes) and identical on both
- * sides, like the columnar and row frames above.
+ * the batch. The frame is small (32 + 32*nops bytes plus any text) and
+ * identical on both sides, like the columnar and row frames above.
  *
  * Payload:
  *   magic[8] "FPREDUCE", version u32, flags u32, nops u32, pad u32, nrows u64,
- *   per op: is_null u8, is_float u8, pad[2], value u64 (int64 or double bits).
+ *   per op: is_null u8, rtype u8, pad[2], aux_off u32, aux_len u32, pad[4],
+ *           lo u64, hi u64,
+ *   then the aux byte pool (text / numeric output), addressed from the slots.
+ *
+ * `hi:lo` is a two's-complement int128 for an integer SUM (the server's
+ * sum(bigint) is numeric, so 64 bits is not enough), a signed int64 for
+ * COUNT/MIN/MAX, or the IEEE-754 double's bits. `rtype` says which. Text,
+ * bytea and numeric min/max carry their bytes in the aux pool; that is what
+ * lets text min/max be computed with the server's collation rather than
+ * shipped as rows for the client to compare.
  *
  * nrows is the batch's row count, so COUNT_ALL needs no slot of its own; the
  * slot is still emitted (the client's plan is positional). `is_null` is what
  * an empty MIN/MAX carries; SUM/COUNT write their identity instead.
  * ------------------------------------------------------------------------- */
 #define FASTPOSTGRES_REDUCE_MAGIC   "FPREDUCE"
-#define FASTPOSTGRES_REDUCE_VERSION 1
+#define FASTPOSTGRES_REDUCE_VERSION 2
 #define FASTPOSTGRES_REDUCE_FRAME   (8u + 4u + 4u + 4u + 4u + 8u)
-#define FASTPOSTGRES_REDUCE_SLOT    12u /* 4-byte header + 8-byte value */
+#define FASTPOSTGRES_REDUCE_SLOT    32u
 #define FASTPOSTGRES_REDUCE_MAX_OPS 64
+
+/* What `hi:lo` (and the aux bytes) mean. */
+enum FastpostgresReduceValue
+{
+    FASTPOSTGRES_RVAL_INT64       = 1,  /* lo, signed */
+    FASTPOSTGRES_RVAL_INT128      = 2,  /* hi:lo, two's complement */
+    FASTPOSTGRES_RVAL_DOUBLE      = 3,  /* lo is the IEEE double's bits */
+    FASTPOSTGRES_RVAL_TEXT        = 4,  /* aux bytes, UTF-8 */
+    FASTPOSTGRES_RVAL_BYTEA       = 5,  /* aux bytes, raw */
+    FASTPOSTGRES_RVAL_DATE        = 6,  /* lo: int32 days since 2000-01-01 */
+    FASTPOSTGRES_RVAL_TIME        = 7,  /* lo: int64 microseconds since midnight */
+    FASTPOSTGRES_RVAL_TIMESTAMP   = 8,  /* lo: int64 microseconds since 2000-01-01 */
+    FASTPOSTGRES_RVAL_TIMESTAMPTZ = 9,  /* the same, UTC */
+    FASTPOSTGRES_RVAL_NUMERIC     = 10, /* aux bytes: numeric_out text */
+    FASTPOSTGRES_RVAL_BOOL        = 11  /* lo != 0 */
+};
 
 typedef struct FastpostgresReduceSlot {
     uint8_t  is_null;
-    uint8_t  is_float;
-    uint64_t bits; /* int64 bits, or the IEEE double's bits */
+    uint8_t  rtype;   /* FastpostgresReduceValue */
+    uint32_t aux_off; /* bytes from the payload base, 0 when none */
+    uint32_t aux_len;
+    uint64_t lo;
+    uint64_t hi;
 } FastpostgresReduceSlot;
 
 typedef struct FastpostgresReduceReader {
+    const uint8_t *base;
     const uint8_t *p;
     const uint8_t *end;
     uint32_t       nops;
@@ -730,6 +759,7 @@ fastpostgres_reduce_init(FastpostgresReduceReader *r, const void *payload, size_
     r->nops = fastpostgres_rd_u32(&p);
     (void)fastpostgres_rd_u32(&p); /* pad */
     r->nrows = fastpostgres_rd_u64(&p);
+    r->base  = (const uint8_t *)payload;
     r->end   = (const uint8_t *)payload + len;
     if (r->nops > FASTPOSTGRES_REDUCE_MAX_OPS ||
         (uint64_t)(r->end - p) < (uint64_t)r->nops * FASTPOSTGRES_REDUCE_SLOT)
@@ -741,13 +771,33 @@ fastpostgres_reduce_init(FastpostgresReduceReader *r, const void *payload, size_
 static inline int
 fastpostgres_reduce_next(FastpostgresReduceReader *r, FastpostgresReduceSlot *s)
 {
+    const uint8_t *p;
+
     if (r->p == NULL || (uint64_t)(r->end - r->p) < FASTPOSTGRES_REDUCE_SLOT) return 0;
-    s->is_null  = *r->p++;
-    s->is_float = *r->p++;
-    r->p += 2; /* pad */
-    memcpy(&s->bits, r->p, 8);
-    r->p += 8;
+    p           = r->p;
+    s->is_null  = *p++;
+    s->rtype    = *p++;
+    p += 2; /* pad */
+    s->aux_off = fastpostgres_rd_u32(&p);
+    s->aux_len = fastpostgres_rd_u32(&p);
+    p += 4; /* pad before the 8-byte-aligned value */
+    s->lo      = fastpostgres_rd_u64(&p);
+    s->hi      = fastpostgres_rd_u64(&p);
+    r->p       = p;
     return 1;
+}
+
+/* The aux bytes a slot addresses, or NULL when it has none or they fall
+ * outside the payload (a truncated/corrupt frame). */
+static inline const uint8_t *
+fastpostgres_reduce_slot_data(const FastpostgresReduceReader *r, const FastpostgresReduceSlot *s,
+                              uint32_t *len)
+{
+    *len = 0;
+    if (s->aux_len == 0) return NULL;
+    if (s->aux_off == 0 || (uint64_t)s->aux_off + s->aux_len > (uint64_t)(r->end - r->base)) return NULL;
+    *len = s->aux_len;
+    return r->base + s->aux_off;
 }
 
 /* ---------------------------------------------------------------------------

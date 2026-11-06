@@ -165,6 +165,90 @@ decimal_from_text(const char *s)
 }
 
 static PyObject *
+decimal_from_bytes(const char *s, Py_ssize_t len)
+{
+    PyObject *text = PyUnicode_FromStringAndSize(s, len);
+    if (!text) return nullptr;
+    PyObject *value = PyObject_CallFunctionObjArgs(s_decimal, text, nullptr);
+    Py_DECREF(text);
+    return value;
+}
+
+/* Two's-complement int128 -> Python int. SUM(bigint) is numeric on the server,
+ * so a 64-bit accumulator would wrap; the frame carries all 128 bits. */
+static PyObject *
+pylong_from_int128(unsigned __int128 v)
+{
+    PyObject *lo = PyLong_FromUnsignedLongLong((unsigned long long)v);
+    PyObject *hi = PyLong_FromLongLong((long long)(v >> 64));
+    PyObject *shift;
+    PyObject *shift_bits;
+    PyObject *out;
+
+    if (!lo || !hi)
+    {
+        Py_XDECREF(lo);
+        Py_XDECREF(hi);
+        return nullptr;
+    }
+    shift_bits = PyLong_FromLong(64);
+    if (!shift_bits)
+    {
+        Py_DECREF(lo);
+        Py_DECREF(hi);
+        return nullptr;
+    }
+    shift = PyNumber_Lshift(hi, shift_bits);
+    Py_DECREF(shift_bits);
+    Py_DECREF(hi);
+    if (!shift)
+    {
+        Py_DECREF(lo);
+        return nullptr;
+    }
+    out = PyNumber_Add(shift, lo);
+    Py_DECREF(shift);
+    Py_DECREF(lo);
+    return out;
+}
+
+PyObject *
+fp_decode_reduce_value(uint8_t rtype, uint64_t lo, uint64_t hi, const char *aux, uint32_t aux_len)
+{
+    switch (rtype)
+    {
+        case FASTPOSTGRES_RVAL_INT64:
+            return PyLong_FromLongLong((long long)lo);
+        case FASTPOSTGRES_RVAL_INT128:
+            return pylong_from_int128(((unsigned __int128)hi << 64) | lo);
+        case FASTPOSTGRES_RVAL_DOUBLE: {
+            double d;
+            memcpy(&d, &lo, sizeof(d));
+            return PyFloat_FromDouble(d);
+        }
+        case FASTPOSTGRES_RVAL_TEXT:
+            return PyUnicode_FromStringAndSize(aux, (Py_ssize_t)aux_len);
+        case FASTPOSTGRES_RVAL_BYTEA:
+            return PyBytes_FromStringAndSize(aux, (Py_ssize_t)aux_len);
+        case FASTPOSTGRES_RVAL_DATE:
+            return date_from_days((int32_t)lo);
+        case FASTPOSTGRES_RVAL_TIME:
+            return time_from_us((int64_t)lo);
+        case FASTPOSTGRES_RVAL_TIMESTAMP:
+            return timestamp_from_us((int64_t)lo, 0);
+        case FASTPOSTGRES_RVAL_TIMESTAMPTZ:
+            return timestamp_from_us((int64_t)lo, 1);
+        case FASTPOSTGRES_RVAL_NUMERIC:
+            return decimal_from_bytes(aux, (Py_ssize_t)aux_len);
+        case FASTPOSTGRES_RVAL_BOOL:
+            return PyBool_FromLong(lo != 0);
+        default:
+            PyErr_SetString(PyExc_ValueError, "reduce: unknown value type in the frame");
+            return nullptr;
+    }
+}
+
+static PyObject *
 bytes_from_bytea(const char *s)
 {
     if (s[0] == '\\' && s[1] == 'x')

@@ -304,11 +304,12 @@ _AGG_PUSHDOWN = os.environ.get("FASTPOSTGRES_AGG_PUSHDOWN", "1") != "0"
 def _agg_plan(plan) -> str:
     """The worker's plan string: ``op[:i<index>|n<name>]``, comma separated.
 
-    Names escape ',' and '\\'; an integer column is explicit so a column literally
-    named like an index cannot be mistaken for one.
+    `plan` is a sequence of ``(op, column)``. Names escape ',' and '\\'; an
+    integer column is explicit so a column literally named like an index cannot
+    be mistaken for one.
     """
     parts = []
-    for _name, op, column in plan:
+    for op, column in plan:
         if column is None:
             parts.append(str(op))
         elif isinstance(column, int):
@@ -330,6 +331,72 @@ def _agg_combine(acc, ops, values):
                 acc[i] = v
         else:
             acc[i] = (acc[i] or 0) + v
+
+
+def _numeric_parts(value):
+    """(unscaled integer, decimal scale) of an int/Decimal: value = n / 10**scale."""
+    if isinstance(value, decimal.Decimal):
+        total = value.copy_abs()
+        _sign, digits, exponent = total.as_tuple()
+        n = int("".join(map(str, digits)) or "0")
+        if exponent >= 0:
+            return n * 10**exponent, 0
+        return n, -exponent
+    return abs(int(value)), 0
+
+
+def _numeric_weight_first(n, scale):
+    """PostgreSQL's numeric weight and leading base-10000 digit.
+
+    `value` is n / 10**scale. The server stores base-10000 digits and weight is
+    the position of the leading one, so a value below 1 has a negative weight.
+    """
+    if n == 0:
+        return 0, 0
+    integer_digits = len(str(n)) - scale
+    weight = (integer_digits - 1) // 4
+    if weight >= 0:
+        first = n // (10 ** (scale + 4 * weight))
+    else:
+        first = (n * 10000 ** (-weight)) // (10**scale)
+    return weight, first
+
+
+def _pg_avg(total, count):
+    """SUM/COUNT with PostgreSQL's exact numeric division.
+
+    ``avg(int)``/``avg(bigint)``/``avg(numeric)`` return numeric on the server,
+    and its division scale is not "always 16 decimal places": it keeps sixteen
+    *significant* base-10000 digits, which for a large sum means fewer (or no)
+    decimals. Mirror select_div_scale() and round half away from zero, so the
+    value here equals the server's rather than merely approximating it.
+    """
+    if count == 0:
+        return None
+    if isinstance(total, float):
+        return total / count
+
+    numerator, scale = _numeric_parts(total)
+    divisor = int(count)
+    weight, first = _numeric_weight_first(numerator, scale)
+    divisor_weight, divisor_first = _numeric_weight_first(divisor, 0)
+    qweight = weight - divisor_weight
+    if first <= divisor_first:
+        qweight -= 1
+    rscale = max(scale, 16 - qweight * 4, 0)
+
+    quotient, remainder = divmod(numerator * 10**rscale, divisor * 10**scale)
+    if 2 * remainder >= divisor * 10**scale:  # round half away from zero
+        quotient += 1
+    digits = str(quotient)
+    if rscale:
+        digits = digits.rjust(rscale + 1, "0")
+        text = f"{digits[:-rscale]}.{digits[-rscale:]}"
+    else:
+        text = digits
+    if total < 0 and quotient:
+        text = "-" + text
+    return decimal.Decimal(text)
 
 
 def _is_read_only(sql: str) -> bool:
@@ -1335,9 +1402,9 @@ class Cursor:
             {"price_sum": ("sum", "price"), "rows": ("count_all", None),
              "cheapest": ("min", "price"), "priced": ("count", "price")}
 
-        Operations are ``sum``, ``min``, ``max``, ``count`` (non-NULL values) and
-        ``count_all`` (rows, no column needed — pass ``None``); a column is a name
-        or an index. The reduce runs in the worker by default
+        Operations are ``sum``, ``min``, ``max``, ``avg``, ``count`` (non-NULL
+        values) and ``count_all`` (rows, no column needed — pass ``None``); a
+        column is a name or an index. The reduce runs in the worker by default
         (``FASTPOSTGRES_OP_REDUCE``): it accumulates each batch where the tuples
         are and publishes a few scalars, so the client never receives the rows.
         Set ``FASTPOSTGRES_AGG_PUSHDOWN=0`` to force the older client-side walk;
@@ -1346,13 +1413,16 @@ class Cursor:
         partition runs in parallel with the others on any interpreter — the
         decode that materializes rows is what serializes, and this never does it.
 
-        Semantics are the obvious SQL ones: NULLs are skipped by sum/min/max and
-        not counted by count; an empty result gives 0 for sums and counts and
-        None for min/max. Integer sums accumulate in 64 bits and wrap on overflow
-        (the server's ``sum(bigint)`` is numeric and exact, so a sum that leaves
-        int64 will differ). Only the numeric kinds and bool are walked — anything
-        else (text, bytea, dates, numeric) raises ``ProgrammingError``; let the
-        server aggregate those.
+        Semantics are the server's: NULLs are skipped by sum/min/max/avg and not
+        counted by count; an empty result gives 0 for sums and counts and None
+        for min/max/avg. Integer sums are exact (128-bit accumulation, then a
+        Python int), so a bigint sum that leaves int64 matches ``sum(bigint)``
+        instead of wrapping. ``avg`` returns a float for float columns and a
+        ``Decimal`` for integer and numeric columns, divided with PostgreSQL's
+        own numeric scale. ``min``/``max`` work on text (the worker compares
+        with the column's collation), date/time and numeric as well as numbers;
+        ``count`` works on every kind. Numeric is exact on the worker path;
+        with the pushdown off the columnar frame's float8 widening applies.
         """
         sql = operation if parameters is None else _inline(operation, parameters)
         if not self.connection._shm:
@@ -1360,9 +1430,21 @@ class Cursor:
         if not _is_read_only(sql):
             raise NotSupportedError("aggregate() serves read-only SELECTs over /dev/shm")
 
-        plan = []
+        # The internal plan. AVG is not associative across batches, so it is
+        # expanded into SUM + COUNT (one extra scalar per batch) and divided once
+        # at the end — an average of per-batch averages would be wrong, and this
+        # keeps integer/numeric results exact.
+        internal = []  # [(op, column)]
+        outputs = []  # [(result name, "avg" | "plain", positions)]
         for name, spec in ops.items():
             op_name, column = spec
+            if op_name == "avg":
+                if column is None:
+                    raise ProgrammingError("aggregate: avg needs a column")
+                internal.append((_client.AGG_SUM, column))
+                internal.append((_client.AGG_COUNT, column))
+                outputs.append((name, "avg", (len(internal) - 2, len(internal) - 1)))
+                continue
             try:
                 op = _AGG_OPS[op_name]
             except KeyError:
@@ -1372,7 +1454,10 @@ class Cursor:
                     raise ProgrammingError("aggregate: count_all takes no column (pass None)")
             elif column is None:
                 raise ProgrammingError(f"aggregate: {op_name} needs a column")
-            plan.append((name, op, column))
+            internal.append((op, column))
+            outputs.append((name, "plain", (len(internal) - 1,)))
+
+        op_codes = [op for op, _column in internal]
 
         info = _ring_acquire(self.connection._conn, block=self.connection._wait)
         if info is None:
@@ -1391,17 +1476,16 @@ class Cursor:
             # first request without consuming a row; the client-side reduce
             # below is then the fallback, unchanged.
             if _AGG_PUSHDOWN and hasattr(_client, "read_reduce") and hasattr(ring, "reduce"):
-                plan_str = _agg_plan(plan)
-                ops = [op for _, op, _ in plan]
-                acc = [None] * len(plan)
+                plan_str = _agg_plan(internal)
+                acc = [None] * len(internal)
                 seen = False
                 try:
                     while True:
                         n = ring.reduce(seg, plan_str, size)
                         values = _client.read_reduce(seg)
-                        if len(values) != len(plan):
+                        if len(values) != len(internal):
                             raise ProgrammingError("aggregate: the worker returned a different plan")
-                        _agg_combine(acc, ops, values)
+                        _agg_combine(acc, op_codes, values)
                         seen = True
                         if n == 0:
                             break
@@ -1417,17 +1501,17 @@ class Cursor:
             if acc is None:
                 seen = False
                 resolved = None  # [(op, column index)], once the metadata is known
-                acc = [None] * len(plan)
+                acc = [None] * len(internal)
                 while True:
                     n = ring.next(size)
                     if n == 0 and seen:
                         break
                     if resolved is None:
-                        if any(column is not None for _, _, column in plan):
+                        if any(column is not None for _, column in internal):
                             batch = _client.read(seg)  # metadata only: the names and their order
                             index = {c.name: i for i, c in enumerate(batch.columns)}
                             resolved = []
-                            for name, op, column in plan:
+                            for op, column in internal:
                                 if column is None:
                                     resolved.append((op, -1))
                                     continue
@@ -1444,7 +1528,7 @@ class Cursor:
                                         ) from None
                                 resolved.append((op, at))
                         else:
-                            resolved = [(op, -1) for _, op, _ in plan]
+                            resolved = [(op, -1) for op, _column in internal]
                     try:
                         values = _client.reduce(seg, resolved)
                     except ValueError as exc:
@@ -1461,7 +1545,13 @@ class Cursor:
             _ring_release(info)
 
         self.connection.shm_reads += 1
-        return {name: acc[i] for i, (name, _, _) in enumerate(plan)}
+        result = {}
+        for name, kind, positions in outputs:
+            if kind == "avg":
+                result[name] = _pg_avg(acc[positions[0]], acc[positions[1]])
+            else:
+                result[name] = acc[positions[0]]
+        return result
 
     def _track(self, stream):
         """One live stream per connection, trackable so close() can end it.

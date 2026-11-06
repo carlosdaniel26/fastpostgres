@@ -1,0 +1,95 @@
+# ws-reduce — exact server-side aggregate reduce
+
+Base `merge/transport`. Correctness first: exact integer SUM (the server's
+`sum(bigint)` is numeric), AVG, text/date/time/numeric MIN/MAX, COUNT on every
+kind, and an FPREDUCE v2 frame that carries int128 and text/numeric values.
+The existing sum/count/min/max pushdown and the client-side fallback both
+remain, and both now produce the same values.
+
+## Command (same command, baseline then change, one at a time under the lock)
+
+    flock /tmp/fpq-bench.lock -c 'docker build -q --target dev -t fpq-reduce -f docker/Dockerfile .'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=baseline \
+      -v "$PWD/bench/jobs/aggregate-pushdown.py:/src/bench/jobs/aggregate-pushdown.py:ro" \
+      fpq-baseline python3 /src/bench/jobs/aggregate-pushdown.py'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=reduce \
+      -v "$PWD/bench/jobs/aggregate-pushdown.py:/src/bench/jobs/aggregate-pushdown.py:ro" \
+      fpq-reduce python3 /src/bench/jobs/aggregate-pushdown.py'
+
+2,000,000 rows (`fp_agg_bench`), `SELECT price FROM fp_agg_bench` reduced with
+`sum(price)` + `count_all`, verified against `SELECT sum(price), count(*)` on
+the server. Two shapes: the driver's streaming batch (100k) and one request for
+the whole result (2M). `bytes` is what the worker actually published in the data
+segment, measured by wrapping the frame reader.
+
+# ===== baseline (main@7e3d2e6) =====
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+NOTICE:  table "fp_agg_bench" does not exist, skipping
+
+AGGREGATE (sum(int8) + count_all): 2000000 rows through Cursor.aggregate
+    2000000    100000    206.45 ms     9.69M rows/s    16251040 B shipped in 20  frames (max   812552 B)  ±1.8%  ok
+    2000000   2000000    167.78 ms    11.92M rows/s    16250056 B shipped in 1   frames (max 16250056 B)  ±0.6%  ok
+  result: price_sum=999000000 rows=2000000 (server 999000000, 2000000)
+
+# ===== reduce (ws/reduce) =====
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: reduce
+shm: 3.0G
+### END ENV
+NOTICE:  table "fp_agg_bench" does not exist, skipping
+
+AGGREGATE (sum(int8) + count_all): 2000000 rows through Cursor.aggregate
+    2000000    100000    183.53 ms    10.90M rows/s        2016 B shipped in 21  frames (max       96 B)  ±0.6%  ok
+    2000000   2000000    155.05 ms    12.90M rows/s         192 B shipped in 2   frames (max       96 B)  ±1.0%  ok
+  result: price_sum=999000000 rows=2000000 (server 999000000, 2000000)
+
+### AB
+
+The baseline image predates the reduce op, so its `aggregate()` walks the
+columnar batches in C++ after the worker ships them; the change accumulates in
+the worker and publishes scalars. Same command, same query, same `ok` verdict
+(price_sum=999000000, rows=2000000 on both).
+
+| shape (2M rows) | baseline | ws/reduce | delta |
+|---|---|---|---|
+| batch=100k | 206.45 ms, 9.69M rows/s, 16,251,040 B | 183.53 ms, 10.90M rows/s, 2,016 B | +12.5% rows/s, -99.99% bytes |
+| batch=2M (one request) | 167.78 ms, 11.92M rows/s, 16,250,056 B | 155.05 ms, 12.90M rows/s, 192 B | +8.2% rows/s, -99.999% bytes |
+
+Host noise on these cells is ±1-2% (the baseline batch=100k cell moved 194.71
+-> 206.45 ms between runs of the same image). The byte counts are exact: the
+worker's frame is 96 B per request (two ops), where the baseline shipped the
+whole int8 column (16 MB). The throughput delta is that traffic plus the
+decode/transpose the baseline's C++ reduce still has to walk.
+
+Correctness is covered by the suite, not inferred from this number:
+`python/tests/test_aggregate.py` checks every shape against the server
+(exact bigint sum past int64, avg on int/float/numeric and the server's numeric
+division scale, text min/max under the server collation, date/time min/max,
+numeric min/max/sum, count on text, empty results, and pushdown == fallback).

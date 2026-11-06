@@ -21,6 +21,12 @@ PyObject *fp_decode_value(PGresult *res, int row, int col);
 /* Decode one value out of a columnar /dev/shm chunk. */
 PyObject *fp_decode_column(const FastpostgresColumn *col, uint64_t row);
 
+/* Decode one FPREDUCE scalar (fastpostgres_shm.h: FastpostgresReduceValue).
+ * `hi:lo` is int128 for RVAL_INT128, signed int64/bits otherwise; `aux` is the
+ * slot's text/numeric payload. Shared by the worker's read_reduce() and the
+ * client-side fallback, so both produce the same Python types. */
+PyObject *fp_decode_reduce_value(uint8_t rtype, uint64_t lo, uint64_t hi, const char *aux, uint32_t aux_len);
+
 /* Fill `rows` (a list of nrows tuples already allocated by the caller) from a
  * decoded columnar frame: one specialized loop per column, so the kind switch
  * runs once per column rather than once per value. Returns false with a Python

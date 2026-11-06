@@ -524,3 +524,135 @@ second read reusing the first read's cells.
   about `type(x)` being the exact built-in (some serializers do) can set
   `FASTPOSTGRES_OBJ_ARENA=0`; a per-kind switch would let it keep the float/int
   win without text.
+
+# Server-side aggregate reduce: exactness, more kinds
+
+Status: committed with tests and an A/B
+(`bench/results/ws-reduce-ab.log`). Builds on the reduce pushdown from the
+transport merge; the client-side walk in
+`python/src/fastpostgres/native/aggregate.cpp` remains the fallback and the
+reference.
+
+## What changed
+
+### 1. FPREDUCE v2 — a frame that can carry the answer
+
+The old frame had a 12-byte slot with a 64-bit value and an `is_float` bit.
+That is enough for a double or a wrapped int64, and not enough for what the
+server actually returns: `sum(bigint)` is numeric, and `min(text)` is text.
+v2 keeps the same 32-byte header and grows a slot to 32 bytes:
+
+    is_null u8, rtype u8, pad[2], aux_off u32, aux_len u32, pad[4],
+    lo u64, hi u64
+
+`hi:lo` is a two's-complement int128 for an integer SUM, a signed int64 for
+COUNT/MIN/MAX, or a double's bits. `rtype` says which, and also names the
+temporal/text/numeric cases. Text, bytea and numeric values are written to an
+aux byte pool after the slots and addressed by `aux_off`/`aux_len`. Both sides
+share the definition and the reader in
+`extension/include/fastpostgres/fastpostgres_shm.h`; the client decodes the
+slot through `fp_decode_reduce_value()`, so `read_reduce()` and the fallback
+return the same Python types.
+
+The header is still the same for every request, and a reduce result is still a
+handful of bytes on the wire: 96 B for the measured `sum + count_all` plan.
+
+### 2. Exact integer SUM
+
+The worker accumulates into a signed `__int128` and publishes all 128 bits.
+The client turns that into a Python int and adds per-batch values with Python's
+arbitrary precision. Neither side wraps, so the result equals the server's
+`sum(bigint)` (which is numeric) and not merely its low 64 bits. A batch is at
+most `batch` rows; at the maximum int64 value, 128 bits covers every batch a
+ring can fetch by a wide margin. The fallback walks the column into the same
+`__int128` and returns a Python int, so both paths agree.
+
+`sum(int2/int4)` on the server returns int8; that is a subset of the same
+result and compares equal as a Python int.
+
+### 3. AVG
+
+AVG is not associative across batches, so the DB-API expands it into
+`AGG_SUM + AGG_COUNT` in the internal plan and divides once at the end. Every
+batch still ships only scalars. The division matches PostgreSQL's numeric
+semantics rather than "16 decimal places":
+
+- `select_div_scale()` keeps sixteen significant base-10000 digits, so a small
+  average gets 20 decimals and a huge one gets none;
+- it rounds half away from zero;
+- the result's scale is at least the sum's own numeric scale.
+
+`_pg_avg()` in `dbapi.py` mirrors that on the exact int/Decimal numerator, so
+`avg(int)`, `avg(bigint)` and `avg(numeric)` equal the server's numeric.
+Float columns return a float, as `avg(float8)` does.
+
+### 4. MIN/MAX over more kinds, and COUNT over all of them
+
+- **text/varchar/bpchar**: the worker keeps the best bytes and compares with
+  `varstr_cmp` and the attribute's collation — the server's ordering, not a
+  UTF-8 memcmp. The value travels in the aux pool and arrives as `str`.
+- **date/time/timestamp/timestamptz**: compared as their wire integers and
+  published as such; the client builds `datetime.date`/`time`/`datetime`.
+- **numeric**: `numeric_cmp` for MIN/MAX and `numeric_add` for SUM, with the
+  value published through `numeric_out` and decoded to `Decimal`. This is exact
+  where the columnar wire is not (it widens numeric to float8).
+- **COUNT** reads no value, so it now works for every kind, including text,
+  instead of rejecting anything outside the numeric kinds.
+- SUM over text/date/time is refused with a `reduce: ` error; there is no
+  guess to make.
+
+The fallback mirrors the numeric kinds (text/bytea through the columnar
+offset table, temporal integers through the same decoder). Two deliberate
+approximations remain in the fallback, documented below.
+
+## Measurement
+
+`bench/internals` job `bench/jobs/aggregate-pushdown.py`: 2,000,000 rows,
+`sum(price)` + `count_all`, verified against the server. Full record in
+`bench/results/ws-reduce-ab.log`.
+
+| shape | baseline rows/s | baseline bytes | change rows/s | change bytes |
+|---|---|---|---|---|
+| batch 100k | 9.69M | 16,251,040 | 10.90M | 2,016 |
+| one request | 11.92M | 16,250,056 | 12.90M | 192 |
+
+The byte count is the worker's published frame, not an estimate: it drops from
+the whole int8 column to 96 B per request. Throughput moves +8–12% in this run,
+which is a couple of host-noise points beyond the traffic saved — the point of
+the change is the semantics, not a new speed record.
+
+## What remains
+
+- **GROUP BY / DISTINCT are not in this slice.** A grouped aggregate needs a
+  multi-row result (one scalar tuple per group) and a group key in the request;
+  the scalar FPREDUCE frame and `Cursor.aggregate()`'s dict are both shaped
+  around one answer. The honest next step is a separate grouped frame plus a
+  `Cursor.aggregate_group()`, not a widening of this one. Shipping a half
+  version that materialised groups in Python would lose the property that makes
+  this path worth having (no per-row objects on the client).
+- **One worker per portal.** The ring already splits work by partition: N
+  rings reduce N partitions in parallel, and the client's per-batch combine is
+  exact, so a caller can combine partitions itself without losing precision.
+  Splitting a *single* scan across workers needs a scan partitioner that the
+  ring does not have; it is not a cheap addition and is not attempted here.
+- **Fallback numeric is float8.** The columnar wire carries numeric as float8,
+  so with `FASTPOSTGRES_AGG_PUSHDOWN=0` a numeric SUM/AVG/MIN/MAX is the old
+  lossy float path. The default (worker) path is exact. Fixing the fallback
+  would mean a new numeric wire kind, which is a codec change, not a reduce
+  change.
+- **Fallback text MIN/MAX is bytewise.** The client has no collation in the
+  columnar descriptor, so its comparison matches a C collation, not necessarily
+  the server's. The worker path is exact and is the default. Adding the
+  collation to the column descriptor would fix the fallback.
+- **Output-function text types.** `name` and other types that map to the TEXT
+  wire kind but are not varlena text are refused by the worker's MIN/MAX (the
+  fallback's columnar frame has already normalised them to text bytes). A
+  `NameStr`/output-function comparator in `reduce.c` would close that gap.
+- **Numeric accumulation memory.** `numeric_add` allocates a new value per row
+  in the batch's memory context; it is bounded by batch size and freed at
+  `SPI_finish`, but a per-batch reset context would keep a very large batch's
+  peak lower.
+- **A huge text value must fit the segment.** MIN/MAX over text copies the
+  winning bytes into the scalar frame; a value larger than the ring's segment
+  fails with `reduce: result does not fit the segment` rather than falling
+  back. That is the same capacity contract as the columnar frame.
