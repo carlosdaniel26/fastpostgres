@@ -112,25 +112,13 @@ the measurement included uncommitted changes: commit, then `just bench`, for a
 clean stamp.
 
 **"Why not just cache the result?"** A result cache removes *execution* on
-repeated queries; this removes *delivery* on every query, and the two rank by
-workload shape. Measured against PgCache, a CDC-maintained result cache, in
-[`fastpostgres-vs-pgcache.log`](../bench/results/fastpostgres-vs-pgcache.log): a cached aggregate
-is 61× faster than the ring at 1M rows — the executor is the cost, and no
-transport fixes that. A cached 1M-row result is the other way round: 1.44M rows/s
-against 3.81M on the ring, and a hit costs what its cold fill costs, because a hit
-still ships every row through the socket and builds every Python object, while
-this path never builds them twice. Method and caveats in
-[`PG-CACHE.md`](../bench/PG-CACHE.md).
-
-**"Would equal memory change that?"** It was measured, not argued
-(`just pgcache-memory-bench`, the record in
-[`fastpostgres-vs-pgcache-memory.log`](../bench/results/fastpostgres-vs-pgcache-memory.log)): one
-budget M on both sides, the ring's transfer buffer against the cache's own
-memory. Where the cache fits, the ranking is the same — at 1 GiB, the aggregate
-is 1.177 ms against the ring's 57.403 ms and the scan 1.47M against 3.89M rows/s.
-What the budget bought the ring above ~one batch is nothing (its numbers are flat
-from an 8 MiB budget up, and its segments grow 128× across the sweep), while
-the cache's container is OOM-killed at 8 MiB and 64 MiB before it can serve.
+repeated queries; this removes *delivery* on every query, so they win different
+shapes. A cached aggregate beats reading the same rows by a wide margin — the
+executor is the cost, and no transport closes that — while a cached large result
+is slower than the ring, because a hit still ships every row through the socket
+and rebuilds every object. The ring is the right answer when the query is new or
+the result is large; a cache is the right answer when both the query and the rows
+repeat.
 
 **"Which numbers should I quote?"** The committed logs, not the README:
 `bench/results/fastpostgres-vs-arrow*.log`.

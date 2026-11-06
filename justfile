@@ -4,7 +4,6 @@
 # catalog: what each answers, the method, and where its record lives):
 #
 #   just rivals [target]     the competitive comparisons: ADBC + Arrow, and a
-#                            result cache, at their defaults and under a budget
 #   just internals [target]  the meters behind the design notes: decode cycles /
 #                            IR / ports, the codec x transport matrix, PMU counters
 #   just adoption [target]   a published third-party suite, on its own terms:
@@ -86,7 +85,7 @@ nogil *args:
 test:
     just _run tests.sh
 
-# the competitive benchmarks: adbc | arrow-memory | cache | cache-budget
+# the competitive benchmarks: adbc | arrow-memory
 rivals target="" *args:
     bench/dispatch/rivals.sh {{target}} {{args}}
 
@@ -102,7 +101,7 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: arrow | arrow-memory | cache | cache-budget | codec | ab | styles
+# one figure per log: arrow | arrow-memory | codec | ab
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
 
@@ -122,16 +121,12 @@ bench-adbc *sizes:
 arrow-memory-bench *args:
     bench/harness/arrow_memory_bench.sh {{args}}
 
-# fastpostgres against a result cache (rivals cache): the two regimes (large
-# result, small expensive result) and the cache's two taxes (cold fill, pass-through)
+# fastpostgres against ADBC + Arrow with the ring's buffer fixed (rivals
+# arrow-memory): the same reads and what each side held while it delivered them
 [private]
-pgcache-bench *args:
-    bench/harness/pgcache_bench.sh {{args}}
+arrow-memory-bench *args:
+    bench/harness/arrow_memory_bench.sh {{args}}
 
-# the same comparison under one memory budget on both sides (rivals cache-budget)
-[private]
-pgcache-memory-bench *args:
-    bench/harness/pgcache_memory_bench.sh {{args}}
 
 # the row decode's TSC cycles/row on a fixed shape (internals decode-cycles)
 [private]

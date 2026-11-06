@@ -11,8 +11,6 @@ charts: one figure per log
 
   arrow          fastpostgres vs ADBC + Arrow (bench/results/fastpostgres-vs-arrow.log)
   arrow-memory   the same reads under a fixed ring buffer
-  cache          fastpostgres vs PgCache, defaults
-  cache-budget   fastpostgres vs PgCache under one memory budget
   codec          the codec x transport matrix
   ab             before/after, from an improve-*.log pair (--log=...)
   styles         one figure through every candidate style (style lab)
@@ -24,8 +22,6 @@ EOF
 case "$target" in
   arrow)        exec bench/charts/adbc.py "$@" ;;
   arrow-memory) exec bench/charts/arrow_memory.py "$@" ;;
-  cache)        exec bench/charts/cache.py "$@" ;;
-  cache-budget) exec bench/charts/cache_budget.py "$@" ;;
   codec)        exec bench/charts/codec.py "$@" ;;
   ab)           exec bench/charts/ab.py "$@" ;;
   styles)       exec bench/charts/style_lab.py "$@" ;;

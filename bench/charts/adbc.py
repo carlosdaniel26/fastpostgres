@@ -89,7 +89,7 @@ def parse_sections(text, sections, row_re):
 CHART_SECTIONS = {"ZERO-COPY READ": "zerocopy"}
 PLAYERS = ("fastpostgres", "adbc+arrow")
 CHART_LABELS = {
-    "zerocopy": ("fast-postgres (stream())", "ADBC (fetch_arrow_table())"),
+    "zerocopy": ("fast-postgres (stream())", "ADBC (fetch_arrow_table(), 7 connections)"),
 }
 COLORS = (ACCENT, GREY[1])
 CHARTS = {

@@ -1,7 +1,7 @@
 """The generated table both rival comparisons read: fp_bench_rows.
 
 One fixture, so the comparisons agree on what they measured: the ADBC + Arrow
-comparison reads these rows to price delivery, the PgCache comparison reads them
+comparison reads these rows to price delivery
 to price a cache in front of the same server. `setup(n)` rebuilds the table at
 exactly n rows - every read in either comparison returns n rows - and SHAPES
 picks the data's shape, fixed at import from SHAPE.

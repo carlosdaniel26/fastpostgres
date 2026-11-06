@@ -238,10 +238,15 @@ SECTIONS = {
     "zerocopy": {
         "title": "ZERO-COPY READ (rows/s)",
         "note": "the same read: the columnar form each stack lands, nothing consumed",
+        # The comparison column is the second player against the first, and the
+        # fair rival is the one that uses the machine too: N connections, N
+        # backends, the same page ranges. The single-connection read stays as
+        # the third column because it is what Arrow does by default, but it is
+        # not the number the ring should be judged against.
         "players": (
             (FPG, "stream()", open_dbapi, read_stream),
-            (ARROW, "arrow table", open_arrow, read_arrow_table),
             (ARROW_MT, f"arrow, {ARROW_THREADS} conns", open_arrow_pool, read_arrow_table_mt),
+            (ARROW, "arrow table", open_arrow, read_arrow_table),
         ),
         "ratio": "vs arrow",
     },

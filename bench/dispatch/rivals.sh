@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # The competitive comparisons, behind one command: what the ring does against
-# ADBC + Arrow and against a result cache, at each side's defaults and under a
-# fixed memory budget.
+# ADBC + Arrow, at its defaults and with every connection it can use.
 #
 # Each target is the recipe that was always there, unchanged; this only routes.
 # The records are the committed logs the README quotes.
@@ -18,10 +17,6 @@ rivals: the competitive benchmarks
                  (bench/results/fastpostgres-vs-arrow.log, -mixed, -small)
   arrow-memory   the same reads with the ring's buffer fixed (--mib=N)
                  (bench/results/fastpostgres-vs-arrow-memory.log)
-  cache          vs a CDC-maintained result cache, each side at its defaults
-                 (bench/results/fastpostgres-vs-pgcache.log)
-  cache-budget   vs the same cache under one memory budget (--budgets="...")
-                 (bench/results/fastpostgres-vs-pgcache-memory.log)
 
 Arguments after the target go to that target's recipe.
 EOF
@@ -30,8 +25,6 @@ EOF
 case "$target" in
   adbc)         just bench-adbc "$@" ;;
   arrow-memory) just arrow-memory-bench "$@" ;;
-  cache)        just pgcache-bench "$@" ;;
-  cache-budget) just pgcache-memory-bench "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "rivals: unknown target '$target'" >&2

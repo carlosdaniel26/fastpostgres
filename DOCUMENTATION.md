@@ -12,7 +12,7 @@ and the formal bits.
 | `extension/transport/` | the doorbell engine (`engine_shm.cpp`) |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module (the row/columnar decode and the aggregate reduce), the PEP 249 DBAPI, the asyncio layer (`aio.py`), the SQLAlchemy dialect, and the tests |
-| `bench/` | the claim's tree: the measurement classes (`rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
+| `bench/` | the claim's tree: the measurement classes (`rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
 | `docker/` | the Dockerfile and entrypoint every harness runs in |
 | `examples/` | the driver-swap demo application |
 | `docs/` | the manual: the limitations and the figures every page embeds |
@@ -28,7 +28,6 @@ and the formal bits.
 | reproduce a measurement, or read the statistics | [`bench/METHODOLOGY.md`](bench/METHODOLOGY.md) |
 | know what is not covered, and what happens there | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
 | understand why it is faster than Arrow, mechanism by mechanism | [`bench/WHY-IT-WINS.md`](bench/WHY-IT-WINS.md) |
-| compare against a result cache | [`bench/PG-CACHE.md`](bench/PG-CACHE.md) |
 | separate format cost from transport cost | [`bench/CODEC-TRANSPORT.md`](bench/CODEC-TRANSPORT.md) |
 | see what a published third-party suite found | [`bench/ADOPTION.md`](bench/ADOPTION.md) |
 | contribute, or report a vulnerability | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) |

@@ -2,7 +2,7 @@
 
 The claim's tree. It holds the apparatus (the harnesses, the dispatchers, the
 chart scripts, the image jobs), the arguments the measurements are for
-([`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`PG-CACHE.md`](PG-CACHE.md),
+([`WHY-IT-WINS.md`](WHY-IT-WINS.md),
 [`ARROW-MEMORY.md`](ARROW-MEMORY.md), [`CODEC-TRANSPORT.md`](CODEC-TRANSPORT.md)),
 the method and its threats ([`METHODOLOGY.md`](METHODOLOGY.md)), the lab
 notebook ([`NOTES.md`](NOTES.md)), and the records themselves.
@@ -13,7 +13,7 @@ Every number the project quotes is a line in a committed log under
 
 | class | command | the question it answers |
 |---|---|---|
-| rivals | `just rivals [target]` | how the ring compares with the other stacks (ADBC + Arrow, a result cache), at their defaults and under a fixed memory budget |
+| rivals | `just rivals [target]` | how the ring compares with ADBC + Arrow, at its defaults and with every connection it can use |
 | internals | `just internals [target]` | what the row decode and the transport cost at the instruction, cache and port level - the evidence the design notes argue from |
 | adoption | `just adoption [target]` | what a published suite's own queries and protocol find, with our cell in its roster - [`adoption/`](adoption/), written up in [`ADOPTION.md`](ADOPTION.md) |
 
@@ -46,8 +46,6 @@ just rivals cache --quick
 |---|---|---|---|
 | `adbc` | the read against the Arrow ecosystem's own answer, same output | [`fastpostgres-vs-arrow.log`](results/fastpostgres-vs-arrow.log), [`-mixed`](results/fastpostgres-vs-arrow-mixed.log), [`-small`](results/fastpostgres-vs-arrow-small.log) | [`METHODOLOGY.md`](METHODOLOGY.md), [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
 | `arrow-memory` | the same reads with the ring's buffer fixed: what each side holds | [`fastpostgres-vs-arrow-memory.log`](results/fastpostgres-vs-arrow-memory.log) | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
-| `cache` | a CDC-maintained result cache in front of the same server, its defaults | [`fastpostgres-vs-pgcache.log`](results/fastpostgres-vs-pgcache.log) | [`PG-CACHE.md`](PG-CACHE.md) |
-| `cache-budget` | the same, with one memory budget on both sides | [`fastpostgres-vs-pgcache-memory.log`](results/fastpostgres-vs-pgcache-memory.log) | [`PG-CACHE.md#the-same-memory-budget-on-both-sides`](PG-CACHE.md#the-same-memory-budget-on-both-sides) |
 
 ## 2. Internals: `just internals [target]`
 
@@ -70,7 +68,7 @@ costs - and their results live in the lab notebook rather than in this catalog.
 
 `arrow` - the Arrow read: delivered rates, the ratio against Arrow, the p50 per
 read.
-`arrow-memory` · `cache` · `cache-budget` · `codec` - the fixed-buffer read, the
+`arrow-memory` · `codec` - the fixed-buffer read, the
 result-cache comparisons and the codec x transport matrix.
 
 `ab` - one figure per log, into `docs/assets/` by default.
@@ -90,8 +88,6 @@ stay with each chart, because there the color carries the reading.
 | the recipe you may remember | now |
 |---|---|
 | `just bench` (ADBC + Arrow) | `just rivals adbc` |
-| `just pgcache-bench` | `just rivals cache` |
-| `just pgcache-memory-bench` | `just rivals cache-budget` |
 | `just arrow-memory-bench` | `just rivals arrow-memory` |
 | `just decode-cycles`, `-ir`, `-mca` | `just internals decode-cycles` … |
 | `just codec-transport` | `just internals codec-transport` |
