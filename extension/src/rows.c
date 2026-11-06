@@ -30,6 +30,7 @@
 
 #include "fastpostgres/fastpostgres_shm.h"
 
+#include "carry.h"
 #include "columnar.h"
 #include "rows.h"
 #include "shm.h"
@@ -71,7 +72,7 @@ typedef struct RowReceiver {
     MemoryContext         tmpctx;  /* what a row needs while it is being written */
     FastpostgresRowsWrite w;
     char                 *end;
-    struct RowCarry      *carry; /* this portal's carried row, if any */
+    FastpostgresCarry    *carry; /* this portal's carried rows, if any */
 } RowReceiver;
 
 /* Values that have to be resolved before they can be walked in place: one
@@ -178,72 +179,8 @@ row_build(RowReceiver *rx, char *out, uint32 len)
                     &th->t_infomask, rx->hasnull ? th->t_bits : NULL);
 }
 
-/* The row the last batch had no room for.
- *
- * Filling a destination slot makes the executor consume the tuple, so a row the
- * segment cannot take would otherwise be lost - and the portal would read the
- * short fetch as end-of-data besides (see the atEnd note in
- * fastpostgres_rows_fetch). A worker can now serve several rings at once, each
- * with its own portal, so the carry is keyed by portal: a row carried from
- * stream A must never be written into stream B's batch. It lives in
- * TopMemoryContext because the executor's context dies with the portal.
- */
-#define FASTPOSTGRES_ROW_CARRY_MAX 32
-
-typedef struct RowCarry
-{
-    Portal portal;
-    char  *row;
-    uint32 len;
-} RowCarry;
-
-static RowCarry row_carries[FASTPOSTGRES_ROW_CARRY_MAX];
-
-static RowCarry *
-carry_for(Portal portal, bool create)
-{
-    int free_slot = -1;
-    int i;
-
-    for (i = 0; i < FASTPOSTGRES_ROW_CARRY_MAX; i++)
-    {
-        if (row_carries[i].portal == portal) return &row_carries[i];
-        if (free_slot < 0 && row_carries[i].portal == NULL) free_slot = i;
-    }
-    if (!create) return NULL;
-    if (free_slot < 0) elog(ERROR, "fastpostgres: too many open row-frame streams");
-
-    row_carries[free_slot].portal = portal;
-    return &row_carries[free_slot];
-}
-
-static void
-carry_drop(RowCarry *c)
-{
-    if (c->row != NULL)
-    {
-        pfree(c->row);
-        c->row = NULL;
-    }
-    c->len    = 0;
-    c->portal = NULL;
-}
-
-void
-fastpostgres_rows_carry_reset(void)
-{
-    int i;
-
-    for (i = 0; i < FASTPOSTGRES_ROW_CARRY_MAX; i++) carry_drop(&row_carries[i]);
-}
-
-void
-fastpostgres_rows_carry_drop(Portal portal)
-{
-    RowCarry *c = carry_for(portal, false);
-
-    if (c != NULL) carry_drop(c);
-}
+/* The row the last batch had no room for is in carry.c, keyed by portal: a row
+ * carried from stream A must never be written into stream B's batch. */
 
 static bool
 row_receive(TupleTableSlot *slot, DestReceiver *self)
@@ -286,22 +223,15 @@ row_receive(TupleTableSlot *slot, DestReceiver *self)
     {
         /* The batch is full. The tuple is already the executor's to drop, so
          * keep it (the next batch writes it first) and stop the scan here. */
-        RowCarry     *carry = rx->carry;
-        MemoryContext top   = MemoryContextSwitchTo(TopMemoryContext);
-
-        if (carry->len < len)
-        {
-            if (carry->row == NULL)
-                carry->row = palloc(len);
-            else
-                carry->row = repalloc(carry->row, len);
-        }
         if (tup != NULL)
-            memcpy(carry->row, tup->t_data, (size_t)len);
+            fastpostgres_carry_put(rx->carry, (const char *)tup->t_data, len);
         else
-            row_build(rx, carry->row, len);
-        carry->len = len;
-        MemoryContextSwitchTo(top);
+        {
+            char *tmp = palloc(len);
+
+            row_build(rx, tmp, len);
+            fastpostgres_carry_put(rx->carry, tmp, len);
+        }
         ok = false; /* the batch is full: the client asks again for the rest */
     }
 
@@ -375,13 +305,14 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
     char                  *payload;
     RowReceiver            rx;
     FastpostgresRowsWrite *w = &rx.w;
-    RowCarry              *carry;
+    FastpostgresCarry     *carry;
+    uint32                 len;
     int                    i;
 
     if (map == NULL) elog(ERROR, "fastpostgres: cannot map data segment");
     payload = (char *)map + FASTPOSTGRES_SHM_HEADER_SIZE;
     memset(&rx, 0, sizeof(rx));
-    carry      = carry_for(portal, true);
+    carry      = fastpostgres_carry_for(portal, true);
     rx.carry   = carry;
     rx.tdesc   = td;
     rx.end     = (char *)map + mapped;
@@ -412,13 +343,14 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
 
     /* a row the previous batch had no room for goes first, in the slot it would
      * have had: the batch that carried it stopped one row short of the data */
-    if (carry->len > 0)
+    while (fastpostgres_carry_peek(carry, &len) != NULL)
     {
-        char *row = fastpostgres_rows_reserve(w, carry->len, rx.end);
+        char   *carried = fastpostgres_carry_peek(carry, &len);
+        char   *row     = fastpostgres_rows_reserve(w, len, rx.end);
 
         if (row == NULL) elog(ERROR, "fastpostgres: result row exceeds the segment");
-        memcpy(row, carry->row, carry->len);
-        carry->len = 0;
+        memcpy(row, carried, len);
+        fastpostgres_carry_pop(carry);
     }
 
     PortalRunFetch(portal, FETCH_FORWARD, (long)batch, &rx.pub);
@@ -428,7 +360,7 @@ fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 bat
      * (PortalRunSelect sets atEnd when nprocessed < count), which would end the
      * stream with the carried row and the rest still to come. The executor
      * stopped between rows rather than running out, so it can be run again. */
-    if (carry->len > 0) portal->atEnd = false;
+    if (carry->count > 0) portal->atEnd = false;
 
     fastpostgres_rows_write_end(w);
     fastpostgres_shm_publish(map, mapped, (uint64)(w->p - payload));

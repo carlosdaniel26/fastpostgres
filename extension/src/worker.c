@@ -49,6 +49,7 @@
 
 #include "columnar.h"
 #include "fastpostgres/ring.h"
+#include "carry.h"
 #include "rows.h"
 #include "shm.h"
 #include "stream.h"
@@ -678,7 +679,7 @@ pool_abort(PoolSet *set, PoolTxn *tx)
     if (tx->started || IsTransactionState()) AbortCurrentTransaction();
     tx->started = false;
     for (int i = 0; i < set->n; i++) set->rings[i].have_stream = false;
-    fastpostgres_rows_carry_reset();
+    fastpostgres_carry_reset();
 }
 
 static void

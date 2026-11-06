@@ -10,6 +10,7 @@
 #include "nodes/parsenodes.h"
 
 #include "columnar.h"
+#include "carry.h"
 #include "reduce.h"
 #include "rows.h"
 #include "shm.h"
@@ -45,12 +46,11 @@ fastpostgres_stream_open(const char *stream, const char *query)
 uint64
 fastpostgres_stream_next(const char *stream, const char *seg, int64 batch, size_t capacity)
 {
-    char      *path = fastpostgres_shm_path(seg);
-    char      *name = cursor_name(stream);
-    Portal     portal;
-    TupleDesc  td;
-    HeapTuple *tuples;
-    uint64     nrows;
+    char     *path = fastpostgres_shm_path(seg);
+    char     *name = cursor_name(stream);
+    Portal    portal;
+    TupleDesc td;
+    uint64    nrows;
 
     if (batch <= 0) elog(ERROR, "fastpostgres_stream_next: batch must be > 0");
 
@@ -63,11 +63,8 @@ fastpostgres_stream_next(const char *stream, const char *seg, int64 batch, size_
         elog(ERROR, "fastpostgres_stream_next: no open stream \"%s\"", stream);
     }
 
-    SPI_cursor_fetch(portal, true, (long)batch);
-    nrows  = SPI_processed;
-    td     = SPI_tuptable ? SPI_tuptable->tupdesc : portal->tupDesc;
-    tuples = SPI_tuptable ? SPI_tuptable->vals : NULL;
-    fastpostgres_publish_columnar_shm(path, td, tuples, nrows, capacity);
+    td    = portal->tupDesc;
+    nrows = fastpostgres_columnar_fetch(portal, td, path, batch, capacity);
     SPI_finish();
     return nrows;
 }
@@ -83,7 +80,7 @@ fastpostgres_stream_close(const char *stream)
     portal = SPI_cursor_find(name);
     if (portal != NULL)
     {
-        fastpostgres_rows_carry_drop(portal); /* the carried row was this stream's */
+        fastpostgres_carry_drop(portal); /* the carried rows were this stream's */
         SPI_cursor_close(portal);
     }
 

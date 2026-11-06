@@ -192,6 +192,42 @@ class RingReadTest(unittest.TestCase):
         )
         self.ring.close()
 
+    def test_the_columnar_batch_ends_at_the_segment_and_carries(self):
+        """The streamed columnar frame stops at the row the segment cannot take
+        and delivers it first next time: a small buffer costs round trips, never
+        rows, and the text areas are re-sampled for each (smaller) batch."""
+        seg = "fp_py_colcap_seg"
+        try:
+            os.unlink(os.path.join("/dev/shm", seg))
+        except FileNotFoundError:
+            pass
+        ring = fp.Ring("fp_py_colcap_ring", 256 * 1024)
+        ring.start(self.conn)
+        batches = []
+        try:
+            ring.open(
+                seg,
+                "SELECT g::int AS id, (g * 1.5)::numeric AS n, "
+                "CASE WHEN g % 9 = 0 THEN NULL ELSE ('x' || g)::text END AS s "
+                "FROM generate_series(1, 20000) g",
+            )
+            while True:
+                n = ring.next(100000)
+                if n == 0:
+                    break
+                chunk = _client.read_rows(seg)
+                first = sum(batches) + 1
+                self.assertEqual(len(chunk.rows), n)
+                self.assertEqual(chunk.rows[0][0], first)
+                self.assertEqual(chunk.rows[0][2], None if first % 9 == 0 else "x%d" % first)
+                batches.append(n)
+            ring.close()
+        finally:
+            ring.stop()
+
+        self.assertEqual(sum(batches), 20000)
+        self.assertGreater(len(batches), 1, "a 256 KiB segment should split the batch")
+
     def test_the_data_segment_capacity_is_the_clients_ask(self):
         """Ring(seg, segment_bytes) is the client's ask for how big the worker
         maps each data segment. A batch that no longer fits ends early - the row
