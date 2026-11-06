@@ -29,6 +29,7 @@ fastpostgres_transport_by_name(const char *name)
     if (name == NULL) return NULL;
 
     if (strcmp(name, fastpostgres_transport_shm.name) == 0) return &fastpostgres_transport_shm;
+    if (strcmp(name, fastpostgres_transport_eventfd.name) == 0) return &fastpostgres_transport_eventfd;
     return NULL;
 }
 

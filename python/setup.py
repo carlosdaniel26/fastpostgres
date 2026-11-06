@@ -64,6 +64,7 @@ setup(
                 # of them touches PostgreSQL, only the ring header and syscalls.
                 os.path.join(PG_EXTENSION_REL, "transport", "transport.c"),
                 os.path.join(PG_EXTENSION_REL, "transport", "engine_shm.c"),
+                os.path.join(PG_EXTENSION_REL, "transport", "engine_eventfd.c"),
             ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,

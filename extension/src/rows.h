@@ -21,8 +21,10 @@ bool fastpostgres_rows_native(TupleDesc td);
  * kept and delivered first by the next call. */
 uint64 fastpostgres_rows_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity);
 
-/* Drop a carried row. A stream must be opened or closed with none pending: the
- * row belongs to the stream it was read from, not to whatever comes next. */
+/* Drop a carried row. The row belongs to the stream (portal) it was read from,
+ * not to whatever comes next: a worker serving several rings keeps one carry
+ * slot per portal, and a close drops only its own. */
 void fastpostgres_rows_carry_reset(void);
+void fastpostgres_rows_carry_drop(Portal portal);
 
 #endif

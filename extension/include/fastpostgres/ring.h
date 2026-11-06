@@ -11,7 +11,9 @@
  * big it wants it in the ring (data_bytes) before starting the worker.
  *
  * `transport` says which engine created the block: FASTPOSTGRES_TRANSPORT_SHM,
- * whose doorbells are the two sem_t below (futex under the hood).
+ * whose doorbells are the two sem_t below (futex under the hood), or
+ * FASTPOSTGRES_TRANSPORT_EVENTFD, whose fds are pollable so one worker can
+ * serve several rings (extension/transport/engine_eventfd.c).
  *
  * The payload never travels through a doorbell: it is the data segment,
  * published by fastpostgres_shm_publish() and read in place. A transport is a
@@ -30,8 +32,8 @@
 #include <string.h>
 
 #define FASTPOSTGRES_RING_MAGIC                                                                              \
-    "FPRING05" /* 05: the ring carries a tally per side; an old segment is re-made rather than misread */
-#define FASTPOSTGRES_RING_VERSION 5u
+    "FPRING06" /* 06: the eventfd engine's fds and the ring's own name follow the tally */
+#define FASTPOSTGRES_RING_VERSION 6u
 #define FASTPOSTGRES_RING_BYTES   (8u << 20) /* 8 MiB control segment */
 #define FASTPOSTGRES_RING_ARG     4096
 #define FASTPOSTGRES_RING_ERR     256
@@ -114,6 +116,16 @@ typedef struct FastpostgresRing
     uint32_t fd_handoff;  /* 1: the client is listening for memfd handoff */
     uint32_t fd_pathlen;  /* bytes of sun_path in fd_path (0 when off) */
     char     fd_path[FASTPOSTGRES_RING_FD_PATH]; /* abstract name, leading NUL */
+
+    /* The eventfd engine's worker half, appended after the tally so the
+     * offsets the readers already parse do not move. The client's own fds are
+     * process-local and live beside its mapping (engine_eventfd.c); only the
+     * worker's received copies are published here, and only that worker reads
+     * them. */
+    char     ring_name[64]; /* the client writes it before the worker starts */
+    int32_t  worker_req_efd;  /* the worker's received copy of the request bell */
+    int32_t  worker_resp_efd; /* the worker's received copy of the response bell */
+    uint32_t srv_pid;         /* the worker that attached this ring */
 } FastpostgresRing;
 
 /* One side's costs, added to its row where the engine ran the event. Relaxed

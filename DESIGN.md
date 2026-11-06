@@ -1,185 +1,190 @@
-# Sealed memfd data segments ("Seal It")
+# Decoupling the ring count from `max_worker_processes`
 
-Status: implemented, opt-in with `FASTPOSTGRES_MEMFD=1`, default unchanged.
-Branch: `team/formats`.
+Status: prototype, committed with its measurement. Opt-in
+(`FASTPOSTGRES_TRANSPORT=eventfd`); the semaphore engine and its 1:1 worker
+shape are unchanged and remain the default.
 
-## What was wrong
+## The ceiling
 
-The data segment was a named POSIX shared-memory object, `/dev/shm/<seg>`,
-created by the worker with `shm_open(..., 0666)` and then widened with
-`fchmod(fd, 0666)` so that a client running as a different user (or a process
-that simply knew the name) could open it. The segment is an SQL-execution
-endpoint: whoever can open it can read results and, in the ring's model, drive
-the worker. The name plus a world-writable inode was the trust boundary.
+One ring used to mean one dynamically registered background worker — a full
+PostgreSQL backend — so `max_worker_processes` (8 by default, one held back)
+capped concurrent shared-memory reads at seven rings system-wide. The DB-API
+noticed the budget running out and silently moved subsequent reads to libpq.
+That is the right failure mode, but it makes the ring a fixed-size resource:
+more concurrent readers means a bigger server setting, and one idle ring costs
+an entire backend.
 
-It was also re-created on every batch: `fastpostgres_shm_map_rw()` did
-`shm_open` + `fchmod` + `fstat` + `mmap` + `madvise`, and every publisher did
-`munmap`, once per `next()`/`next_rows()`. The client already cached its
-read-only mapping, but the writer paid a full map/unmap of a 1 GiB virtual
-region per batch. That is the cost the small-batch result below removes.
+The reason is the doorbell. A `sem_t` wakes one waiter, and `sem_timedwait`
+cannot be put in a `poll()` set, so a process that wants to serve several rings
+has to sleep on one at a time (or poll all of them and pay a syscall per ring
+per turn). The ring protocol itself does not care: the request/response slot,
+the sequence counters, the data segment and its publish barriers are
+transport-neutral, and `transport.h` already isolates the wakeup.
 
-## The replacement
+## Mechanism
 
-1. **Worker creates an anonymous memfd** per data-segment name with
-   `memfd_create("fastpostgres-seg", MFD_CLOEXEC | MFD_ALLOW_SEALING)`.
-2. It `ftruncate`s the memfd to the ring's requested capacity **once**.
-3. It `mmap`s it `PROT_READ|PROT_WRITE, MAP_SHARED`, calls
-   `madvise(MADV_HUGEPAGE)` before the first write, and only then adds seals.
-4. It seals `F_SEAL_SHRINK | F_SEAL_GROW` (see "Sealing choice").
-5. It **sends the descriptor to the client once** with `SCM_RIGHTS`.
-6. The client `mmap`s it `PROT_READ, MAP_SHARED` once and caches it by segment
-   name for the process lifetime. On a later batch it revalidates the segment
-   header in place; no re-open, no re-map.
-7. Both sides keep the mapping for the duration of the worker/process, so the
-   batch hot path is: write into the cached mapping, publish the header, post
-   the semaphore; read the cached mapping, decode.
+Two additions, both behind that seam:
 
-The `FPCOLUMN` and `FPROWS` frames, the ring ops (`OPEN`, `NEXT`,
-`NEXT_ROWS`, `CLOSE`, `STOP`), the batch field and the publish barriers are
-byte-for-byte unchanged. This slice changes only the segment's backing store
-and when its mapping is created.
+### 1. `engine_eventfd.c` — a pollable doorbell
 
-## The fd protocol
+Each ring gets two eventfds: client→worker and worker→client. The client
+creates them (it also creates the ring segment) and hands the worker its copies
+over `SCM_RIGHTS` on an abstract Unix socket named after the ring
+(`\0fastpostgres_fd_<seg>`). The client's listener exists before the bootstrap
+SQL call; the worker connects after it maps the segment, receives the pair, and
+only then sets `worker_ready`. `wait_ready` accepts and sends while it waits,
+so the handshake is part of readiness rather than a second protocol.
 
-The client is the listener, because it is the side that already owns the
-bootstrap step (`fastpostgres_ring_start()` over libpq):
+The data path does not change: a post is an eventfd write, a wait is a poll
+followed by a read that drains the counter, and the truth is still
+`req_seq != resp_seq`. A stale wake is an event that advanced nothing; the
+counter check suppresses it exactly as the semaphore engine does. `kill(client_pid,
+0)` on the worker's 100 ms idle tick is still the liveness check. The client's
+fds live beside its mapping in a process-local table keyed by the ring address,
+**not** in the shared ring header: a forked child dropping an inherited Ring
+must not close a number that now belongs to the parent, and a Ring object
+deallocated after a newer one took the same name must not close the newer
+object's fds. (The first prototype did publish them in the header; the fork
+test caught it.)
 
-1. Before it bootstraps the worker, `Ring_start` creates an
-   `AF_UNIX`/`SOCK_SEQPACKET` socket, binds it in the **abstract namespace**
-   as `\0fpq-<pid>-<serial>`, and calls `listen(4)`. There is no filesystem
-   name to leak or unlink.
-2. It writes the abstract address into the ring's appended handoff fields:
-   `fd_handoff = 1`, `fd_pathlen`, `fd_path[108]` (`sockaddr_un.sun_path`).
-   The fields sit after `FastpostgresRingTally`, so every offset an older
-   reader parses (including the tally at 4488) is unchanged; `FPRING05` and the
-   ring's control-segment protocol stay as they were.
-3. The worker, at startup and before it publishes `worker_ready`, connects to
-   that address. The connection is therefore already queued when the client
-   `accept`s after `wait_ready`.
-4. On the first request that names a data segment, the worker creates that
-   segment's memfd and sends one `SOCK_SEQPACKET` record:
-   `{name_len, has_fd, size}` + the name bytes + the descriptor as an
-   `SCM_RIGHTS` control message. No descriptor (`has_fd = 0`, implicit fd =
-   -1) means "this segment uses the /dev/shm fallback".
-5. `read()`/`read_rows()` look the name up in a process-wide handoff registry
-   (populated by `Ring_start`, drained by the read path), map the received fd,
-   close it (the mapping holds the file reference) and cache the result.
-   Subsequent reads take one non-blocking poll (to notice a replacement) and
-   return the cached mapping.
+Eventfd counters coalesce, so a missed read of a stale wake costs nothing: the
+next poll sees the count. Writes ignore `EAGAIN` (the counter is already
+non-zero, i.e. a wake is already pending).
 
-The record is sent **before** the worker posts its response, so by the time
-the client's `wait()` returns, the descriptor is already in the socket buffer.
-The read path's first-use wait is bounded (1 s) so an old server or a broken
-handoff degrades to `/dev/shm` instead of hanging.
+### 2. `worker.c` — a small pool of workers dispatching many rings
 
-Why a socket rather than `/proc/<pid>/fd/<n>`? The worker is a PostgreSQL
-background worker; `/proc` access depends on the server's dumpable/ptrace
-policy, and a descriptor passed over a socket the client created is a real
-capability transfer rather than a path lookup that a third process could
-race. The abstract socket is reachable only within the same network namespace;
-the connection is established from the worker whose pid the client then sees
-in `tally.worker_pid`.
+The registry is a per-database `/dev/shm/fp_pool_<dboid>` file (a worker is
+connected to one database) holding eight slots of up to 32 ring names. The SQL
+bootstrap (`fastpostgres_ring_start`) routes an eventfd ring to the pool
+instead of registering a worker of its own:
 
-## Sealing choice
+1. It first tries to give the ring a worker of its own (capacity starts at 1).
+   If `RegisterDynamicBackgroundWorker` succeeds, that is the original 1:1
+   shape, with the same throughput and isolation.
+2. If the server is at `max_worker_processes`, the ring is appended to an
+   existing pool worker instead, and that worker's capacity grows by one (up to
+   `FASTPOSTGRES_RINGS_PER_WORKER`, default 8). That is the decoupling: an
+   eighth ring no longer needs an eighth backend.
 
-`F_SEAL_SHRINK | F_SEAL_GROW` are applied after the single `ftruncate`:
+A pool worker maps every ring in its slot, attaches its two eventfds, sets
+`worker_ready`, and then one `poll()` covers all of them. On a wake it services
+one request: `req_seq`/`resp_seq` decide whether anything was asked, the ring's
+own per-ring state decides which cursor to fetch, and the answer goes back on
+that ring's eventfd. One executor turn at a time is the honest model for one
+backend.
 
-- the object can never change size under a mapped reader, and
-- it can never be grown into a different shape (the reader's `capacity` and
-  the descriptor's size agree forever).
+Per-ring state is what makes multiple portals safe: the existing worker kept a
+single `have_stream` global and one cursor, which assumed one stream per
+worker. The pool tracks a stream name and a `have_stream` flag per ring. All
+streams share one transaction and one snapshot (a stream already held a
+transaction for its whole life), and the last CLOSE commits. A PG error aborts
+the transaction and drops every stream on that worker — a real coupling,
+documented below. The row frame's carried row (a tuple that did not fit in the
+segment) was a single global; it is now keyed by portal, so stream A's carry
+can never be written into stream B's batch.
 
-`F_SEAL_WRITE` is **not** used, deliberately. The ring recycles one segment per
-batch: the worker rewrites the same mapping for every `next()`. A write seal
-would make the already-writable shared mapping fault on the next publish (and
-`F_ADD_SEALS(F_SEAL_WRITE)` fails while a writable shared mapping exists), so
-write sealing and batch recycling are mutually exclusive in this design. The
-readers are protected by the size seals and by the existing publish/sequence
-protocol, not by copy-on-write.
+Teardown: STOP, a dead client, or SIGTERM closes the ring's cursor, commits if
+it was the last stream, sets `worker_ready=0`, detaches the eventfds, removes
+the ring from the registry (so its capacity is reusable) and unmaps it. A
+worker with no rings exits after a two-second grace, which keeps a process'
+rings on one worker across a create/close cycle without pinning a backend
+forever.
 
-Consequence: a segment name's capacity is fixed for the life of the worker.
-`ring_data_capacity()` already clamps it per ring, so this is the behavior
-callers ask for. If a larger ask ever arrives, the worker replaces the memfd
-and sends a fresh descriptor; the client notices the new generation on its
-next read and remaps.
+## What the measurement says
 
-## Lifetime
+Driver: `bench/internals/threads/ring_scaling.py`, N processes × one ring ×
+three object-free reads (`Cursor.aggregate`, columnar batches reduced in C++,
+no Python object per row), 100k rows per read, batch 25k. Six interleaved
+pairs of container runs, 3 reps per setting per run; the table is the median
+of the six. Full record, raw values and controls in
+`bench/results/team-networking-ab.log`.
 
-- **memfd descriptor (worker)**: created on first use of a segment name, held
-  in the worker's segment table (up to 8 names), closed at `worker_fini` after
-  the final unmap.
-- **memfd mapping (worker)**: held for the worker's lifetime; no per-batch
-  `munmap`. Unmapped in `fastpostgres_shm_worker_end()`.
-- **client descriptor**: received once, mapped, then closed; the `mmap`
-  reference keeps the memfd alive even if the worker exits.
-- **client mapping**: process-lifetime cache, keyed by segment name. It is
-  replaced if a new descriptor/generation arrives for the same name (only a
-  capacity replacement in practice).
-- **socket**: listener closed at the first `accept`; accepted connection owned
-  by the `Ring` and closed on `Ring.stop()`/deallocation.
-- **ring segment** (the control channel) is still `/dev/shm/<ring>` at 0600 as
-  before; this slice concerns the data segment only.
+| N | baseline rows/s | baseline served | change rows/s | change served | delta |
+|---|---|---|---|---|---|
+| 1 | 6.54M | 1/1 | 6.33M | 1/1 | −3.3% |
+| 2 | 12.76M | 2/2 | 11.71M | 2/2 | −8.2% |
+| 4 | 23.44M | 4/4 | 21.93M | 4/4 | −6.4% |
+| 8 | 31.11M | **7/8** | 22.64M | **8/8** | −27.2% |
 
-## Security delta
+The host carries ~2 cores of background load, so n≤4 cells move ±5–10% run to
+run; a same-image alternation at n=2 (semaphore vs eventfd, six times) was
+12.51M against 12.58M, i.e. the per-ring path is at parity. The n=8 cells do
+not overlap between the six baseline and six change runs.
 
-| | /dev/shm path (default, fallback) | memfd path (`FASTPOSTGRES_MEMFD=1`) |
-|---|---|---|
-| name on a shared filesystem | yes (`/dev/shm/<seg>`) | no |
-| inode permission | widened to `0666` so another user can open it | anonymous; no path, no mode |
-| who can reach the payload | any local process that can open the name | any process that can connect to the client's abstract listener in the same netns — the worker connects before `worker_ready`, and the fd is sent to that one connection |
-| resize under a reader | possible via `ftruncate` by anyone who opens the file | impossible (`F_SEAL_SHRINK|F_SEAL_GROW`) |
-| segment identity | name | descriptor |
+Three controls make the result readable:
 
-The `fchmod(0666)` call is gone from the memfd path entirely. The fallback
-path keeps it, because a client running as a different user than the server
-still has to reach a named object; that is why memfd is opt-in rather than the
-default. The control ring remains 0600 as it already was.
+- **The engine is free.** With `max_worker_processes=16` (an eighth slot, so no
+  multiplexing) the change reaches 32.58M on 8 workers against the baseline's
+  32.93M at N=8 (−1.1%), and N=1–4 show no systematic gap beyond the host's
+  noise. Eventfds cost nothing measurable per read.
+- **The loss is the shared worker, not the pool.** With
+  `FASTPOSTGRES_RINGS_PER_WORKER=1` (overflow disabled) the change reproduces
+  the baseline exactly — 7/8 served, 31.13M against 31.11M — while still using
+  the new engine.
+- **The baseline cannot run N=8 at all.** Its eighth `aggregate()` raises
+  `NotSupportedError`; a DB-API `execute()` would silently take libpq. There is
+  no baseline number for what the eighth ring does, because it does nothing on
+  the ring.
 
-Remaining gap (documented, not fixed here): the abstract listener is open to
-any process in the same network namespace while `Ring_start` is in flight.
-A hostile local process could connect first and receive a descriptor instead
-of the worker (denial of service, and a copy of one result segment). Closing
-that would mean authenticating the peer (`SO_PEERCRED` against the server's
-uid/pids) or using a filesystem socket under a private 0700 directory; both
-are small follow-ups.
+So: **the decoupling removes the ceiling, but it does not make concurrent
+reads faster, and past the budget it makes the aggregate slower.** That is
+structural, not an implementation defect. A backend is one OS thread; two
+rings on one worker serialize their executor turns, and when every read is long
+and every ring is busy, the ring sharing a worker is the straggler that sets
+the wall time. One ring per worker up to the budget is the right policy, and
+that is what the pool does — it only multiplexes when the alternative is
+libpq.
 
-## Fallback and compatibility
+The win is capacity and shape, not throughput:
 
-- No `FASTPOSTGRES_MEMFD` (default) or an explicit `0`: the client does not
-  listen, `fd_handoff = 0`, and the worker takes exactly the old `/dev/shm`
-  path (including `fchmod`). Existing tests that inspect
-  `/dev/shm/<seg>` pass unchanged.
-- `memfd_create` fails (`ENOSYS`, fd limit): the worker sends `has_fd = 0` and
-  creates the named segment; the client maps `/dev/shm/<seg>`.
-- Socket connect/accept fails, or an old server ignores the handoff fields:
-  the worker uses `/dev/shm`; the client's bounded first-use wait expires and
-  it maps by name.
-- The shm fallback also benefits from the mapping cache (one `mmap` per
-  segment name per worker instead of one per batch).
+- an application can hold more than seven live rings, so the eighth and later
+  readers stay on the shared-memory path instead of falling back;
+- many *mostly idle* rings (typical of an app with many open cursors /
+  connections) cost almost nothing: a pooled worker sleeps in one `poll()` for
+  all of them, where the 1:1 model spent a backend per ring;
+- the ring budget is now a policy (`FASTPOSTGRES_RINGS_PER_WORKER`) rather than
+  a hard function of a server GUC.
 
-## Measurement
+And the price is explicit: at N=8 on a seven-slot server, one worker carries two
+rings and the aggregate drops from the unattainable 31.1M to 22.6M. If the
+eighth read matters more than the ~27%, the pool is a win; if all eight are
+long, parallel scans, raising `max_worker_processes` (or running a second
+server) is still the better answer.
 
-`bench/results/team-formats-ab.log`. Same command on both images, under
-`/tmp/fpq-bench.lock`, with `FASTPOSTGRES_MEMFD=1` on both (the baseline
-ignores it). Five alternating runs per size; medians:
+## What remains
 
-- 3K `stream()`: 6.05M -> 6.76M rows/s (+11.7%)
-- 3K PATHS `stream()`: 6.11M -> 6.52M (+6.7%)
-- 3K DBAPI: 7.34M -> 7.79M rows/s (+6.1%)
-- 3K core: 4.91M -> 6.03M (+22.8%)
-- 100K `stream()`: 8.38M -> 8.71M rows/s (+3.9%)
-- 100K DBAPI: 3.64M -> 3.64M rows/s (0.0%)
-
-The small-batch read (where a per-request map/unmap was a large share of the
-work) is faster in every fastpostgres path; the 100K read is unchanged within
-the benchmark's process-to-process spread.
-
-## What is left
-
-- The default is still the named segment (tests and cross-user clients depend
-  on it); flipping the default needs the `/dev/shm`-inspecting tests to opt
-  out explicitly and a decision that same-user client/server is the supported
-  deployment.
-- Peer authentication on the handoff socket (`SO_PEERCRED`) as noted above.
-- A dedicated regression test that asserts the memfd path is used (no data
-  file under `/dev/shm`) and that shrinking/growing is refused; the current
-  suite runs the fallback path for that check.
+- **Scheduling.** `pool_overflow_slot` picks the least-loaded worker, but a
+  better policy would overflow onto a worker whose rings are currently *idle*
+  (all eight eventfds quiet) and keep busy workers at one ring. The eventfd
+  registry has the information; the prototype does not use it yet.
+- **Error isolation.** A PG error on one ring aborts the worker's transaction
+  and therefore every stream it serves. Per-stream subtransactions (savepoints)
+  would contain it; the prototype accepts the coupling.
+- **Snapshot semantics.** Multiplexed streams share one transaction and one
+  snapshot instead of one transaction each. Read-only streams normally have
+  their own snapshot; this is a deliberate simplification of the prototype and
+  is documented here rather than hidden.
+- **Cross-user clients.** The eventfd handshake requires the worker to connect
+  to a socket the client owns in the same network namespace, and the client and
+  worker must be able to pass fds (same UID in practice). The semaphore engine
+  crosses users because the segment is mode 0666; the pool does not. The
+  prototype is for the same-user / same-container deployment the benchmark
+  uses.
+- **One free slot to start.** The first pool worker still needs one
+  `max_worker_processes` slot. If other applications' 1:1 ring workers have
+  consumed the whole budget, the first eventfd ring cannot start. The pool
+  removes the per-ring cost, not the cost of having a pool.
+- **Per-database pools.** A worker is connected to one database, so the
+  registry is per database OID; a client reading several databases gets one
+  pool per database. That is correct, just not shared.
+- **No client-backend portal variant.** The alternative — the client's own
+  backend runs `PortalRunFetch` with a DestReceiver writing into the segment —
+  needs a round trip over libpq (or another notification channel) per batch and
+  would not use the shared-memory doorbell at all. It would give true
+  parallelism per ring only if the client's backend were also the executor,
+  which is what the ring exists to avoid. It remains a possible future engine
+  behind the same seam, not this prototype.
+- **The test suite's default is still `shm`.** `FASTPOSTGRES_TRANSPORT=eventfd`
+  runs the whole suite green (including a new 8-ring test that exceeds the
+  budget and proves the multiplex); the default keeps the 1:1 engine until the
+  eventfd handshake has a deployment story for cross-user clients.

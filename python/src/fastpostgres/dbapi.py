@@ -483,11 +483,14 @@ class ResultSet:
 # (or the extension is absent) reads fall back to libpq.
 #
 # The size is resolved once per process, from the machine and the server: a
-# stream needs ~1.2 hardware threads (a GIL-bound decode plus its ring worker),
-# and every ring is a background worker the server budgets via
-# max_worker_processes. FASTPOSTGRES_SHM_POOL overrides it; 0 disables the
-# shared-memory path. FASTPOSTGRES_SEGMENT_BYTES sizes each of the two data
-# segments per ring (0 = the worker's 1 GiB default, clamped to 64 KiB-1 GiB).
+# stream needs ~1.2 hardware threads (a GIL-bound decode plus its ring worker).
+# With the default "shm" engine every ring is a background worker the server
+# budgets via max_worker_processes, so the server clamps the pool. With
+# FASTPOSTGRES_TRANSPORT=eventfd a ring no longer costs a worker (a small pool
+# of workers polls many rings), so only the machine bounds it. The pool size is
+# still overridable with FASTPOSTGRES_SHM_POOL; 0 disables the shared-memory
+# path. FASTPOSTGRES_SEGMENT_BYTES sizes each data segment per ring (0 = the
+# worker's 1 GiB default, clamped to 64 KiB-1 GiB).
 # FASTPOSTGRES_MEMFD=1 makes the worker back those segments with sealed memfds
 # and hand each descriptor to the client once over SCM_RIGHTS, instead of
 # widening a named /dev/shm file to 0666. Default off: the named segment is what
@@ -501,6 +504,11 @@ class ResultSet:
 _POOL_ENV = os.environ.get("FASTPOSTGRES_SHM_POOL")
 _SEGMENT_ENV = os.environ.get("FASTPOSTGRES_SEGMENT_BYTES")
 _SEGMENT_BYTES = int(_SEGMENT_ENV) if _SEGMENT_ENV else 0
+# The doorbell engine. "shm" is the original semaphore ring (one background
+# worker per ring); "eventfd" lets a small pool of workers serve many rings, so
+# the ring count is no longer bounded by max_worker_processes. Default stays
+# "shm": the eventfd pool is opt-in while it is a prototype.
+_TRANSPORT = os.environ.get("FASTPOSTGRES_TRANSPORT", "shm")
 _THREADS_PER_STREAM = 1.2
 _POOL_MAX = 8
 # The backend_type the ring workers show in pg_stat_activity, counted against
@@ -611,9 +619,13 @@ def _resolve_pool_size(conn) -> int:
         _pool_size = int(_POOL_ENV)
         return _pool_size
     size = _machine_streams()
-    slots = _server_ring_slots(conn)
-    if slots is not None:
-        size = min(size, slots)
+    # The eventfd engine decouples rings from background workers: a ring no
+    # longer costs a server slot, so the machine is the bound. The shm engine
+    # still clamps to max_worker_processes.
+    if _TRANSPORT == "shm":
+        slots = _server_ring_slots(conn)
+        if slots is not None:
+            size = min(size, slots)
     _pool_size = max(1, size)
     return _pool_size
 
@@ -720,7 +732,7 @@ def _try_acquire(bootstrap, prefix):
 
     name = f"{prefix}_{index}"
     try:
-        ring = _client.Ring(name, _SEGMENT_BYTES)
+        ring = _client.Ring(name, _SEGMENT_BYTES, _TRANSPORT)
         ring.start(bootstrap)
     except Exception as exc:
         with _pool_lock:

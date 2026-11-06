@@ -1,0 +1,145 @@
+# team-networking: ring count vs max_worker_processes
+#
+# A/B of the eventfd ring pool against the 1:1 semaphore ring. The driver is
+# bench/internals/threads/ring_scaling.py: N processes, one ring each, each
+# doing 3 object-free reads (Cursor.aggregate: columnar batches reduced in C++,
+# no Python object per row), 100k rows per read, batch 25k. It is bind-mounted
+# so the SAME file runs on both images (the baseline image predates it).
+#
+# Six pairs of container runs were interleaved under /tmp/fpq-bench.lock (one
+# docker run at a time), 3 reps per setting per run; the tables below are the
+# medians of the six. An earlier single pair at 5 reps agrees with them.
+# Host: Ryzen 7 7700, 8C/16T, 30 GiB, ~2 cores of background load (desktop);
+# that is the source of the +/-5-10% cell-to-cell noise at n<=4.
+
+### COMMAND (baseline)
+flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+  -e BENCH_GIT_REV=baseline \
+  -v $PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro \
+  fpq-baseline python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 3'
+
+### COMMAND (change)
+flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+  -e FASTPOSTGRES_TRANSPORT=eventfd -e BENCH_GIT_REV=networking \
+  -v $PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro \
+  fpq-networking python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 3'
+
+# Baseline: main@7e3d2e6, image fpq-baseline. Change: team/networking,
+# image fpq-networking built from this worktree under the same lock.
+
+### baseline (fpq-baseline, shm engine)
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+
+### RING-SCALING
+rows: 100000
+reads: 3 per process
+reps: 3 per run, 6 runs interleaved (median reported)
+batch: 25000
+shape: fp_ring_scaling_t (the benchmark's six-column row)
+transport: shm
+rings_per_worker: <default>
+shm_pool: <default>
+git: baseline
+### END RING-SCALING
+
+ n served ring workers   aggregate rows/s   per reader
+ 1      1            1          6,539,803    6,539,803
+ 2      2            2         12,757,899    6,378,950
+ 4      4            4         23,439,044    5,859,761
+ 8      7            7         31,113,297    4,444,757 (1 reader had no ring)
+# The n=8 row is 7 readers: with max_worker_processes=8 and one held back the
+# eighth process gets no background worker. Its aggregate() raises; a DB-API
+# execute() would silently read over libpq. Raw n=8 values across the six runs:
+# 31.17M, 29.61M, 31.63M, 28.79M, 32.86M, 31.05M.
+
+### change (fpq-networking, eventfd engine, default policy)
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: networking
+shm: 3.0G
+### END ENV
+
+### RING-SCALING
+rows: 100000
+reads: 3 per process
+reps: 3 per run, 6 runs interleaved (median reported)
+batch: 25000
+shape: fp_ring_scaling_t (the benchmark's six-column row)
+transport: eventfd
+rings_per_worker: <default> (each ring gets its own worker until the server is full; then one worker grows to at most 8 rings)
+shm_pool: <default>
+git: networking
+### END RING-SCALING
+
+ n served ring workers   aggregate rows/s   per reader
+ 1      1            1          6,325,913    6,325,913
+ 2      2            2         11,707,960    5,853,980
+ 4      4            4         21,930,392    5,482,598
+ 8      8            7         22,640,681    2,830,085
+# Eight rings on seven workers: the pool's eighth ring shares a worker instead
+# of failing. Raw n=8 values: 22.64M, 22.64M, 22.06M, 22.91M, 22.66M, 22.25M.
+
+### AB
+n=1 -3.3% | n=2 -8.2% | n=4 -6.4% | n=8 -27.2%. The change serves 8/8 rings where the baseline serves 7/8; past the budget one worker carries two rings and that straggler sets the wall time. n<=4 is inside this host's +/-5-10% noise (see the same-image control below); n=8 is outside it (six runs each, no overlap).
+
+## Controls
+
+### 1. same image, both engines (cancels build/clock drift)
+Six alternations inside one container, n=2, medians:
+  shm     12.51M rows/s   (12.57, 11.97, 12.60, 12.43, 12.86, 12.46)
+  eventfd 12.58M rows/s   (12.50, 12.63, 11.67, 12.48, 12.85, 12.69)
+At n=2 the per-ring path is either the semaphore doorbell or the eventfd pair;
+they are the same within noise. The pool does not add a per-read cost when a
+ring has its own worker.
+
+### 2. both engines with the budget out of the way (`PG_OPTS=-c max_worker_processes=16`)
+Every ring gets a worker of its own, so no multiplexing:
+  baseline:  6.36M / 12.90M / 23.98M / 32.93M   (8/8 at n=8)
+  change:    6.25M / 11.62M / 23.18M / 32.58M   (8/8 at n=8)
+n=8: 32.58M against 32.93M (-1.1%, one pair; a second pair gave 32.58 vs
+35.92 with the baseline cell inflated). The eventfd engine is at parity with
+the semaphore engine; the n=8 loss in the main table is the shared worker.
+
+### 3. change with overflow disabled (`FASTPOSTGRES_RINGS_PER_WORKER=1`)
+The pool behaves as the 1:1 model again:
+  1: 6.22M | 2: 11.59M | 4: 22.82M | 8: 31.13M, **7/8 served** (1 had no ring)
+That reproduces the baseline's 31.11M and 7/8 exactly, on the eventfd engine;
+the entire -27.2% is the one extra ring multiplexed onto an existing worker.
+
+## Reproduce
+
+    docker build -q --target dev -t fpq-networking -f docker/Dockerfile .
+    docker run --rm --shm-size=3g -e FASTPOSTGRES_TRANSPORT=eventfd \
+      -v "$PWD/bench/internals/threads/ring_scaling.py:/tmp/ring_scaling.py:ro" \
+      fpq-networking python3 /tmp/ring_scaling.py --rows 100000 --reads 3 --reps 5
+
+`tests.sh` is green on both settings:
+  docker run --rm --shm-size=3g fpq-networking tests.sh                        # 55 tests, 1 skipped
+  docker run --rm --shm-size=3g -e FASTPOSTGRES_TRANSPORT=eventfd fpq-networking tests.sh  # 55 tests, OK
+
+A sanity run of the final committed image (2 reps) reproduced the shape:
+6.48M / 11.07M / 22.99M / 22.93M at n=1/2/4/8, 8/8 served, 7 workers at n=8.

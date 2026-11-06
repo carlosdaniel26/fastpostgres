@@ -5,6 +5,9 @@
  *   shm     the ring's own semaphores: sem_post / sem_timedwait, a futex
  *           round trip and a scheduler wake per handoff (futexes, no
  *           privileges, works everywhere)
+ *   eventfd two eventfds per ring, pollable, so one worker can wait on many
+ *           rings in one poll(); the fds travel to the worker over SCM_RIGHTS
+ *           on an abstract Unix socket the client owns (engine_eventfd.c)
  *
  * Everything else in the ring — the ops, `arg`, the batch, status/nrows/error,
  * the data segment and its publish barriers — is transport-neutral and stays
@@ -24,7 +27,8 @@
 extern "C" {
 #endif
 
-#define FASTPOSTGRES_TRANSPORT_SHM 1u
+#define FASTPOSTGRES_TRANSPORT_SHM     1u
+#define FASTPOSTGRES_TRANSPORT_EVENTFD 2u
 
 typedef struct FastpostgresTransport {
     const char *name;      /* "shm": the FASTPOSTGRES_TRANSPORT value */
@@ -52,6 +56,14 @@ const FastpostgresTransport *fastpostgres_transport_by_name(const char *name);
 int fastpostgres_transport_check(const FastpostgresRing *r, const FastpostgresTransport *t);
 
 extern const FastpostgresTransport fastpostgres_transport_shm;
+extern const FastpostgresTransport fastpostgres_transport_eventfd;
+
+/* The eventfd engine's one step the generic seam cannot express: the fds are
+ * process-local, so the worker receives its copies from the client over
+ * SCM_RIGHTS. Both are called with the ring mapped by the side that owns it.
+ * attach() is worker-side and blocks for the client's handshake (bounded). */
+int  fastpostgres_eventfd_attach(FastpostgresRing *r);
+void fastpostgres_eventfd_detach(FastpostgresRing *r);
 
 #ifdef __cplusplus
 }

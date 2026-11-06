@@ -1,13 +1,16 @@
-/* ring.cpp — Ring(seg, segment_bytes=0): the request/response channel the
- * backend worker services, and the data segment's capacity. The client creates
- * /dev/shm/<seg>, initialises the semaphores, and bootstraps the worker with one
- * SQL call over libpq (start); open/next/close then travel through shared memory
- * only, and the worker maps each data segment at the capacity the ring carries.
+/* ring.cpp — Ring(seg, segment_bytes=0, transport="shm"): the
+ * request/response channel the backend worker services, and the data segment's
+ * capacity. The client creates /dev/shm/<seg>, initialises the doorbells, and
+ * bootstraps the worker with one SQL call over libpq (start); open/next/close
+ * then travel through shared memory only, and the worker maps each data
+ * segment at the capacity the ring carries.
  *
- * The handoffs ride the ring's own semaphores (extension/transport/transport.h):
- * everything on this side that is not a doorbell — the ops, arg, batch,
+ * The handoffs ride the engine the segment is stamped with
+ * (extension/transport/transport.h): "shm" is the original pair of semaphores,
+ * "eventfd" is a pollable pair that lets a pool worker serve several rings.
+ * Everything on this side that is not a doorbell — the ops, arg, batch,
  * status/nrows/error, the data segments — is transport-neutral, and every
- * handoff goes through the ops table the segment was stamped with. */
+ * handoff goes through that engine's ops table. */
 #include "ring.hpp"
 
 #include <fcntl.h>
@@ -197,14 +200,24 @@ Ring_dealloc(RingObject *self)
 static int
 Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
 {
-    static const char *kwlist[] = {"segment", "segment_bytes", nullptr};
+    static const char *kwlist[] = {"segment", "segment_bytes", "transport", nullptr};
     const char        *seg;
+    const char        *transport = "shm";
     unsigned long long data_bytes = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|K", (char **)kwlist, &seg, &data_bytes)) return -1;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|Ks", (char **)kwlist, &seg, &data_bytes, &transport))
+        return -1;
 
-    /* The ring's engine is the shm one: its semaphores are the doorbells. */
-    const FastpostgresTransport *ops = &fastpostgres_transport_shm;
+    /* The engine the segment is driven with. "shm" is the original semaphore
+     * doorbell; "eventfd" is the pollable one a pool worker can serve several
+     * rings with. An unknown name is an error, never a silent fallback. */
+    const FastpostgresTransport *ops = fastpostgres_transport_by_name(transport);
+
+    if (ops == nullptr)
+    {
+        PyErr_Format(PyExc_ValueError, "Ring: unknown transport %s", transport);
+        return -1;
+    }
 
     /* Sealed-memfd data segments are opt-in (FASTPOSTGRES_MEMFD=1). The default
      * stays the named /dev/shm segment, which is what a client running as a
@@ -311,6 +324,17 @@ Ring_init(RingObject *self, PyObject *args, PyObject *kwds)
     self->owner   = 0;
     self->pid     = (uint32_t)getpid(); /* the ring is this process's to drive */
     memcpy(self->data, seg, std::strlen(seg) + 1);
+    /* A reused segment starts from a clean handoff: the counters, the op and
+     * readiness are this client's to establish, and a stale ready from a
+     * previous worker would let wait_ready return before this one exists. */
+    r->req_seq      = 0;
+    r->resp_seq     = 0;
+    r->op           = FASTPOSTGRES_OP_NONE;
+    r->status       = 0;
+    r->worker_ready = 0;
+    r->srv_pid      = 0;
+    std::strncpy(r->ring_name, seg, sizeof(r->ring_name) - 1);
+    r->ring_name[sizeof(r->ring_name) - 1] = 0;
     /* the capacity the worker is to map each data segment at (0 = its default) */
     r->data_bytes = data_bytes;
     r->client_pid = (uint32_t)getpid(); /* the worker exits once this process is gone */
@@ -465,10 +489,13 @@ Ring_start(RingObject *self, PyObject *conn)
     }
 
     /* The bootstrap asks the server to register the worker over libpq, as it
-     * always has. This is the one-argument call, which starts the shm ring and
-     * is also what a server that predates the two-argument overload
-     * understands. */
-    std::string sql = "SELECT fastpostgres_ring_start('" + std::string(self->data) + "')";
+     * always has. The shm engine keeps the one-argument call, which is also
+     * what a server that predates the two-argument overload understands; any
+     * other engine names itself, so the server never has to guess. */
+    std::string sql = "SELECT fastpostgres_ring_start('" + std::string(self->data) + "'";
+    if (self->ops->id != FASTPOSTGRES_TRANSPORT_SHM)
+        sql += ", '" + std::string(self->ops->name) + "'";
+    sql += ")";
 
     PGresult *res;
 
