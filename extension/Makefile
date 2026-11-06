@@ -22,7 +22,13 @@ REGRESS = fastpostgres
 REGRESS_OPTS = --inputdir=test
 
 PG_CONFIG = pg_config
-PG_CPPFLAGS += -I$(srcdir)/include -I$(srcdir)
+PG_CPPFLAGS += -I$(srcdir)/include -I$(srcdir) -I$(srcdir)/src
+
+# The extension is C++23 (src/pgxx.h is the bridge to PostgreSQL's C API).
+# -O3 matches the serialization hot loops' setting (PGXS defaults to -O2);
+# -fno-exceptions keeps a C++ throw from unwinding through a PostgreSQL frame,
+# whose error path is a longjmp rather than an exception.
+PG_CXXFLAGS += -std=c++23 -O3 -fno-exceptions
 
 # -O3 for the serialization hot loops (PGXS defaults to -O2).
 PG_CFLAGS += -O3
