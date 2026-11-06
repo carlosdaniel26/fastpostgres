@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render fast-postgres vs PgCache from the comparison log.
 
-One image, two panels, two bars, because the answer depends on the shape of the
+One figure, two panels, two bars, because the answer depends on the shape of the
 result (the largest size in the log; the smaller one tells the same relation):
 
     left   the full scan, rows/s     delivery-bound: the ring wins, and a cache
@@ -9,42 +9,28 @@ result (the largest size in the log; the smaller one tells the same relation):
     right  count/sums, ms/read (log) execution-bound: a hit does no work at all
                                      and wins by a wide margin
 
-The bars are fast-postgres (the accent) and the same read through the PgCache
-proxy with the cache warm (orange, over a psycopg 3 socket). The pgcache bar
-carries its own difference against fast-postgres, the column the log prints.
+The bars are fast-postgres and the same read through the PgCache proxy with the
+cache warm. The pgcache bar carries its own difference against fast-postgres,
+the column the log prints. The look comes from `styles.py`: the repository
+default is `mono`, the deck default is `brutal`.
 
 Usage:
-    just charts cache                 plots bench/results/fastpostgres-vs-pgcache.log
-    just charts cache --log my.log    plots another run's log
-    just charts cache --out docs/assets/   writes the PNG elsewhere
+    just charts cache                        plots the default log, repo style
+    just charts cache --chosen presentation  the same figure, deck style
+    just charts cache --log my.log           plots another run's log
+    just charts cache --out docs/assets/     writes the PNG elsewhere
 """
 import argparse
 import re
 import sys
 from pathlib import Path
 
-try:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter, NullFormatter
-except ImportError:
-    sys.exit("matplotlib is required (pip install matplotlib)")
-
-import theme  # noqa: E402
+import cache_figure  # noqa: E402
+import styles  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOG = ROOT / "bench" / "results" / "fastpostgres-vs-pgcache.log"
 FILENAME = "pgcache-read.png"
-
-# Strategic colour: the ring takes the accent, the cache is the thing priced.
-ACCENT = "#1f77b4"
-ORANGE = "#e1812c"
-SERIES = (
-    ("fastpostgres", ACCENT, "fast-postgres (shm ring)"),
-    ("pgcache", ORANGE, "psycopg 3 → PgCache (cache warm)"),
-)
 
 SIZE_RE = re.compile(r"^# (\d+) rows")
 ROW_RE = re.compile(
@@ -90,63 +76,16 @@ def parse(text):
     return data, fills, env
 
 
-def fmt_rows(v, _pos=None):
-    if v >= 1e6:
-        return f"{v / 1e6:g}M"
-    if v >= 1e3:
-        return f"{v / 1e3:g}K"
-    return f"{v:g}"
-
-
-def fmt_ms(v, _pos=None):
-    return f"{v:g}"
-
-
-def bars(ax, data, workload, fmt, ylabel, log=False):
-    sizes = [max(data)]  # the largest size: the smaller one tells the same relation
-    labels = [f"{n // 1000000}M" if n >= 1e6 else f"{n // 1000}K" for n in sizes]
-    # a bar keeps a bar's width: the axis grows around a single group
-    width = min(0.8 / len(SERIES), 0.30)
-    step = width * 1.12  # a sliver between the bars of a group
-    xs = list(range(len(sizes)))
-    handles = []
-    for i, (player, color, label) in enumerate(SERIES):
-        values = [data[n][workload][player] for n in sizes]
-        pos = [x + (i - (len(SERIES) - 1) / 2) * step for x in xs]
-        drawn = ax.bar(pos, values, width=width, color=color, label=label, zorder=3)
-        handles.append(drawn[0])
-        texts = []
-        for size, v in zip(sizes, values):
-            text = fmt(v)
-            if player == "pgcache":
-                # the cache's value as a share of the ring's
-                pct = v / data[size][workload]["fastpostgres"] * 100
-                text += f"\n{pct:.0f}%"
-            texts.append(text)
-        ax.bar_label(drawn, labels=texts, fontsize=6.8, padding=2)
-
-    ax.set_xticks(xs)
-    ax.set_xticklabels(labels)
-    ax.set_xlabel("rows")
-    pad = 0.40 if len(xs) == 1 else 0.0
-    ax.set_xlim(-0.5 - pad, len(xs) - 0.5 + pad)
-    ax.set_ylabel(ylabel)
-    if log:
-        ax.set_yscale("log")
-        ax.yaxis.set_minor_formatter(NullFormatter())
-    ax.yaxis.set_major_formatter(FuncFormatter(fmt))
-    theme.declutter(ax)
-    theme.ticks(ax, log=log)
-    ax.margins(y=0.12)
-    return handles
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG, help="the comparison log to plot")
     ap.add_argument("--out", type=Path, default=ROOT / "docs" / "assets", help="where to write the PNG")
+    ap.add_argument("--style", choices=styles.ORDER, default=None,
+                    help="override the style (default: the chosen repository style)")
+    ap.add_argument("--chosen", choices=tuple(styles.CHOSEN), default="repository",
+                    help="which selected look to use (default: repository)")
     args = ap.parse_args()
 
     text = args.log.read_text()
@@ -154,25 +93,9 @@ def main():
     if not data:
         sys.exit(f"{args.log}: no rows found -- run `just pgcache-bench` first")
 
-    fig, (ax_scan, ax_agg) = plt.subplots(1, 2, figsize=(6.6, 4.4))
-    bars(ax_scan, data, "large", fmt_rows, "rows/s")
-    ax_scan.set_title("the full scan: n rows out, delivery-bound", fontsize=9.5)
-    handles = bars(ax_agg, data, "small", fmt_ms, "ms/read", log=True)
-    ax_agg.set_title("count + two sums, execution-bound", fontsize=9.5)
-
-    fig.suptitle("fast-postgres against a result cache, same rows, same output",
-                 fontsize=12.5, y=0.975)
-    theme.legend(fig, loc="upper center", bbox_to_anchor=(0.5, 0.925), ncol=2,
-                 handles=handles, labels=[label for _, _, label in SERIES], fontsize=9)
-
-    footer = " · ".join(env.get(k, "?") for k in ("cpu", "postgres", "pgcache image", "git"))
-    theme.footer(fig, footer, y=0.03)
-    fig.subplots_adjust(left=0.095, right=0.985, top=0.80, bottom=0.21)
-
-    path = args.out / FILENAME
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"wrote {path}")
+    style_name = args.style or styles.CHOSEN[args.chosen]
+    path = cache_figure.render(style_name, data[max(data)], env, args.out, FILENAME)
+    print(f"wrote {path}  ({style_name})")
     for (size, workload), values in sorted(fills.items()):
         print(f"  fill {workload} at {size}: pgcache {values['pgcache']:.1f} ms, "
               f"fastpostgres {values['fastpostgres']:.1f} ms")

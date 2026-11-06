@@ -10,6 +10,7 @@
 #   just adoption [target]   a published third-party suite, on its own terms:
 #                            MagicStack's pgbench, with our cell in its roster
 #   just charts [target]     one figure per log
+#   just presentation        the deck set, rendered in the presentation style
 #
 # Plus the client suite and the demo:
 #
@@ -101,9 +102,13 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: arrow | arrow-memory | cache | cache-budget | codec | ab
+# one figure per log: arrow | arrow-memory | cache | cache-budget | codec | ab | styles
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
+
+# the deck set: the same numbers, rendered in the chosen presentation style
+presentation *args:
+    bench/dispatch/presentation.sh {{args}}
 
 # the ADBC + Arrow read comparison (rivals adbc): fast-postgres against the
 # Arrow ecosystem's own answer over the same rows
