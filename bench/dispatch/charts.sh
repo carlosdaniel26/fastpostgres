@@ -13,7 +13,6 @@ charts: one figure per log
   arrow-memory   the same reads under a fixed ring buffer
   codec          the codec x transport matrix
   ab             before/after, from an improve-*.log pair (--log=...)
-  styles         one figure through every candidate style (style lab)
 
 Arguments after the target go to that chart's script.
 EOF
@@ -24,7 +23,6 @@ case "$target" in
   arrow-memory) exec bench/charts/arrow_memory.py "$@" ;;
   codec)        exec bench/charts/codec.py "$@" ;;
   ab)           exec bench/charts/ab.py "$@" ;;
-  styles)       exec bench/charts/style_lab.py "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "charts: unknown target '$target'" >&2

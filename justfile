@@ -121,12 +121,6 @@ bench-adbc *sizes:
 arrow-memory-bench *args:
     bench/harness/arrow_memory_bench.sh {{args}}
 
-# fastpostgres against ADBC + Arrow with the ring's buffer fixed (rivals
-# arrow-memory): the same reads and what each side held while it delivered them
-[private]
-arrow-memory-bench *args:
-    bench/harness/arrow_memory_bench.sh {{args}}
-
 
 # the row decode's TSC cycles/row on a fixed shape (internals decode-cycles)
 [private]
