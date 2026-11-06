@@ -317,10 +317,26 @@ Connection_close(ConnectionObject *self, PyObject *)
     Py_RETURN_NONE;
 }
 
+/* The backend's process id on this control channel.  The columnar SCM_RIGHTS
+ * handoff compares it with SO_PEERCRED, so a descriptor is only accepted from
+ * the backend this libpq session is actually talking to. */
+static PyObject *
+Connection_backend_pid(ConnectionObject *self, PyObject *)
+{
+    if (!self->pg)
+    {
+        PyErr_SetString(PyExc_ValueError, "connection is closed");
+        return nullptr;
+    }
+    return PyLong_FromLong((long)PQbackendPID(self->pg));
+}
+
 static PyMethodDef Connection_methods[] = {
     {"exec", (PyCFunction)Connection_exec, METH_O, "exec(sql) -> Result (eager tuples)"},
     {"exec_lazy", (PyCFunction)Connection_exec_lazy, METH_O,
      "exec_lazy(sql) -> LazyResult (holds the PGresult, decodes on demand)"},
+    {"backend_pid", (PyCFunction)Connection_backend_pid, METH_NOARGS,
+     "backend_pid() -> int (the server process on this control channel)"},
     {"close", (PyCFunction)Connection_close, METH_NOARGS, "close()"},
     {nullptr},
 };

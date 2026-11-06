@@ -15,17 +15,18 @@ SELECT proname, pg_get_function_identity_arguments(oid) AS args
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
 ORDER BY proname, args;
-          proname           |     args     
-----------------------------+--------------
+          proname           |        args        
+----------------------------+--------------------
  fastpostgres_columnar_load | text, bigint
+ fastpostgres_columnar_load | text, bigint, text
  fastpostgres_ring_start    | text
  fastpostgres_ring_start    | text, text
  fastpostgres_ring_stop     | text
-(4 rows)
+(5 rows)
 
 -- All are STRICT VOLATILE C functions: the ring's start (one overload for the
 -- shm default, one that names a transport), its stop, and the columnar
--- bulk-load (query text, capacity bigint).
+-- bulk-load (query text, capacity bigint; plus the SCM_RIGHTS handoff form).
 SELECT proname, provolatile, proisstrict, pronargs
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'
@@ -33,10 +34,11 @@ ORDER BY proname, pronargs;
           proname           | provolatile | proisstrict | pronargs 
 ----------------------------+-------------+-------------+----------
  fastpostgres_columnar_load | v           | t           |        2
+ fastpostgres_columnar_load | v           | t           |        3
  fastpostgres_ring_start    | v           | t           |        1
  fastpostgres_ring_start    | v           | t           |        2
  fastpostgres_ring_stop     | v           | t           |        1
-(4 rows)
+(5 rows)
 
 DROP EXTENSION fastpostgres;
 SELECT count(*) FROM pg_proc WHERE proname LIKE 'fastpostgres\_%';

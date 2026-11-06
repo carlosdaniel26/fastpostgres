@@ -17,17 +17,30 @@
  *
  *     FPQCOL1 <backend pid> <fd> <bytes> <rows>
  *
- * The client opens /proc/<pid>/fd/<fd> (same user) and maps it.  The fd stays
- * open in a small process-local table for the backend's lifetime: PostgreSQL
- * closes it on exit, and until then every attached client mapping points at the
- * same immutable pages.  The mapping itself keeps the object alive even after
- * the backend goes away.
+ * That string is unchanged: it still names the backend and the descriptor in
+ * that backend's table, so a client that cannot take a live handoff can still
+ * open /proc/<pid>/fd/<fd>.  The preferred delivery is an AF_UNIX control
+ * socket: the optional third argument is the client's listening address, and
+ * the descriptor travels over it with SCM_RIGHTS.  The client then holds its
+ * own reference to the sealed object and never needs /proc, the backend's UID,
+ * or ptrace-read permission.  The backend keeps its fd in a small
+ * process-local table too (the descriptor above stays honest), but the client's
+ * capability is the received descriptor, not a lookup by pid.
+ *
+ * The fd stays open in a small process-local table for the backend's lifetime:
+ * PostgreSQL closes it on exit, and until then every attached client mapping
+ * points at the same immutable pages.  The mapping itself keeps the object
+ * alive even after the backend goes away.
  */
 #include "postgres.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
+#include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "executor/spi.h"
@@ -58,6 +71,118 @@ typedef struct LoadedColumnar
 static LoadedColumnar loaded[FASTPOSTGRES_COLUMNAR_MAX_LOADS];
 static int            nloaded;
 
+/* One control-socket record: the descriptor rides in the SCM_RIGHTS ancillary
+ * message, these fields say which object it is.  SOCK_SEQPACKET preserves the
+ * record boundary, so one recvmsg on the client sees exactly this send. */
+typedef struct ColumnarHandoff
+{
+    uint32_t magic; /* FASTPOSTGRES_COLUMNAR_HANDOFF_MAGIC */
+    int32_t  pid;   /* the backend that owns the memfd (SO_PEERCRED agrees) */
+    uint64_t bytes;
+    uint64_t rows;
+} ColumnarHandoff;
+
+#define FASTPOSTGRES_COLUMNAR_HANDOFF_MAGIC 0x46514348u /* "FQCH" */
+
+/*
+ * Deliver the sealed memfd over the client's control socket.  `path` is the
+ * abstract address the client published (leading '@' stands for the sun_path
+ * NUL) or a filesystem socket path.  A failure is never fatal: the descriptor
+ * string still works through /proc for a same-UID client, so the load succeeds
+ * and only the capability transfer fell back.
+ */
+static void
+columnar_handoff_send(const char *path, int fd, uint64 bytes, uint64 rows)
+{
+    struct sockaddr_un addr;
+    socklen_t          addrlen;
+    struct msghdr      msg;
+    struct iovec       iov;
+    char               control[CMSG_SPACE(sizeof(int))];
+    ColumnarHandoff    hdr;
+    ssize_t            n;
+    int                s;
+
+    if (path == NULL || path[0] == 0) return;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+
+    if (path[0] == '@')
+    {
+        size_t len = strlen(path + 1);
+
+        if (len == 0 || len >= sizeof(addr.sun_path) - 1)
+        {
+            elog(WARNING, "fastpostgres: columnar handoff address is too long");
+            return;
+        }
+        /* Linux abstract namespace: the first sun_path byte is NUL and the
+         * name occupies the rest; there is no filesystem object to clean up. */
+        addr.sun_path[0] = '\0';
+        memcpy(addr.sun_path + 1, path + 1, len);
+        addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + len);
+    }
+    else
+    {
+        if (strlen(path) >= sizeof(addr.sun_path))
+        {
+            elog(WARNING, "fastpostgres: columnar handoff address is too long");
+            return;
+        }
+        memcpy(addr.sun_path, path, strlen(path) + 1);
+        addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1);
+    }
+
+    s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s < 0)
+    {
+        elog(WARNING, "fastpostgres: columnar handoff socket failed: %m");
+        return;
+    }
+    if (connect(s, (struct sockaddr *)&addr, addrlen) != 0)
+    {
+        int save_errno = errno;
+
+        close(s);
+        errno = save_errno;
+        elog(WARNING, "fastpostgres: columnar handoff connect failed: %m");
+        return;
+    }
+
+    hdr.magic = FASTPOSTGRES_COLUMNAR_HANDOFF_MAGIC;
+    hdr.pid   = (int32_t)MyProcPid;
+    hdr.bytes = bytes;
+    hdr.rows  = rows;
+
+    memset(&msg, 0, sizeof(msg));
+    memset(control, 0, sizeof(control));
+    iov.iov_base    = &hdr;
+    iov.iov_len     = sizeof(hdr);
+    msg.msg_iov     = &iov;
+    msg.msg_iovlen  = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    {
+        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type  = SCM_RIGHTS;
+        c->cmsg_len   = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(c), &fd, sizeof(int));
+    }
+
+    /* MSG_NOSIGNAL: a client that gave up must not SIGPIPE the backend. */
+    do
+        n = sendmsg(s, &msg, MSG_NOSIGNAL);
+    while (n < 0 && errno == EINTR);
+
+    if (n < 0)
+        elog(WARNING, "fastpostgres: columnar handoff send failed: %m");
+    close(s);
+}
+
 static void
 remember_fd(int fd, uint64 bytes, uint64 rows)
 {
@@ -76,18 +201,23 @@ remember_fd(int fd, uint64 bytes, uint64 rows)
 }
 
 /*
- * fastpostgres_columnar_load(query text, capacity bigint DEFAULT 0) -> text
+ * fastpostgres_columnar_load(query text, capacity bigint DEFAULT 0,
+ *                            handoff text DEFAULT NULL) -> text
  *
  * Runs `query` once, read-only, and materialises its rows into a fresh memfd in
  * the FPCOLUMN layout.  Returns the descriptor above.  `capacity` is the
  * virtual size of the memfd (0 = the 1 GiB segment default); it is truncated to
  * the exact payload before the seals go on, so only the used bytes survive.
+ * `handoff` names the client's control socket; when it is given the sealed
+ * descriptor is delivered over it with SCM_RIGHTS.  Omitting it is the original
+ * /proc path, byte for byte.
  */
 PG_FUNCTION_INFO_V1(fastpostgres_columnar_load);
 Datum
 fastpostgres_columnar_load(PG_FUNCTION_ARGS)
 {
     char     *query = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    char     *handoff = NULL;
     int64     cap_arg = 0;
     uint64    cap;
     uint64    used;
@@ -100,6 +230,7 @@ fastpostgres_columnar_load(PG_FUNCTION_ARGS)
     char     *descriptor;
 
     if (PG_NARGS() > 1 && !PG_ARGISNULL(1)) cap_arg = PG_GETARG_INT64(1);
+    if (PG_NARGS() > 2 && !PG_ARGISNULL(2)) handoff = text_to_cstring(PG_GETARG_TEXT_PP(2));
 
     if (cap_arg == 0)
         cap = FASTPOSTGRES_SEGMENT_BYTES;
@@ -203,6 +334,13 @@ fastpostgres_columnar_load(PG_FUNCTION_ARGS)
         elog(WARNING, "fastpostgres: F_ADD_SEALS on columnar memfd failed: %m");
 
     remember_fd(fd, used, nrows);
+
+    /* The capability, when the client asked for one: the sealed descriptor
+     * itself, over the control socket, with the identity the client checks
+     * against SO_PEERCRED.  A failure only costs the /proc fallback. */
+    if (handoff != NULL)
+        columnar_handoff_send(handoff, fd, used, nrows);
+
     descriptor = psprintf("FPQCOL1 %d %d %llu %llu", (int)MyProcPid, fd,
                           (unsigned long long)used, (unsigned long long)nrows);
     PG_RETURN_TEXT_P(cstring_to_text(descriptor));

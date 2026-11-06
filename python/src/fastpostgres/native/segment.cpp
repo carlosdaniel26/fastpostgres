@@ -274,10 +274,15 @@ handoff_take(const std::string &name, int timeout_ms, uint64_t *gen)
         }
     }
 }
-/* Bulk-loaded columnar tables: (pid, fd) names an immutable sealed memfd. The
- * mapping is kept for the process lifetime and never rewritten, so unlike the
- * streaming segment above there is no next-batch invalidation. */
+/* Bulk-loaded columnar tables: (pid, fd) names an immutable sealed memfd, or a
+ * handle names a descriptor the client received over SCM_RIGHTS (pid == -1).
+ * The mapping is kept for the process lifetime and never rewritten, so unlike
+ * the streaming segment above there is no next-batch invalidation.  The
+ * received-fd path deliberately does not key on the fd number: the client
+ * closes it once mapped, and the number could be reused by an unrelated
+ * descriptor while the old mapping is still cached. */
 typedef struct {
+    int      handle; /* 0: a /proc entry; otherwise the client-side capability */
     int      pid;
     int      fd;
     uint64_t size; /* the size the caller asked for (0 = fstat) */
@@ -287,6 +292,7 @@ typedef struct {
 
 static std::mutex                 g_columnar_lock;
 static std::vector<ColumnarMap>   g_columnar_maps;
+static int                        g_columnar_next_handle = 1;
 
 static void *
 read_map_get(const char *path, const std::string &name, size_t *size_out)
@@ -519,7 +525,50 @@ segment_read(PyObject *, PyObject *args)
     return segment_from_payload(payload, payload_len);
 }
 
-/* Map a bulk-loaded columnar memfd, via the backend that loaded it. */
+/* Map an already-open columnar descriptor.  The caller owns `fd` and may close
+ * it on return: the mapping keeps its own reference to the sealed object.
+ * Caller holds g_columnar_lock. */
+static const uint8_t *
+columnar_map_fd(int fd, int pid, int handle, uint64_t size, uint64_t *payload_len)
+{
+    struct stat st;
+
+    if (fstat(fd, &st) != 0)
+    {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return nullptr;
+    }
+
+    uint64_t len = size ? size : (uint64_t)st.st_size;
+    if ((uint64_t)st.st_size < len)
+    {
+        PyErr_Format(PyExc_ValueError,
+                     "columnar memfd is %lld bytes, but %llu were asked for",
+                     (long long)st.st_size, (unsigned long long)len);
+        return nullptr;
+    }
+
+    void *base = mmap(nullptr, (size_t)len, PROT_READ, MAP_SHARED, fd, 0);
+    if (base == MAP_FAILED)
+    {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return nullptr;
+    }
+
+    FastpostgresReader probe;
+    if (!fastpostgres_reader_init(&probe, base, len))
+    {
+        munmap(base, (size_t)len);
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        return nullptr;
+    }
+
+    g_columnar_maps.push_back({handle, pid, fd, size, base, len});
+    *payload_len = len;
+    return (const uint8_t *)base;
+}
+
+/* Map a bulk-loaded columnar memfd, via the backend that owns it (/proc path). */
 const uint8_t *
 fp_columnar_map(int pid, int fd, uint64_t size, uint64_t *payload_len)
 {
@@ -544,43 +593,36 @@ fp_columnar_map(int pid, int fd, uint64_t size, uint64_t *payload_len)
         return nullptr;
     }
 
-    struct stat st;
-    if (fstat(h, &st) != 0)
-    {
-        close(h);
-        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
-        return nullptr;
-    }
+    const uint8_t *payload = columnar_map_fd(h, pid, 0, size, payload_len);
 
-    uint64_t len = size ? size : (uint64_t)st.st_size;
-    if ((uint64_t)st.st_size < len)
-    {
-        close(h);
-        PyErr_Format(PyExc_ValueError,
-                     "columnar memfd is %lld bytes, but %llu were asked for",
-                     (long long)st.st_size, (unsigned long long)len);
-        return nullptr;
-    }
-
-    void *base = mmap(nullptr, (size_t)len, PROT_READ, MAP_SHARED, h, 0);
     close(h);
-    if (base == MAP_FAILED)
+    return payload;
+}
+
+/* Map a descriptor the client received over SCM_RIGHTS.  A handle names the
+ * mapping afterwards, so the fd can be closed and its number reused without
+ * ever aliasing a cached object. */
+const uint8_t *
+fp_columnar_map_handle(int handle, uint64_t size, uint64_t *payload_len)
+{
+    std::lock_guard<std::mutex> held(g_columnar_lock);
+
+    for (ColumnarMap &m : g_columnar_maps)
     {
-        PyErr_SetFromErrno(PyExc_OSError);
-        return nullptr;
+        if (m.handle != 0 && m.handle == handle)
+        {
+            if (size != 0 && m.size != 0 && m.size != size)
+            {
+                PyErr_SetString(PyExc_ValueError, "columnar handle used with a different size");
+                return nullptr;
+            }
+            *payload_len = m.len;
+            return (const uint8_t *)m.base;
+        }
     }
 
-    FastpostgresReader probe;
-    if (!fastpostgres_reader_init(&probe, base, len))
-    {
-        munmap(base, (size_t)len);
-        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
-        return nullptr;
-    }
-
-    g_columnar_maps.push_back({pid, fd, size, base, len});
-    *payload_len = len;
-    return (const uint8_t *)base;
+    PyErr_SetString(PyExc_ValueError, "columnar handle is not attached");
+    return nullptr;
 }
 
 static PyObject *
@@ -596,6 +638,55 @@ columnar_attach(PyObject *, PyObject *args)
     if (payload == nullptr) return nullptr;
 
     return segment_from_payload(payload, payload_len);
+}
+
+/* columnar_attach_fd(fd, size) -> (Segment, handle)
+ *
+ * The SCM_RIGHTS half of the columnar path: `fd` is a descriptor received on
+ * the control socket.  Unlike columnar_attach() there is no pid and no
+ * /proc lookup; the descriptor itself is the capability.  The mapping holds the
+ * object, so the caller may close `fd` once this returns.
+ */
+static PyObject *
+columnar_attach_fd(PyObject *, PyObject *args)
+{
+    int                fd;
+    unsigned long long size;
+
+    if (!PyArg_ParseTuple(args, "iK", &fd, &size)) return nullptr;
+    if (fd < 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "columnar_attach_fd: invalid descriptor");
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> held(g_columnar_lock);
+
+    int            handle      = g_columnar_next_handle++;
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = columnar_map_fd(fd, -1, handle, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    PyObject *segment = segment_from_payload(payload, payload_len);
+    if (segment == nullptr)
+    {
+        /* The mapping stays in the cache: it is valid for the process lifetime
+         * and another attach of the same handle would find it. */
+        return nullptr;
+    }
+
+    PyObject *number = PyLong_FromLong(handle);
+    PyObject *out    = number ? PyTuple_New(2) : nullptr;
+
+    if (out == nullptr)
+    {
+        Py_XDECREF(number);
+        Py_DECREF(segment);
+        return nullptr;
+    }
+    PyTuple_SET_ITEM(out, 0, segment);
+    PyTuple_SET_ITEM(out, 1, number);
+    return out;
 }
 
 /* FNV-1a over 8-byte words (and a byte tail), chosen only so the full-column
@@ -632,17 +723,8 @@ hash_bytes(const uint8_t *p, uint64_t n, uint64_t h)
  * column bytes touched (null slots for fixed kinds included, matching data_len),
  * so a caller can report bytes/s and page faults for the whole SELECT *. */
 static PyObject *
-columnar_scan(PyObject *, PyObject *args)
+scan_payload(const uint8_t *payload, uint64_t payload_len)
 {
-    int                pid, fd;
-    unsigned long long size;
-
-    if (!PyArg_ParseTuple(args, "iiK", &pid, &fd, &size)) return nullptr;
-
-    uint64_t       payload_len = 0;
-    const uint8_t *payload     = fp_columnar_map(pid, fd, (uint64_t)size, &payload_len);
-    if (payload == nullptr) return nullptr;
-
     FastpostgresReader rd;
     if (!fastpostgres_reader_init(&rd, payload, payload_len))
     {
@@ -683,6 +765,37 @@ columnar_scan(PyObject *, PyObject *args)
 
     return Py_BuildValue("(KKKn)", (unsigned long long)rows, (unsigned long long)bytes,
                          (unsigned long long)checksum, (Py_ssize_t)ncols);
+}
+
+static PyObject *
+columnar_scan(PyObject *, PyObject *args)
+{
+    int                pid, fd;
+    unsigned long long size;
+
+    if (!PyArg_ParseTuple(args, "iiK", &pid, &fd, &size)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map(pid, fd, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return scan_payload(payload, payload_len);
+}
+
+/* The same full walk over a descriptor received with SCM_RIGHTS. */
+static PyObject *
+columnar_scan_handle(PyObject *, PyObject *args)
+{
+    int                handle;
+    unsigned long long size;
+
+    if (!PyArg_ParseTuple(args, "iK", &handle, &size)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map_handle(handle, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return scan_payload(payload, payload_len);
 }
 
 
@@ -1072,8 +1185,12 @@ static PyMethodDef segment_methods[] = {
     {"decode_row", decode_row, METH_VARARGS, "decode_row(columns, row) -> one tuple"},
     {"columnar_attach", columnar_attach, METH_VARARGS,
      "columnar_attach(pid, fd, size) -> Segment (read-only memfd, zero-copy column views)"},
+    {"columnar_attach_fd", columnar_attach_fd, METH_VARARGS,
+     "columnar_attach_fd(fd, size) -> (Segment, handle) (descriptor received over SCM_RIGHTS)"},
     {"columnar_scan", columnar_scan, METH_VARARGS,
      "columnar_scan(pid, fd, size) -> (rows, data_bytes, checksum, ncols) (in-place full walk)"},
+    {"columnar_scan_handle", columnar_scan_handle, METH_VARARGS,
+     "columnar_scan_handle(handle, size) -> (rows, data_bytes, checksum, ncols)"},
     {nullptr},
 };
 

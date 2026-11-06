@@ -13,14 +13,16 @@ The surviving shape is the one H9 itself names as the alternative: **make the
 storage columnar**.  This branch implements the smallest real slice of that
 idea:
 
-1. `fastpostgres_columnar_load(query, capacity)` runs a read-only SELECT once
-   and writes every value into its column's run in an anonymous **memfd**,
-   using the existing FPCOLUMN layout.
+1. `fastpostgres_columnar_load(query, capacity, handoff)` runs a read-only
+   SELECT once and writes every value into its column's run in an anonymous
+   **memfd**, using the existing FPCOLUMN layout.
 2. The memfd is sealed immutable and described to the client as
-   `FPQCOL1 <backend pid> <fd> <bytes> <rows>`.
-3. The client opens `/proc/<pid>/fd/<fd>` read-only, maps it once, and scans
-   the columns in place: zero-copy column views, a C++ reduce, and a full-byte
-   scan.  No server round trip, no transpose, no per-row copy, no scratch.
+   `FPQCOL1 <backend pid> <fd> <bytes> <rows>`.  The descriptor itself is
+   delivered over an `AF_UNIX` control socket with `SCM_RIGHTS`, and
+   `SO_PEERCRED` is checked against `PQbackendPID`.
+3. The client maps the received descriptor once and scans the columns in place:
+   zero-copy column views, a C++ reduce, and a full-byte scan.  No server round
+   trip, no transpose, no per-row copy, no scratch, no `/proc` lookup.
 
 It is **not** a table AM.  There is no catalog entry, no `relfilenode`, no
 `pg_class` row, no tuple headers, no MVCC metadata, no WAL, no buffer manager,
@@ -72,22 +74,34 @@ fastpostgres_columnar_build(...)        one pass into the mapping
 ftruncate(fd, exact_payload_bytes)      release the virtual slack
 F_ADD_SEALS(F_SEAL_SHRINK | F_SEAL_GROW)
 munmap()
+connect(client control socket)          optional third argument
+sendmsg(record + SCM_RIGHTS(fd))        the capability transfer
 ```
 
 The descriptor stays open in a 64-entry process-local table for the backend's
-lifetime.  PostgreSQL closes it at backend exit.  The client's `open` of
-`/proc/<pid>/fd/<fd>` is the capability; the mapping it creates holds the
-inode, so an already-attached client keeps reading after the backend exits.
-A client that has the descriptor string but no open mapping must attach while
-the backend is alive.
+lifetime; PostgreSQL closes it at backend exit, and the client's mapping holds
+the inode, so an already-attached client keeps reading after the backend exits.
 
-This requires the client and backend to be the same UID (the container runs
-both as `postgres`); `/proc/<pid>/fd` is gated by ptrace-read permission.
-`load()` therefore attaches eagerly, while the backend is certainly alive.
-A future version should hand the fd over an `AF_UNIX` `SCM_RIGHTS` socket
-(the pattern team/formats uses for its per-batch segment) instead of relying
-on `/proc`; that is the cleaner capability transfer and removes the UID rule.
-It is not in this slice.
+The capability is the **received descriptor**, not a lookup by pid.  Each
+`columnar.load()` publishes a fresh abstract `AF_UNIX` address
+(`@fpqcol-<pid>-<serial>`), passes it as the optional third argument, and the
+backend connects to that one-use address and sends a `SOCK_SEQPACKET` record
+`(magic, backend pid, bytes, rows)` with the sealed memfd attached.  The client:
+
+- accepts exactly one connection, reads the descriptor with `recvmsg`, and
+  closes the listener;
+- reads `SO_PEERCRED` from the accepted socket and requires the peer pid to be
+  `PQbackendPID` for this libpq session and to match the record's pid — so a
+  local process that guesses the address cannot substitute its own descriptor;
+- maps the received fd read-only, closes it (the mapping holds the object), and
+  names the mapping with a process-unique handle.
+
+Because the descriptor is transferred, the client and backend need **not** share
+a UID.  The original `open("/proc/<pid>/fd/<fd>")` path is still there, unchanged,
+as the fallback for a server that lacks the three-argument function or a failed
+transfer (same-UID only); the two-argument SQL function still returns the same
+`FPQCOL1` string.  The A/B in `bench/results/ws-os-scm-ab.log` exercises the SCM
+path: every load reports `handoff: scm`, with the peer uid/gid recorded.
 
 `F_SEAL_WRITE` is set only after the build mapping is dropped: the seal refuses
 to attach while a writable mapping exists, so the code unmaps first and then
@@ -115,6 +129,28 @@ medians:
 Break-even is about one extra scan.  The store is 3,877,790 bytes, 0.51x the
 7,651,328-byte heap relation (tuple headers, line pointers, alignment padding
 and the heap's text storage are not carried).
+
+### SCM_RIGHTS handoff, re-measured (`ws/os-scm`, 100K, 3 alternating runs)
+
+`bench/results/ws-os-scm-ab.log`, medians.  Same script, same `fpq-baseline`
+control, with the new handoff in the change image:
+
+| path | result |
+|---|---|
+| baseline heap + frame, `Cursor.aggregate` | 7.26M rows/s, 13.78 ms |
+| baseline heap + frame, `stream()` views | 8.21M rows/s, 12.19 ms |
+| memfd `ColumnarTable.reduce` | **79.25M rows/s, 1.26 ms — 10.92x** |
+| memfd full-byte scan (`scan_all`) | 127.35M rows/s, 0.79 ms, 4.94 GB/s |
+| one load (server pass + SCM handoff + map) | 11.48 ms |
+| handoff itself (accept + peercred + recvmsg) | 0.056 ms |
+| load + 1 reduce | 12.74 ms vs 13.78 ms — 7.6% faster (a wash in noise) |
+| load + 2 reduces | 14.00 ms vs 27.57 ms — 1.97x |
+| load + 10 reduces | 24.10 ms vs 137.83 ms — 5.72x |
+
+The handoff adds ~0.5% to the load and no per-byte work: the 3.88 MB payload
+never moves, only the descriptor does.  The client performs no `/proc` open on
+this path; the three-argument load reports `handoff: scm` and
+`peer=(<backend pid>, <uid>, <gid>)` from `SO_PEERCRED`.
 
 The full-byte scan reads every value byte in place and is 15.4x the baseline
 `stream()` — but that comparison is one-sided: `stream()` only builds column
@@ -172,7 +208,10 @@ the first, the scan the second.
   read-only SELECT, but it can allocate a large memfd and materialize a large
   SPI tuptable; a restricted deployment should `REVOKE EXECUTE` or wrap it.
   The returned fd is a capability to immutable bytes, not a SQL-execution
-  endpoint; the client opens it `O_RDONLY` and never maps it writable.
+  endpoint; the client maps it `PROT_READ` and never writable.  The SCM_RIGHTS
+  control socket is one-use and abstract-namespaced, and `SO_PEERCRED` pins the
+  sender to this session's `PQbackendPID`; the fd itself is the capability, so
+  sharing a UID is no longer part of the trust boundary.
 
 ## What remains
 
@@ -185,13 +224,17 @@ the first, the scan the second.
    UPDATE` semantics; and a policy for `ALTER TABLE`/rewrite.  That is a large
    multi-week project, not a prototype, which is why this branch stopped at the
    bulk-load slice.
-2. **fd handoff without `/proc`.** Add the `AF_UNIX` + `SCM_RIGHTS` path, so
-   the client and backend need not share a UID and the descriptor is delivered
-   as a capability rather than found by pid.
-3. **A stress test for the `/proc` capability and seals.** The path is
-   exercised in the container (same UID) and by the suite, but not across a
-   hostile `ptrace_scope`/UID boundary; the `SCM_RIGHTS` handoff above is the
-   right replacement rather than a longer `/proc` workaround.
+2. **fd handoff without `/proc` — done in `ws/os-scm`.** The `AF_UNIX` +
+   `SCM_RIGHTS` transfer is the primary path, with `SO_PEERCRED` checked
+   against `PQbackendPID`; the descriptor string and `/proc` attach remain as
+   the same-UID fallback.  **Still open:** a cross-UID integration test (the
+   container's client and server both run as `postgres`), and a lifecycle test
+   that the one-use listener is reclaimed on every error path.
+3. **A stress test for the seals and the control socket.** The load path and
+   its two focused client tests are exercised in the suite; a hostile
+   `ptrace_scope`/UID boundary and a `sendmsg`-fails-mid-transfer injection are
+   still worth automating (the code falls back to `/proc`, but that failure is
+   not covered by a test).
 4. **Streaming load.** Build per-column regions from a `DestReceiver` or a
    cursor instead of materializing the whole SPI tuptable, with a sizing pass
    or a growable arena; then the 16 GiB cap and the backend memory bound go
@@ -219,7 +262,9 @@ the first, the scan the second.
 
 This is a clean, measured partial prototype, not a fake storage engine.  The
 mechanism is real: a bulk load into a sealed memfd in the exact FPCOLUMN layout,
-a client mapping, and an in-place scan with no per-row copy.  The repeated-scan
+a descriptor passed tenant-to-client over `SCM_RIGHTS` (checked with
+`SO_PEERCRED`, no shared UID needed), a client mapping, and an in-place scan
+with no per-row copy.  The repeated-scan
 win is large and repeatable (10.9x on the same reduce); the one-shot case is
 within 0.7% of the baseline (a wash), which is what the copy cost predicts.  The `SELECT *` full scan is fast
 but not an apples-to-apples win over the baseline's view construction.  What is

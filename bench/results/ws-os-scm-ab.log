@@ -1,0 +1,146 @@
+# ws/os-scm — replace the /proc columnar handoff with SCM_RIGHTS
+
+#
+# Change: the bulk-loaded columnar store keeps its sealed memfd, its exact
+# FPCOLUMN payload and its "FPQCOL1 <pid> <fd> <bytes> <rows>" descriptor, but
+# the descriptor itself is now delivered over an AF_UNIX SOCK_SEQPACKET control
+# socket with SCM_RIGHTS.  The client publishes a per-load abstract address
+# ("@fpqcol-<pid>-<n>"), the new three-argument load function connects and sends
+# one record (magic, backend pid, bytes, rows) with the memfd attached, and the
+# client validates SO_PEERCRED against PQbackendPID before mapping it.  The
+# client never opens /proc/<pid>/fd/<fd>, so it no longer needs the backend's
+# UID or ptrace-read permission.  The two-argument function is unchanged and
+# still returns the original /proc descriptor; the client falls back to it for
+# an older server or a failed transfer.
+#
+# The store remains opt-in: only fastpostgres.columnar.load()/the explicit SQL
+# function touch it.  The ring, the DB-API default read and the stream()/reduce
+# paths are untouched.
+
+## Build (change image, from this worktree)
+
+    flock /tmp/fpq-bench.lock -c 'docker build -q --target dev -t fpq-os-scm -f docker/Dockerfile .'
+    -> sha256:c8489ed83f8a8a89c3f55361b8b752f261b02ff824419dd897143d6dbd1cf776
+
+## Command — 100K (the same script mounted into both images)
+
+    SCRIPT=/home/carlos/.local/share/opencode/worktree/b2743c/ws-os-scm/bench/jobs/columnar_scan.py
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -v $SCRIPT:/usr/local/bin/columnar_scan.py:ro \
+      -e BENCH_GIT_REV=baseline fpq-baseline python3 /usr/local/bin/columnar_scan.py 100000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -v $SCRIPT:/usr/local/bin/columnar_scan.py:ro \
+      -e BENCH_GIT_REV=os-scm fpq-os-scm python3 /usr/local/bin/columnar_scan.py 100000'
+
+Three alternating runs per image (baseline, os-scm, baseline, os-scm, baseline,
+os-scm); the result lines below are the medians and every per-run value is listed
+so the spread travels with the number.  The baseline image has no bulk-load API,
+so it prints the heap path and "columnar.path: unavailable".  Page faults are
+the client process's own getrusage(RUSAGE_SELF) deltas.
+
+## Baseline — ENV (run 1; identical for every rep)
+
+    ### ENV
+    cpu: AMD Ryzen 7 7700 8-Core Processor
+    mem: 30 GiB
+    ghz: 3.8
+    cores: 8
+    postgres: 18.6
+    python: 3.13.5
+    sqlalchemy: 2.0.40
+    pyarrow: 26.0.0
+    adbc: 1.13.0
+    shape: bench
+    git: baseline
+    shm: 3.0G
+    ### END ENV
+
+## Baseline — 100K, runs
+
+    heap.relation.bytes: 7651328
+    heap.aggregate.rows_s: 7255104, 7244835, 7639464     median 7255104
+    heap.aggregate.ms:     13.783,  13.803,  13.090      median  13.783
+    heap.aggregate.faults: 0 0 (warm: the mapping is faulted by the warm-up)
+    heap.stream.rows_s:    8206120, 7748447, 8620381     median 8206120
+    heap.stream.ms:        12.186,  12.906,  11.600      median  12.186
+    heap.stream.faults:    0 0
+    columnar.path: unavailable (baseline image has no bulk-load API)
+
+## Change — ENV (run 1; identical for every rep)
+
+    ### ENV
+    cpu: AMD Ryzen 7 7700 8-Core Processor
+    mem: 30 GiB
+    ghz: 3.8
+    cores: 8
+    postgres: 18.6
+    python: 3.13.5
+    sqlalchemy: 2.0.40
+    pyarrow: 26.0.0
+    adbc: 1.13.0
+    shape: bench
+    git: os-scm
+    shm: 3.0G
+    ### END ENV
+
+## Change — 100K, runs
+
+    heap.relation.bytes: 7651328
+    heap.aggregate.rows_s: 9895377, 9895367, 8836340     median 9895367
+    heap.aggregate.ms:     10.106,  10.106,  11.317      median  10.106
+    heap.aggregate.faults: 0 0
+    heap.stream.rows_s:    9389195, 9069267, 8976786     median 9069267
+    heap.stream.ms:        10.651,  11.026,  11.140      median  11.026
+    heap.stream.faults:    0 0
+
+    columnar.load.ms:       11.176, 11.480, 11.924       median 11.480
+    columnar.handoff:       scm peer=(80, 999, 999)       (same in all three runs:
+                            SO_PEERCRED pid matches PQbackendPID; uid/gid 999)
+    columnar.handoff.ms:    0.045, 0.056, 0.061          median  0.056
+    columnar.load.faults:   3 0 (minor/major; the memfd is already in page cache)
+    columnar.bytes:         3877790  (fixed runs + offset tables + text bytes)
+    columnar.heap.x:        0.507    (0.51x the 7,651,328-byte heap relation)
+    columnar.scan.cold.ms:  0.791, 0.793, 0.795          median 0.793
+    columnar.scan.cold.faults: 1 0   (THP: 3.88 MB spans two 2 MiB pages)
+    verify.reduce:          ok       (sum/count/max equal the heap player's)
+    columnar.scan.rows_s:   127804347, 127352682, 123178195  median 127352682
+    columnar.scan.ms:       0.782, 0.785, 0.812          median 0.785
+    columnar.scan.faults:   0 0 (warm)
+    columnar.scan.bytes_s:  4955984184, 4938469551, 4776591713  median 4938469551
+    columnar.reduce.rows_s: 81921351, 79252993, 77720670 median 79252993
+    columnar.reduce.ms:     1.221, 1.262, 1.287          median 1.262
+    columnar.reduce.faults: 0 0
+    columnar.scan.checksum: 18348572660784856466 (same in all three runs)
+
+### AB
+
+- columnar reduce 79.25M rows/s vs baseline heap.aggregate 7.26M = +992.4%
+  (10.92x; 8.01x vs the same image's 9.90M heap path — the two heap medians
+  differ by 36%, the run-to-run noise).
+- full in-place scan 127.35M rows/s vs baseline heap.stream 8.21M = +1452.0%
+  (15.52x, but the baseline stream only builds views while the columnar scan
+  reads every value byte — a one-sided comparison, kept as a ceiling).
+- load + 1 reduce: 11.480 + 1.262 = 12.742 ms vs 13.783 ms baseline aggregate =
+  0.92x (7.6% faster; the one-shot case is a wash within noise).
+- load + 2 reduces: 14.004 ms vs 27.566 ms = 1.97x.
+- load + 10 reduces: 24.100 ms vs 137.830 ms = 5.72x.
+- handoff: 0.056 ms median for the accept + SO_PEERCRED + recvmsg with the fd
+  attached — ~0.5% of the 11.48 ms load, and no /proc open in the path.  The
+  3.88 MB payload never moves; only the descriptor travels.
+- client minor faults per warm reduce 0, per first full scan 1 (THP-backed
+  memfd), store 0.51x the heap relation.
+
+The SCM path is the one exercised here: every run reports
+`columnar.handoff: scm`, and the SO_PEERCRED pid equals the libpq backend pid.
+The /proc fallback is covered by the client suite, not by this A/B (the baseline
+image cannot host the store at all).
+
+## Correctness gate
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g fpq-os-scm tests.sh'
+    -> extension pg_regress: 1/1 passed (the SQL surface now lists the
+       two-argument and three-argument fastpostgres_columnar_load, plus the ring
+       functions)
+    -> client unittest: Ran 73 tests ... OK (skipped=1, the opt-in eventfd pool)
+       including test_scm_rights_handoff_is_peercred_checked and
+       test_proc_descriptor_fallback_still_attaches

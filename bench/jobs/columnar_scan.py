@@ -138,6 +138,8 @@ def main(argv):
     # Column bytes from the views' lengths: no data page is touched yet.
     data_bytes = sum(len(c.bytes) if c.bytes is not None else len(c.data) for c in table.columns)
     print(f"columnar.load.ms: {load_ms:.3f}")
+    print(f"columnar.handoff: {table.handoff} peer={table.peer}")
+    print(f"columnar.handoff.ms: {statistics.median(t.handoff_ms for _, _, _, t in loads):.3f}")
     print(f"columnar.load.faults: {int(med(loads, 1))} {int(med(loads, 2))}")
     print(f"columnar.bytes: {data_bytes}")
     print(f"columnar.heap.x: {data_bytes / heap_bytes if heap_bytes else 0:.3f}")

@@ -10,7 +10,7 @@ import struct
 import unittest
 
 import fastpostgres as fp
-from fastpostgres import dbapi
+from fastpostgres import columnar, dbapi
 
 CONNINFO = os.environ.get("DATABASE_URL", "host=/tmp dbname=postgres user=postgres")
 TABLE = "fp_col_t"
@@ -130,3 +130,35 @@ class ColumnarLoadTest(unittest.TestCase):
     def test_non_select_is_refused(self):
         with self.assertRaises(Exception):
             self.conn.columnar_load(f"DELETE FROM {TABLE}")
+
+    def test_scm_rights_handoff_is_peercred_checked(self):
+        """The descriptor arrives over SCM_RIGHTS from this session's backend.
+
+        SO_PEERCRED is checked against PQbackendPID, so the test proves both
+        that the capability transfer happened (``handoff == "scm"`` and a local
+        handle exists) and that the sender is the backend on this control
+        channel — not merely a process that found a pid and an fd in /proc.
+        """
+        backend_pid = self.conn._conn.backend_pid()
+        table = self.conn.columnar_load(QUERY)
+
+        self.assertEqual(table.handoff, "scm")
+        self.assertIsNotNone(table._handle)
+        self.assertEqual(table.peer[0], backend_pid)
+        self.assertEqual(table._pid, backend_pid)
+        self.assertGreaterEqual(table.handoff_ms, 0.0)
+        self.assertEqual(table.scan_all()[0], 5000)
+        self.assertEqual(table.reduce({"rows": ("count_all", None)}), {"rows": 5000})
+
+    def test_proc_descriptor_fallback_still_attaches(self):
+        """The unchanged two-argument function keeps the original /proc path."""
+        result = self.conn._conn.exec(f"SELECT fastpostgres_columnar_load('{QUERY}', 0)")
+        parts = result.rows[0][0].split()
+        self.assertEqual(parts[0], "FPQCOL1")
+        pid, fd, size, rows = (int(x) for x in parts[1:])
+
+        table = columnar.ColumnarTable(pid, fd, size, rows, QUERY)
+        self.assertEqual(table.handoff, "proc")
+        self.assertIsNone(table._handle)
+        self.assertEqual(table.row_count, 5000)
+        self.assertEqual(table.scan_all()[0], 5000)

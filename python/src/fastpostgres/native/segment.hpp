@@ -25,3 +25,8 @@ void fp_handoff_unregister(int sock);
  * descriptor was sealed at load time, so it can never move under a reader.
  * Returns the FPCOLUMN payload, or nullptr with a Python exception set. */
 const uint8_t *fp_columnar_map(int pid, int fd, uint64_t size, uint64_t *payload_len);
+
+/* The SCM_RIGHTS half: a handle names a descriptor the client received on its
+ * control socket and mapped once. The backend's pid is not consulted, so the
+ * client and server need not share a UID. */
+const uint8_t *fp_columnar_map_handle(int handle, uint64_t size, uint64_t *payload_len);

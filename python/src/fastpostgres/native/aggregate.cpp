@@ -489,6 +489,24 @@ columnar_reduce(PyObject *, PyObject *args)
     return reduce_payload(payload, payload_len, plan);
 }
 
+/* columnar_reduce_handle(handle, size, plan): the same reduce over a descriptor
+ * the client received with SCM_RIGHTS (segment.cpp owns the mapping). */
+static PyObject *
+columnar_reduce_handle(PyObject *, PyObject *args)
+{
+    int                handle;
+    unsigned long long size;
+    PyObject          *plan;
+
+    if (!PyArg_ParseTuple(args, "iKO", &handle, &size, &plan)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map_handle(handle, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return reduce_payload(payload, payload_len, plan);
+}
+
 /* read_reduce(seg) -> [value, ...] in plan order: the worker's FPREDUCE frame,
  * one slot per planned op. The whole point of the frame is that it is tiny, so
  * this is a handful of Python objects per batch, not per row. */
@@ -550,6 +568,8 @@ static PyMethodDef aggregate_methods[] = {
      "read_reduce(seg) -> list of scalars from the worker's FPREDUCE frame"},
     {"columnar_reduce", columnar_reduce, METH_VARARGS,
      "columnar_reduce(pid, fd, size, [(agg_op, column_index), ...]) -> list of scalars"},
+    {"columnar_reduce_handle", columnar_reduce_handle, METH_VARARGS,
+     "columnar_reduce_handle(handle, size, [(agg_op, column_index), ...]) -> list of scalars"},
     {nullptr},
 };
 
