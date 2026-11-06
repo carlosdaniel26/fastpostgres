@@ -336,6 +336,107 @@ class DbapiTest(unittest.TestCase):
         self.assertIsInstance(rows, list)
         self.assertEqual(rows, [(1,), (2,), (3,)])
 
+    def test_block_iteration_crosses_a_frame_boundary(self):
+        """Iteration decodes a block at a time, so the frame boundary at 100k
+        must be invisible: the slice and the full walk agree with indexing."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT g::int AS id, ('x' || g)::text AS s "
+            "FROM generate_series(1, 120000) g"
+        )
+        rows = cur.fetchall()
+        self.assertEqual(rows[99998:100002], [(99999, "x99999"), (100000, "x100000"),
+                                              (100001, "x100001"), (100002, "x100002")])
+        self.assertEqual(list(rows)[99999:100002],
+                         [(100000, "x100000"), (100001, "x100001"), (100002, "x100002")])
+
+    def test_lease_holds_the_partition_until_materialised(self):
+        """Lease mode borrows the segment, so it owns a pool partition until the
+        result is materialised, closed or collected."""
+        other = self.dbapi.connect(CONNINFO, lease=True)
+        try:
+            before = len(self.dbapi.pool_stats()["leases"])
+            cur = other.cursor()
+            cur.execute("SELECT g::int AS id FROM generate_series(1, 5) g")
+            rows = cur.fetchall()
+            self.assertIsInstance(rows, self.dbapi.ResultSet)
+            self.assertEqual(len(self.dbapi.pool_stats()["leases"]), before + 1)
+
+            self.assertEqual(list(rows), [(1,), (2,), (3,), (4,), (5,)])
+            self.assertEqual(len(self.dbapi.pool_stats()["leases"]), before + 1)
+
+            self.assertEqual(rows.to_tuples(), [(1,), (2,), (3,), (4,), (5,)])
+            self.assertEqual(len(self.dbapi.pool_stats()["leases"]), before,
+                             "materialising should return the partition")
+            cur.close()
+        finally:
+            other.close()
+
+    def test_lease_evicts_a_frame_before_reusing_its_segment(self):
+        """There are two segments: a third batch must copy the first frame out
+        before the worker overwrites that segment."""
+        other = self.dbapi.connect(CONNINFO, lease=True)
+        try:
+            before = len(self.dbapi.pool_stats()["leases"])
+            cur = other.cursor()
+            cur.execute(
+                "SELECT g::int AS id, ('x' || g)::text AS s "
+                "FROM generate_series(1, 120000) g"
+            )
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 120000)
+            # frame 0 shares a segment with frame 2: its rows must have been
+            # copied before that segment was posted again
+            self.assertEqual(rows[0], (1, "x1"))
+            self.assertEqual(rows[99999], (100000, "x100000"))
+            self.assertEqual(rows[-1], (120000, "x120000"))
+            self.assertEqual(len(self.dbapi.pool_stats()["leases"]), before + 1)
+            rows.close()
+        finally:
+            other.close()
+
+    def test_lease_result_outlives_a_later_read(self):
+        """A second read cannot reuse the leased ring, so the first result stays
+        valid while another ring serves the new read."""
+        other = self.dbapi.connect(CONNINFO, lease=True)
+        try:
+            cur = other.cursor()
+            cur.execute("SELECT g::int AS id FROM generate_series(1, 3) g")
+            rows = cur.fetchall()
+            cur.execute("SELECT g::int AS id FROM generate_series(10, 12) g")
+            newer = cur.fetchall()
+            self.assertEqual(list(newer), [(10,), (11,), (12,)])
+            self.assertEqual(list(rows), [(1,), (2,), (3,)])
+            rows.close()
+            newer.close()
+        finally:
+            other.close()
+
+    def test_libpq_fallback_has_the_lazy_shape(self):
+        """A read that cannot take the ring still returns a ResultSet, not an
+        eagerly built list; force_tuples keeps the old list."""
+        plain = self.dbapi.connect(CONNINFO, shm=False)
+        try:
+            cur = plain.cursor()
+            cur.execute("SELECT g::int AS id, ('x' || g)::text AS s "
+                        "FROM generate_series(1, 5) g")
+            rows = cur.fetchall()
+            self.assertIsInstance(rows, self.dbapi.ResultSet)
+            self.assertEqual(len(rows), 5)
+            self.assertEqual(rows[0], (1, "x1"))
+            self.assertEqual(rows[-1], (5, "x5"))
+            self.assertEqual(rows[1:4], [(2, "x2"), (3, "x3"), (4, "x4")])
+            self.assertEqual(list(rows), [(1, "x1"), (2, "x2"), (3, "x3"),
+                                          (4, "x4"), (5, "x5")])
+            self.assertEqual(rows.to_tuples(), [(1, "x1"), (2, "x2"), (3, "x3"),
+                                                (4, "x4"), (5, "x5")])
+
+            forced = plain.cursor()
+            forced.execute("SELECT g::int AS id FROM generate_series(1, 3) g")
+            self.assertIsInstance(forced.fetchall(force_tuples=True), list)
+        finally:
+            plain.close()
+
     def test_literal_quoting_is_safe(self):
         cur = self.conn.cursor()
         cur.execute("SELECT %s::text AS s", ("it's; DROP TABLE x --",))

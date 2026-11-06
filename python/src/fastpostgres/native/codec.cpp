@@ -493,11 +493,13 @@ row_value(const FastpostgresColumn *c, uint64_t r)
 
 template <uint8_t K>
 inline bool
-row_column(PyObject *rows, uint64_t nrows, const FastpostgresColumn *c, uint32_t cidx, bool nullfree)
+row_column(PyObject *rows, uint64_t start, uint64_t nrows, const FastpostgresColumn *c, uint32_t cidx,
+           bool nullfree)
 {
-    for (uint64_t r = 0; r < nrows; r++)
+    for (uint64_t i = 0; i < nrows; i++)
     {
-        PyObject *row = PyList_GET_ITEM(rows, (Py_ssize_t)r);
+        uint64_t  r   = start + i;
+        PyObject *row = PyList_GET_ITEM(rows, (Py_ssize_t)i);
         PyObject *v;
 
         if (!nullfree && fastpostgres_col_isnull(c, r))
@@ -518,58 +520,78 @@ row_column(PyObject *rows, uint64_t nrows, const FastpostgresColumn *c, uint32_t
 } /* namespace */
 
 bool
-fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows, PyObject *rows)
+fp_decode_columns_range(const FastpostgresColumn *cols, uint32_t ncols, uint64_t start, uint64_t nrows,
+                        PyObject *rows)
 {
     for (uint32_t c = 0; c < ncols; c++)
     {
-        bool nullfree = !fastpostgres_nullmap_any(cols[c].nulls, (size_t)((nrows + 7) / 8));
+        /* The null map is a per-column property of the range, not of the whole
+         * frame: test the bytes the window actually reads. */
+        bool nullfree;
         bool ok;
+
+        if (nrows == 0)
+            nullfree = true;
+        else
+        {
+            size_t first = (size_t)(start >> 3);
+            size_t last  = (size_t)((start + nrows - 1) >> 3);
+
+            nullfree = cols[c].nulls == nullptr ||
+                       !fastpostgres_nullmap_any(cols[c].nulls + first, last - first + 1);
+        }
 
         switch (cols[c].kind)
         {
             case FASTPOSTGRES_KIND_BOOL:
-                ok = row_column<FASTPOSTGRES_KIND_BOOL>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_BOOL>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT16:
-                ok = row_column<FASTPOSTGRES_KIND_INT16>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_INT16>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT32:
-                ok = row_column<FASTPOSTGRES_KIND_INT32>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_INT32>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_INT64:
-                ok = row_column<FASTPOSTGRES_KIND_INT64>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_INT64>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_FLOAT4:
-                ok = row_column<FASTPOSTGRES_KIND_FLOAT4>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_FLOAT4>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_FLOAT8:
-                ok = row_column<FASTPOSTGRES_KIND_FLOAT8>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_FLOAT8>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_DATE:
-                ok = row_column<FASTPOSTGRES_KIND_DATE>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_DATE>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIME:
-                ok = row_column<FASTPOSTGRES_KIND_TIME>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_TIME>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIMESTAMP:
-                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMP>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMP>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_TIMESTAMPTZ:
-                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_TIMESTAMPTZ>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_UUID:
-                ok = row_column<FASTPOSTGRES_KIND_UUID>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_UUID>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             case FASTPOSTGRES_KIND_BYTEA:
-                ok = row_column<FASTPOSTGRES_KIND_BYTEA>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_BYTEA>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
             default:
-                ok = row_column<FASTPOSTGRES_KIND_TEXT>(rows, nrows, &cols[c], c, nullfree);
+                ok = row_column<FASTPOSTGRES_KIND_TEXT>(rows, start, nrows, &cols[c], c, nullfree);
                 break;
         }
         if (!ok) return false;
     }
     return true;
+}
+
+bool
+fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows, PyObject *rows)
+{
+    return fp_decode_columns_range(cols, ncols, 0, nrows, rows);
 }
 
 /* ---- decoding a row frame -------------------------------------------------

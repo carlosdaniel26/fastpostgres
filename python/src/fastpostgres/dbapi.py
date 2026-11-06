@@ -366,35 +366,102 @@ def _env_flag(name):
 # that really does want a plain list of tuples.
 _FORCE_TUPLES = _env_flag("FASTPOSTGRES_MATERIALIZE")
 
+# Opt-in lease mode: keep the ring checked out for the result's lifetime and
+# decode directly out of the segment instead of copying each column. Only the
+# last two batches can stay borrowed (there are two data segments); older ones
+# are copied when their segment is reused. A lease therefore holds a pool
+# partition until the result is consumed, materialised, closed or collected.
+_LEASE = _env_flag("FASTPOSTGRES_LEASE")
+_LEASE_SIZE_ENV = os.environ.get("FASTPOSTGRES_LEASE_BATCH")
+_LEASE_BATCH = int(_LEASE_SIZE_ENV) if _LEASE_SIZE_ENV else _SHM_BATCH
+
+
+def _own_columns(columns, nrows):
+    """Copy a columnar batch out of the segment into buffers the result owns."""
+    owned = []
+    for column in columns:
+        data = bytes(column.data)
+        payload = None
+        if column.bytes is not None:
+            payload = memoryview(data)[len(data) - len(column.bytes):]
+        nulls = bytes(column.nulls) if column.nulls is not None else None
+        owned.append(
+            _client.column(
+                column.name, column.kind, column.pgtype, nrows, data, payload, nulls
+            )
+        )
+    return owned
+
+
+def _borrow_columns(columns, nrows):
+    """Keep a columnar batch as views over the live segment, with no copy."""
+    return [
+        _client.column(
+            column.name, column.kind, column.pgtype, nrows,
+            column.data, column.bytes, column.nulls,
+        )
+        for column in columns
+    ]
+
+
+# Rows one C call decodes when a lazy result is iterated. Small enough that an
+# early-stopping consumer does not build a whole batch, large enough that the
+# kind switch and the null-map test amortise across rows rather than values.
+_ITER_BLOCK = 1024
+# Materialising has no early stop, so it can use a larger window and keep more
+# of a column's bytes in L1 across the row loop.
+_MATERIALIZE_BLOCK = 4096
+
 
 class ResultSet:
-    """The rows of a read, held columnar and decoded one row at a time.
+    """The rows of a read, held columnar and decoded block by block.
 
     ``execute()`` on a read-only SELECT copies each columnar batch out of
     /dev/shm (one memcpy per column, no Python object per value) and hands back
     this sequence instead of a list of tuples. ``len()``, indexing, slicing,
     iteration, ``keys()`` and ``fetchone()``/``fetchmany()`` all work as they do
-    on the old list; a tuple is built only for the row that was asked for.
+    on the old list; a block of tuples is decoded only when a row in it is
+    asked for, and indexing decodes just the one row.
 
     The copy is what makes the lifetime unbounded: the ring goes straight back
     to the pool, and later reads cannot overwrite the rows this result holds.
     ``to_tuples()`` materialises the whole result in C, through the same
     specialized decode the eager path uses; ``FASTPOSTGRES_MATERIALIZE=1`` (or
     ``force_tuples=True`` on a connection) does it at ``fetchall()`` time.
+
+    A libpq result uses the same class with a native PGresult-backed source:
+    it has this shape and laziness, but libpq itself already has the text in
+    memory, so the source decodes a row on demand instead of a column batch.
     """
 
-    __slots__ = ("_frames", "_keys", "_types", "_starts", "_total", "_materialized")
+    __slots__ = (
+        "_frames",
+        "_keys",
+        "_types",
+        "_starts",
+        "_total",
+        "_materialized",
+        "_source",
+        "_lease",
+        "_lease_owner",
+    )
 
-    def __init__(self, frames, keys, field_types, total):
+    def __init__(self, frames, keys, field_types, total, source=None, lease=None, owner=None):
         self._frames = frames  # [(nrows, [Column, ...])], in result order
         self._keys = tuple(keys)
         self._types = tuple(field_types)
-        starts = [0]
-        for nrows, _columns in frames:
-            starts.append(starts[-1] + nrows)
-        self._starts = starts
+        if frames is None:
+            self._starts = None
+        else:
+            starts = [0]
+            for nrows, _columns in frames:
+                starts.append(starts[-1] + nrows)
+            self._starts = starts
         self._total = total
         self._materialized = None
+        self._source = source
+        self._lease = lease  # (ring, seg, pid): held until close()/to_tuples()
+        self._lease_owner = owner
 
     # ---- sequence protocol ------------------------------------------------
 
@@ -402,16 +469,43 @@ class ResultSet:
         return self._total
 
     def _row_at(self, index):
+        if self._source is not None:
+            return self._source.decode_row(index)
         frame = bisect_right(self._starts, index) - 1
         nrows, columns = self._frames[frame]
         row = index - self._starts[frame]
         return _client.decode_row(columns, row)
 
+    def _rows_range(self, start, count):
+        """Decode `count` rows from `start`, honouring frame boundaries."""
+        if count <= 0:
+            return []
+        if self._source is not None:
+            decode = getattr(self._source, "decode_rows", None)
+            if decode is not None:
+                return decode(start, count)
+            return [self._source.decode_row(start + i) for i in range(count)]
+
+        rows = []
+        offset = start
+        frame = bisect_right(self._starts, start) - 1
+        while len(rows) < count:
+            nrows, columns = self._frames[frame]
+            at = offset - self._starts[frame]
+            take = min(count - len(rows), nrows - at)
+            rows.extend(_client.decode_rows(columns, at, take))
+            offset += take
+            frame += 1
+        return rows
+
     def __getitem__(self, key):
         if isinstance(key, slice):
             if self._materialized is not None:
                 return self._materialized[key]
-            return [self._row_at(i) for i in range(*key.indices(self._total))]
+            start, stop, step = key.indices(self._total)
+            if step == 1:
+                return self._rows_range(start, stop - start)
+            return [self._row_at(i) for i in range(start, stop, step)]
         try:
             index = key.__index__()
         except AttributeError:
@@ -430,10 +524,28 @@ class ResultSet:
         return self._iter_rows()
 
     def _iter_rows(self):
+        if self._source is not None:
+            decode = getattr(self._source, "decode_rows", None)
+            start = 0
+            while start < self._total:
+                n = min(_ITER_BLOCK, self._total - start)
+                if decode is not None:
+                    block = decode(start, n)
+                else:
+                    block = [self._source.decode_row(start + i) for i in range(n)]
+                for row in block:
+                    yield row
+                start += n
+            return
+
         for nrows, columns in self._frames:
-            decode = _client.decode_row
-            for row in range(nrows):
-                yield decode(columns, row)
+            start = 0
+            while start < nrows:
+                n = min(_ITER_BLOCK, nrows - start)
+                block = _client.decode_rows(columns, start, n)
+                for row in block:
+                    yield row
+                start += n
 
     def __eq__(self, other):
         if isinstance(other, ResultSet):
@@ -462,11 +574,23 @@ class ResultSet:
     def to_tuples(self):
         """Materialise every row now, in C, and return the list of tuples."""
         if self._materialized is None:
-            rows = []
-            for nrows, columns in self._frames:
-                if nrows:
-                    rows.extend(_client.decode_frame(columns, nrows))
-            self._materialized = rows
+            if self._source is not None:
+                self._materialized = self._source.to_tuples()
+            else:
+                rows = []
+                for nrows, columns in self._frames:
+                    start = 0
+                    while start < nrows:
+                        n = min(_MATERIALIZE_BLOCK, nrows - start)
+                        rows.extend(_client.decode_rows(columns, start, n))
+                        start += n
+                self._materialized = rows
+            # The tuples own their values now, so a lease taken to avoid the
+            # copy has done its job: return the partition instead of holding it
+            # until this result is garbage-collected.
+            self._release_lease()
+            self._frames = []
+            self._starts = None
         return self._materialized
 
     materialize = to_tuples
@@ -474,6 +598,30 @@ class ResultSet:
     def fetchall(self):
         """DB-API convenience: the whole result as tuples."""
         return self.to_tuples()
+
+    def _release_lease(self):
+        if self._lease is not None:
+            info, self._lease = self._lease, None
+            _ring_release(info, self._lease_owner)
+
+    def close(self):
+        """Release a ring lease this result is holding, if any.
+
+        A result copied out of the segment owns its rows and needs nothing; a
+        leased result borrows them, so closing it invalidates further row
+        access. ``to_tuples()`` closes the lease for you once the values are
+        copied into Python objects.
+        """
+        try:
+            self._release_lease()
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ---- ring pool ------------------------------------------------------------
@@ -793,16 +941,20 @@ def _warn_no_workers():
     )
 
 
-def _ring_release(info):
+def _ring_release(info, owner=None):
     """Hand a checked-out partition back, unless it is not this process's.
 
     A forked child inherits its parent's rings: driving one would race the
     parent, and returning it to the child's idle queue would hand a stranger's
     ring to its own next reader. Drop it; the parent keeps using its own.
+
+    ``owner`` is the thread that took the lease when the release happens
+    somewhere else — a leased result can be materialised or dropped on another
+    thread, and the bookkeeping must drop that thread's entry, not this one's.
     """
     ring, _seg, pid = info
     with _pool_lock:
-        _pool_leases.pop(threading.get_ident(), None)
+        _pool_leases.pop(threading.get_ident() if owner is None else owner, None)
     if pid != os.getpid():
         return
     _pool_idle.put_nowait(info)
@@ -823,7 +975,7 @@ class Connection:
     """
 
     def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = False,
-                 force_tuples=None, **kwargs):
+                 force_tuples=None, lease=None, **kwargs):
         if not conninfo and kwargs:
             conninfo = " ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
         try:
@@ -834,6 +986,7 @@ class Connection:
         self._shm = shm
         self._wait = wait
         self._force_tuples = _FORCE_TUPLES if force_tuples is None else bool(force_tuples)
+        self._lease = _LEASE if lease is None else bool(lease)
         self._streams = set()  # live stream generators, so close() can end them
         self.shm_reads = 0
 
@@ -891,7 +1044,7 @@ class Connection:
         self.shm_reads += 1
         return _Result(fields or [], field_types or [], rows, len(rows))
 
-    def _shm_read_lazy(self, sql, size=_SHM_BATCH):
+    def _shm_read_lazy(self, sql, size=_SHM_BATCH, lease=None):
         """The same read, but the result is a columnar ResultSet.
 
         Two data segments alternate exactly as they do for the eager read: the
@@ -900,9 +1053,22 @@ class Connection:
         column's region, not a tuple: the ring then goes straight back to the
         pool and the result owns its bytes. A row is decoded when it is asked
         for, so a consumer that only counts or narrows pays no per-value work.
+
+        With ``lease`` (``FASTPOSTGRES_LEASE=1``, ``Connection(lease=True)``)
+        the batch is not copied: the result keeps views into the two data
+        segments and holds the ring checked out until it is materialised,
+        closed or collected. Only the last two batches can stay borrowed; when
+        a segment is reused its older frame is copied first. ``size`` is raised
+        to ``FASTPOSTGRES_LEASE_BATCH`` (default one normal batch) so a result
+        that fits one batch — the case the lease is for — stays entirely
+        borrowed.
         """
         if not self._shm:
             return None
+        if lease is None:
+            lease = self._lease
+        if lease and _LEASE_BATCH > size:
+            size = _LEASE_BATCH
         info = _ring_acquire(self._conn, block=self._wait)
         if info is None:
             if pool_size() > 0:  # size 0 is the explicit "no ring" configuration
@@ -911,9 +1077,11 @@ class Connection:
         ring, seg, _pid = info
 
         frames = []
+        borrowed = {}  # segment slot -> frame index, for lease mode
         keys = types = None
         total = 0
         pending = False
+        keep_lease = False
         try:
             segs = (seg + "_a", seg + "_b")
             ring.open(seg, sql)
@@ -926,31 +1094,31 @@ class Connection:
                 while True:
                     more = n != 0
                     if more:
-                        ring.post(segs[(i + 1) & 1], size)
+                        slot = (i + 1) & 1
+                        if slot in borrowed:
+                            # The worker is about to overwrite this segment:
+                            # give the frame that still borrows it its own copy
+                            # first. Frames in the other, newer segment are
+                            # untouched.
+                            at = borrowed.pop(slot)
+                            nrows, columns = frames[at]
+                            frames[at] = (nrows, _own_columns(columns, nrows))
+                        ring.post(segs[slot], size)
                         pending = True
                     batch = _client.read(segs[i & 1])
                     if keys is None:
                         keys = [column.name for column in batch.columns]
                         types = [column.pgtype for column in batch.columns]
                     if n:
-                        columns = []
-                        for column in batch.columns:
+                        if lease:
+                            frames.append((n, _borrow_columns(batch.columns, n)))
+                            borrowed[i & 1] = len(frames) - 1
+                        else:
                             # One copy of the whole column region. The varlena
                             # kinds keep offsets and bytes together in `data`,
                             # so `bytes` is a slice of the copy, not a second
                             # one.
-                            data = bytes(column.data)
-                            payload = None
-                            if column.bytes is not None:
-                                payload = memoryview(data)[len(data) - len(column.bytes):]
-                            nulls = bytes(column.nulls) if column.nulls is not None else None
-                            columns.append(
-                                _client.column(
-                                    column.name, column.kind, column.pgtype, n,
-                                    data, payload, nulls,
-                                )
-                            )
-                        frames.append((n, columns))
+                            frames.append((n, _own_columns(batch.columns, n)))
                         total += n
                     if not more:
                         break
@@ -964,14 +1132,20 @@ class Connection:
                     except Exception:
                         pass
                 ring.close()
+            keep_lease = bool(lease and borrowed)
         except Exception as exc:
             _note_fallback(type(exc).__name__, detail=f"{type(exc).__name__}: {exc}")
             return None  # re-run on libpq so the caller sees the real error
         finally:
-            _ring_release(info)
+            if not keep_lease:
+                _ring_release(info)
 
         self.shm_reads += 1
-        return ResultSet(frames, keys or [], types or [], total)
+        owner = threading.get_ident() if keep_lease else None
+        return ResultSet(
+            frames, keys or [], types or [], total,
+            lease=info if keep_lease else None, owner=owner,
+        )
 
     def cursor(self):
         return Cursor(self)
@@ -1092,6 +1266,31 @@ class Cursor:
                     self.rowcount = len(rows)
                     self._pos = 0
                     return self
+
+        # The libpq fallback keeps the lazy result's shape: a read-only SELECT
+        # over libpq is a PGresult-backed ResultSet, so a consumer that counts
+        # or stops early does not pay for tuples it never reads. Forced tuples
+        # and non-read statements keep the eager result (and its list).
+        if (
+            not self.connection._force_tuples
+            and _is_read_only(sql)
+            and hasattr(self.connection._conn, "exec_lazy")
+        ):
+            try:
+                result = self.connection._conn.exec_lazy(sql)
+            except Exception as exc:
+                raise _translate(exc) from exc
+            rows = ResultSet(
+                None, result.fields, result.field_types, len(result), source=result
+            )
+            self.description = [
+                (name, oid, None, None, None, None, None)
+                for name, oid in zip(rows._keys, rows._types)
+            ]
+            self._rows = rows
+            self.rowcount = len(rows)
+            self._pos = 0
+            return self
 
         try:
             result = self.connection._conn.exec(sql)
@@ -1355,7 +1554,9 @@ class Cursor:
             yield row
 
     def close(self):
-        self._rows = []
+        rows, self._rows = self._rows, []
+        if isinstance(rows, ResultSet):
+            rows.close()  # a leased result returns its partition now
         self._pos = 0
         self.description = None
 

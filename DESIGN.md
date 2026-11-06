@@ -332,3 +332,99 @@ deliberately not in this change: it is the scratch this item exists to remove.
   them; a copying transport would.
 - **Partial batches still compact**; a frame could instead carry a separate
   row capacity, at the cost of a more complex reader.
+
+# Read-path follow-ups (`ws/arch-readpath`)
+
+Base `merge/transport`. Three changes on the lazy `ResultSet`; the wire format
+is unchanged. Full record, commands and raw output are in
+`bench/results/ws-arch-readpath-ab.log`.
+
+## 1. Block-wise decode
+
+The lazy result copied each columnar batch out of the segment, then built one
+tuple per `decode_row()` call. The body was already specialized per column, but
+the call rebuilt the six `FastpostgresColumn` views and re-ran the kind switch
+for every row, so iteration paid a per-row setup cost that materialisation did
+not.
+
+`_client.decode_rows(columns, start, count)` decodes a contiguous window with
+one specialized pass per column in C; `fp_decode_columns_range` makes the null
+map and data offsets relative to the window. `ResultSet` uses it for iteration
+(1024 rows per call), unit-step slices and `to_tuples()` (4096 rows per call).
+Indexing and `fetchone()` still call `decode_row`, so a consumer that asks for
+one row still decodes only that row. An early-stopping iterator pays one block
+(1024 rows), not the whole frame.
+
+Measured on the benchmark shape (same command, baseline vs change):
+
+| cell | 100K | 1M |
+|---|---:|---:|
+| per-row iteration, baseline | 3.53M | 3.76M |
+| per-row iteration, change | **4.29M** | **4.83M** |
+| `fetchall()` (lazy default), baseline | 3.55M | 4.00M |
+| `fetchall()` (lazy default), change | **7.64M** | **8.63M** |
+
+The remaining honest regression is `fetchall()` followed by `to_tuples()`:
+3.60M -> 3.06M at 100K and 3.81M -> 3.30M at 1M. The baseline built tuples
+straight from the row frame; the lazy path already paid the column copy and then
+decodes it. That is the price of the result owning its bytes, not a decode
+regression. `force_tuples=True` / `FASTPOSTGRES_MATERIALIZE=1` stay on the old
+row-frame path and keep their old speed, which is the right switch for a caller
+that knows it wants tuples.
+
+## 2. Lease instead of copy (opt-in)
+
+`FASTPOSTGRES_LEASE=1` (or `Connection(lease=True)`, `aio.connect(lease=True)`)
+keeps the ring checked out for the result's lifetime and stores each batch as
+views over the two data segments instead of copying each column. There are two
+segments, so only the newest two batches stay borrowed; before a segment is
+posted again, the frame that still borrows it is copied into owned buffers. A
+result that fits one (large) batch is therefore entirely copy-free. The request
+size is raised to `FASTPOSTGRES_LEASE_BATCH` (default: one normal 100k batch) so
+a caller can choose how much the worker should fetch at once.
+
+The lease is released when the result is materialised, explicitly closed, or
+collected. `to_tuples()` releases it as soon as the values are Python objects,
+so a consumer that knows it wants rows does not pin a partition afterwards.
+
+The cost is pool occupancy: a live leased result owns one ring, so a process
+whose pool has N partitions can hold at most N-1 other reads without falling
+back while it exists. This is why it is opt-in. It wins for a single consumer,
+short-lived results, large text/bytea columns (the copy is a larger fraction),
+and a pool with spare partitions; it loses for many concurrently live results,
+for results that span many batches (the eviction copies remove the advantage
+and cost the pipelining overlap), or when a caller materialises immediately and
+would have been better served by the forced row-frame path. With
+`FASTPOSTGRES_LEASE_BATCH=1000000`, the 1M read moved `fetchall()` 8.63M ->
+9.83M and iteration 4.83M -> 5.19M; at 100K, 7.64M -> 8.60M and 4.29M ->
+4.81M.
+
+## 3. libpq fallback parity
+
+A read that cannot get a ring (extension absent, pool exhausted, or a failed
+columnar read re-run) used to return the old list of tuples while the
+shared-memory path returned `ResultSet`. `Connection.exec_lazy()` now returns a
+native `LazyResult` that holds the `PGresult`; `ResultSet` accepts it as a row
+source and decodes a row (or a block of rows) on demand. `force_tuples` and
+non-read statements keep the eager `exec()` result and its list.
+
+The shape is the same, the lifetime is not: the `PGresult` must stay alive
+until the result is materialised or collected, and libpq has already put the
+whole text result in memory. There is no columnar frame to copy and nothing to
+decode block-wise per column, so the fallback decodes row by row (one C call per
+row) rather than pretending to have the shared-memory representation. That is
+the exact reason it is parity of shape and laziness, not of storage or speed.
+
+## What remains here
+
+- **`to_tuples()` after a lazy read** still pays the copy; a caller that wants
+  tuples should use `force_tuples=True` or lease mode, and the two paths are
+  measured separately now rather than conflated.
+- **Lease eviction is serial.** Above two batches, the frame copy happens before
+  the next post, so the worker is idle for that copy; a third segment or a
+  decode-in-place consumer would overlap it.
+- **Lease + a small pool** can fall back or wait while a result is alive; it is a
+  per-connection policy, not a replacement for the default copy.
+- **The libpq lazy result holds a whole `PGresult`.** A streaming cursor over
+  libpq would need `PQsendQuery`/`PQgetResult` plumbing, which is a different
+  path; this change only removes the eager Python tuple build.

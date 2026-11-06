@@ -301,11 +301,12 @@ class AsyncConnection:
     """
 
     def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = True,
-                 force_tuples=None, **kwargs):
+                 force_tuples=None, lease=None, **kwargs):
         self._conninfo = conninfo
         self._shm = shm
         self._wait = wait
         self._force_tuples = force_tuples
+        self._lease = lease
         self._kwargs = kwargs
         self._tier = _Tier(os.getpid())
         self._conn = None
@@ -326,7 +327,8 @@ class AsyncConnection:
                 raise InterfaceError("fastpostgres.aio: connection is closed")
             self._conn = await self._submit(
                 lambda: dbapi.Connection(self._conninfo, shm=self._shm, wait=self._wait,
-                                         force_tuples=self._force_tuples, **self._kwargs)
+                                         force_tuples=self._force_tuples,
+                                         lease=self._lease, **self._kwargs)
             )
         return self._conn
 

@@ -867,6 +867,89 @@ decode_frame(PyObject *, PyObject *args)
     return rows;
 }
 
+/* decode_rows(columns, start, count) -> list of tuples
+ *
+ * A contiguous window of a copied columnar batch, decoded in C. The lazy
+ * result's iteration and unit-step slices use this: the kind switch runs once
+ * per column per window instead of once per value, while a consumer that stops
+ * early still pays for only the window it asked for. */
+static PyObject *
+decode_rows(PyObject *, PyObject *args)
+{
+    PyObject  *columns;
+    Py_ssize_t start, count;
+
+    if (!PyArg_ParseTuple(args, "Onn", &columns, &start, &count)) return nullptr;
+    if (!PyList_Check(columns))
+    {
+        PyErr_SetString(PyExc_TypeError, "decode_rows(): columns must be a list");
+        return nullptr;
+    }
+    if (start < 0 || count < 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "decode_rows(): negative start or count");
+        return nullptr;
+    }
+
+    Py_ssize_t                      ncols = PyList_GET_SIZE(columns);
+    std::vector<FastpostgresColumn> cols((size_t)ncols);
+
+    for (Py_ssize_t c = 0; c < ncols; c++)
+    {
+        PyObject *item = PyList_GET_ITEM(columns, c);
+        if (!PyObject_TypeCheck(item, &ColumnType))
+        {
+            PyErr_SetString(PyExc_TypeError, "decode_rows(): expected Column objects");
+            return nullptr;
+        }
+        ColumnObject *column = (ColumnObject *)item;
+        FastpostgresColumn &fc = cols[(size_t)c];
+
+        if (start + count > column->nrows)
+        {
+            PyErr_SetString(PyExc_IndexError, "row range out of range for this chunk");
+            return nullptr;
+        }
+        memset(&fc, 0, sizeof(fc));
+        fc.kind   = (uint8_t)column->kind;
+        fc.pgtype = (uint32_t)column->pgtype;
+        fc.nulls  = fp_col_bytes(column->nulls);
+        fc.data   = fp_col_bytes(column->data);
+        fc.bytes  = fp_col_bytes(column->bytes);
+        fc.nrows  = (uint64_t)column->nrows;
+
+        if (count > 0 && fc.nulls == nullptr)
+        {
+            PyErr_SetString(PyExc_ValueError, "decode_rows(): column has no null bitmap");
+            return nullptr;
+        }
+        if (count > 0 && fc.data == nullptr)
+        {
+            PyErr_SetString(PyExc_ValueError, "decode_rows(): column has no data");
+            return nullptr;
+        }
+    }
+
+    PyObject *rows = PyList_New(count);
+    if (rows == nullptr) return nullptr;
+    for (Py_ssize_t r = 0; r < count; r++)
+    {
+        PyObject *tuple = PyTuple_New(ncols);
+        if (tuple == nullptr)
+        {
+            Py_DECREF(rows);
+            return nullptr;
+        }
+        PyList_SET_ITEM(rows, r, tuple);
+    }
+    if (!fp_decode_columns_range(cols.data(), (uint32_t)ncols, (uint64_t)start, (uint64_t)count, rows))
+    {
+        Py_DECREF(rows);
+        return nullptr;
+    }
+    return rows;
+}
+
 /* decode_row(columns, row) -> tuple
  *
  * One row, decoded in one call: the lazy result's __getitem__ and iteration use
@@ -933,6 +1016,8 @@ static PyMethodDef segment_methods[] = {
      "column(name, kind, pgtype, nrows, data, bytes, nulls) -> Column over caller-owned buffers"},
     {"decode_frame", decode_frame, METH_VARARGS,
      "decode_frame(columns, nrows) -> list of tuples from copied column buffers"},
+    {"decode_rows", decode_rows, METH_VARARGS,
+     "decode_rows(columns, start, count) -> list of tuples for a row window"},
     {"decode_row", decode_row, METH_VARARGS, "decode_row(columns, row) -> one tuple"},
     {"columnar_attach", columnar_attach, METH_VARARGS,
      "columnar_attach(pid, fd, size) -> Segment (read-only memfd, zero-copy column views)"},

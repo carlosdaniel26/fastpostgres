@@ -22,6 +22,13 @@ PyObject *fp_decode_column(const FastpostgresColumn *col, uint64_t row);
  * exception set. */
 bool fp_decode_columns(const FastpostgresColumn *cols, uint32_t ncols, uint64_t nrows, PyObject *rows);
 
+/* The same fill for a window of rows: `rows[i]` receives column row
+ * `start + i`. This is the block-wise decode behind lazy iteration, so the
+ * kind switch and the null-map test still run once per column per block while
+ * a consumer can stop after any block. */
+bool fp_decode_columns_range(const FastpostgresColumn *cols, uint32_t ncols, uint64_t start,
+                             uint64_t nrows, PyObject *rows);
+
 /* Fill `rows` (a list of nrows slots, one per tuple in the row frame) by walking
  * each tuple in place: the server hands over PostgreSQL's own row layout, so
  * every value is decoded where it lies. Returns false with an exception set. */
