@@ -488,6 +488,27 @@ Ring_post_rows(RingObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* Send a NEXT for `seg` without waiting, answered with the columnar frame.
+ * The same pipelining post_rows() gives the row frame: the worker fills `seg`
+ * while the caller copies the previous batch out of the other segment. */
+static PyObject *
+Ring_post(RingObject *self, PyObject *args)
+{
+    const char *seg;
+    long long   batch = 100000;
+
+    if (!PyArg_ParseTuple(args, "s|L", &seg, &batch)) return nullptr;
+    if (batch <= 0) batch = 100000;
+    if (self->data[0] == 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "ring: open a stream first");
+        return nullptr;
+    }
+    if (ring_own(self, "posting the next batch") < 0) return nullptr;
+    if (ring_send(self, FASTPOSTGRES_OP_NEXT, self->data, seg, (uint32_t)batch) < 0) return nullptr;
+    Py_RETURN_NONE;
+}
+
 /* Collect the response to the request last sent. */
 static PyObject *
 Ring_wait(RingObject *self, PyObject *)
@@ -556,6 +577,8 @@ static PyMethodDef Ring_methods[] = {
      "next_rows(batch=100000) -> int rows (the row frame; falls back to columnar)"},
     {"post_rows", (PyCFunction)Ring_post_rows, METH_VARARGS,
      "post_rows(seg, batch=100000): ask for a batch into seg, do not wait"},
+    {"post", (PyCFunction)Ring_post, METH_VARARGS,
+     "post(seg, batch=100000): ask for a columnar batch into seg, do not wait"},
     {"wait", (PyCFunction)Ring_wait, METH_NOARGS, "wait() -> int rows for the request last sent"},
     {"close", (PyCFunction)Ring_close, METH_NOARGS, "close(): end the stream"},
     {"stop", (PyCFunction)Ring_stop, METH_NOARGS, "stop(): ask the worker to exit"},

@@ -248,6 +248,58 @@ class DbapiTest(unittest.TestCase):
         cur.execute("SELECT g::int FROM generate_series(1, 2) g")
         self.assertEqual(list(cur), [(1,), (2,)])
 
+    def test_fetchall_is_lazy_until_a_row_is_asked_for(self):
+        """The default read keeps the columnar frame: len/keys/index/iteration
+        work, but a tuple is built only for the row that was asked for."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT g::int AS id, ('x' || g)::text AS s FROM generate_series(1, 5) g")
+        rows = cur.fetchall()
+
+        self.assertIsInstance(rows, self.dbapi.ResultSet)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows.keys(), ["id", "s"])
+        self.assertEqual(rows[0], (1, "x1"))
+        self.assertEqual(rows[-1], (5, "x5"))
+        self.assertEqual(rows[1:3], [(2, "x2"), (3, "x3")])
+        self.assertEqual(list(rows), [(1, "x1"), (2, "x2"), (3, "x3"), (4, "x4"), (5, "x5")])
+        self.assertEqual(rows, [(1, "x1"), (2, "x2"), (3, "x3"), (4, "x4"), (5, "x5")])
+        self.assertEqual(rows.to_tuples(), [(1, "x1"), (2, "x2"), (3, "x3"), (4, "x4"), (5, "x5")])
+        with self.assertRaises(IndexError):
+            rows[5]
+
+    def test_lazy_result_outlives_the_ring(self):
+        """The batch is copied out of /dev/shm before the ring goes back, so a
+        later read on the same ring cannot rewrite the rows a result holds."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT g::int AS id FROM generate_series(1, 3) g")
+        rows = cur.fetchall()
+
+        cur.execute("SELECT g::int AS id FROM generate_series(1, 150000) g")
+        self.assertEqual(len(cur.fetchall()), 150000)
+
+        self.assertEqual(rows[0], (1,))
+        self.assertEqual(rows[2], (3,))
+        self.assertEqual(list(rows), [(1,), (2,), (3,)])
+
+    def test_force_tuples_restores_the_eager_read(self):
+        """The old behaviour is one flag away: a plain list of tuples, built
+        while the batch is decoded."""
+        other = self.dbapi.connect(CONNINFO, force_tuples=True)
+        try:
+            cur = other.cursor()
+            cur.execute("SELECT g::int AS id FROM generate_series(1, 3) g")
+            rows = cur.fetchall()
+            self.assertIsInstance(rows, list)
+            self.assertEqual(rows, [(1,), (2,), (3,)])
+        finally:
+            other.close()
+
+        rows = self.conn.fetchall(
+            "SELECT g::int AS id FROM generate_series(1, 3) g", force_tuples=True
+        )
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows, [(1,), (2,), (3,)])
+
     def test_literal_quoting_is_safe(self):
         cur = self.conn.cursor()
         cur.execute("SELECT %s::text AS s", ("it's; DROP TABLE x --",))

@@ -53,22 +53,26 @@ Writes, DDL and transactions keep using libpq, so a FastPostgres application is 
 
 The extension's SQL surface is deliberately tiny: `fastpostgres_ring_start(text)` and `fastpostgres_ring_stop(text)`. Everything else runs inside the worker, off the ring.
 
-## The two read paths
+## The read paths
 
-A read takes one of two roads, and the choice is which cost dominates:
+A read takes one of two roads, and the choice is what the consumer does with the
+result:
 
-- **Tuples** — `fetchall()`, the DBAPI default. The worker writes the row frame
-  (`FPROWS`, the executor's own tuple bytes) and the client walks it in place,
-  building a Python object per value: no setup cost, a per-row cost.
-- **Zero-copy** — `stream()`. The worker writes the columnar frame (`FPCOLUMN`)
-  and the client returns `memoryview`s over the segment: a fixed cost to open
-  the stream and map it, then nothing per row.
+- **Lazy rows** — `fetchall()`, the DBAPI default. The worker writes the
+  columnar frame (`FPCOLUMN`), the client copies each column out of the segment
+  (one `memcpy` per column, not per value), and a tuple is built only for a row
+  that is indexed or iterated. `len()`, `keys()`, `fetchone()` and `fetchmany()`
+  work as they do on a list; `force_tuples=True` or
+  `FASTPOSTGRES_MATERIALIZE=1` restores the eager list of tuples.
+- **Zero-copy** — `stream()`. The client hands back `memoryview`s over the
+  segment itself: a fixed cost to open the stream and map it, then nothing per
+  row, and the `memoryview`s are valid until that stream's next pull.
 
 The fixed cost is what makes the small end flip: at 1K rows `stream()` already
 wins, while the `core` interface and process fan-out — the same work with extra
-machinery — lose to a plain `fetchall`, because their fixed costs dominate a
-result that small. Pick `stream()` to reduce columns in place, `fetchall()` for
-plain rows.
+machinery — lose to a plain read, because their fixed costs dominate a result
+that small. Pick `stream()` to reduce columns in place, `fetchall()` for rows
+on demand, and `fetchall(force_tuples=True)` when a plain list is required.
 
 ## Measured results
 

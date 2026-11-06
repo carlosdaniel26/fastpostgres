@@ -13,10 +13,15 @@ shared-memory ring executes text and has no bind step (a small scanner leaves
     cur.fetchone()            # (5,)
 
 For a read that only wants rows, `Connection.fetchall(statement)` compiles a
-SQLAlchemy statement with SQLAlchemy's own compiler and returns the driver's
-tuples — the CORE read without CORE's per-row Result/Row machinery:
+SQLAlchemy statement with SQLAlchemy's own compiler and returns the result:
+a `ResultSet` holding the columnar frame, decoded one row at a time. `len()`,
+indexing, iteration and `keys()` work as they do on a list; a tuple is built
+only for the row that is asked for. `force_tuples=True` — or the
+`FASTPOSTGRES_MATERIALIZE=1` environment switch — restores the old list of
+tuples:
 
-    conn.fetchall(select(Row.id, Row.sku))    # [(1, 'SKU-1'), (2, 'SKU-2')]
+    conn.fetchall(select(Row.id, Row.sku))    # ResultSet, lazy per row
+    conn.fetchall(select(Row.id, Row.sku), force_tuples=True)  # [(1, 'SKU-1'), ...]
 """
 import datetime
 import decimal
@@ -27,6 +32,7 @@ import re
 import threading
 import time
 import warnings
+from bisect import bisect_right
 from typing import Any, Optional, Sequence
 
 from . import _client
@@ -42,6 +48,7 @@ __all__ = [
     "connect",
     "Connection",
     "Cursor",
+    "ResultSet",
     "Date",
     "Time",
     "Timestamp",
@@ -311,6 +318,126 @@ class _Result:
         self.field_types = field_types
         self.rows = rows
         self.row_count = row_count
+
+
+def _env_flag(name):
+    """A boolean environment switch: unset, 0, false, no and off mean off."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+# The DB-API default is the lazy result below. This restores the old behaviour —
+# a tuple per row built while the ring is still checked out — for a consumer
+# that really does want a plain list of tuples.
+_FORCE_TUPLES = _env_flag("FASTPOSTGRES_MATERIALIZE")
+
+
+class ResultSet:
+    """The rows of a read, held columnar and decoded one row at a time.
+
+    ``execute()`` on a read-only SELECT copies each columnar batch out of
+    /dev/shm (one memcpy per column, no Python object per value) and hands back
+    this sequence instead of a list of tuples. ``len()``, indexing, slicing,
+    iteration, ``keys()`` and ``fetchone()``/``fetchmany()`` all work as they do
+    on the old list; a tuple is built only for the row that was asked for.
+
+    The copy is what makes the lifetime unbounded: the ring goes straight back
+    to the pool, and later reads cannot overwrite the rows this result holds.
+    ``to_tuples()`` materialises the whole result in C, through the same
+    specialized decode the eager path uses; ``FASTPOSTGRES_MATERIALIZE=1`` (or
+    ``force_tuples=True`` on a connection) does it at ``fetchall()`` time.
+    """
+
+    __slots__ = ("_frames", "_keys", "_types", "_starts", "_total", "_materialized")
+
+    def __init__(self, frames, keys, field_types, total):
+        self._frames = frames  # [(nrows, [Column, ...])], in result order
+        self._keys = tuple(keys)
+        self._types = tuple(field_types)
+        starts = [0]
+        for nrows, _columns in frames:
+            starts.append(starts[-1] + nrows)
+        self._starts = starts
+        self._total = total
+        self._materialized = None
+
+    # ---- sequence protocol ------------------------------------------------
+
+    def __len__(self):
+        return self._total
+
+    def _row_at(self, index):
+        frame = bisect_right(self._starts, index) - 1
+        nrows, columns = self._frames[frame]
+        row = index - self._starts[frame]
+        return _client.decode_row(columns, row)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            if self._materialized is not None:
+                return self._materialized[key]
+            return [self._row_at(i) for i in range(*key.indices(self._total))]
+        try:
+            index = key.__index__()
+        except AttributeError:
+            raise TypeError("result indices must be integers or slices") from None
+        if index < 0:
+            index += self._total
+        if index < 0 or index >= self._total:
+            raise IndexError("result row index out of range")
+        if self._materialized is not None:
+            return self._materialized[index]
+        return self._row_at(index)
+
+    def __iter__(self):
+        if self._materialized is not None:
+            return iter(self._materialized)
+        return self._iter_rows()
+
+    def _iter_rows(self):
+        for nrows, columns in self._frames:
+            decode = _client.decode_row
+            for row in range(nrows):
+                yield decode(columns, row)
+
+    def __eq__(self, other):
+        if isinstance(other, ResultSet):
+            if self._total != other._total:
+                return False
+            return self.to_tuples() == other.to_tuples()
+        if isinstance(other, (list, tuple)):
+            if self._total != len(other):
+                return False
+            return all(left == right for left, right in zip(self, other))
+        return NotImplemented
+
+    def __repr__(self):
+        return f"ResultSet(rows={self._total})"
+
+    # ---- metadata and the materialising escape hatch ----------------------
+
+    def keys(self):
+        """The result's column names, in order."""
+        return list(self._keys)
+
+    def field_types(self):
+        """The PostgreSQL type OIDs, in column order."""
+        return list(self._types)
+
+    def to_tuples(self):
+        """Materialise every row now, in C, and return the list of tuples."""
+        if self._materialized is None:
+            rows = []
+            for nrows, columns in self._frames:
+                if nrows:
+                    rows.extend(_client.decode_frame(columns, nrows))
+            self._materialized = rows
+        return self._materialized
+
+    materialize = to_tuples
+
+    def fetchall(self):
+        """DB-API convenience: the whole result as tuples."""
+        return self.to_tuples()
 
 
 # ---- ring pool ------------------------------------------------------------
@@ -643,7 +770,8 @@ class Connection:
     a partition rather than dropping to the slow road.
     """
 
-    def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = False, **kwargs):
+    def __init__(self, conninfo: str = "", shm: bool = True, wait: bool = False,
+                 force_tuples=None, **kwargs):
         if not conninfo and kwargs:
             conninfo = " ".join(f"{k}={v}" for k, v in kwargs.items() if v is not None)
         try:
@@ -653,6 +781,7 @@ class Connection:
         self._closed = False
         self._shm = shm
         self._wait = wait
+        self._force_tuples = _FORCE_TUPLES if force_tuples is None else bool(force_tuples)
         self._streams = set()  # live stream generators, so close() can end them
         self.shm_reads = 0
 
@@ -710,6 +839,88 @@ class Connection:
         self.shm_reads += 1
         return _Result(fields or [], field_types or [], rows, len(rows))
 
+    def _shm_read_lazy(self, sql, size=_SHM_BATCH):
+        """The same read, but the result is a columnar ResultSet.
+
+        Two data segments alternate exactly as they do for the eager read: the
+        request for the next batch is posted before the current one is copied,
+        so the worker's turn hides behind the copy. What is copied is each
+        column's region, not a tuple: the ring then goes straight back to the
+        pool and the result owns its bytes. A row is decoded when it is asked
+        for, so a consumer that only counts or narrows pays no per-value work.
+        """
+        if not self._shm:
+            return None
+        info = _ring_acquire(self._conn, block=self._wait)
+        if info is None:
+            if pool_size() > 0:  # size 0 is the explicit "no ring" configuration
+                _note_fallback("pool exhausted", warn=False)
+            return None
+        ring, seg, _pid = info
+
+        frames = []
+        keys = types = None
+        total = 0
+        pending = False
+        try:
+            segs = (seg + "_a", seg + "_b")
+            ring.open(seg, sql)
+            try:
+                i = 0
+                ring.post(segs[0], size)
+                pending = True
+                n = ring.wait()
+                pending = False
+                while True:
+                    more = n != 0
+                    if more:
+                        ring.post(segs[(i + 1) & 1], size)
+                        pending = True
+                    batch = _client.read(segs[i & 1])
+                    if keys is None:
+                        keys = [column.name for column in batch.columns]
+                        types = [column.pgtype for column in batch.columns]
+                    if n:
+                        columns = []
+                        for column in batch.columns:
+                            # One copy of the whole column region. The varlena
+                            # kinds keep offsets and bytes together in `data`,
+                            # so `bytes` is a slice of the copy, not a second
+                            # one.
+                            data = bytes(column.data)
+                            payload = None
+                            if column.bytes is not None:
+                                payload = memoryview(data)[len(data) - len(column.bytes):]
+                            nulls = bytes(column.nulls) if column.nulls is not None else None
+                            columns.append(
+                                _client.column(
+                                    column.name, column.kind, column.pgtype, n,
+                                    data, payload, nulls,
+                                )
+                            )
+                        frames.append((n, columns))
+                        total += n
+                    if not more:
+                        break
+                    n = ring.wait()
+                    pending = False
+                    i += 1
+            finally:
+                if pending:  # an exception after a post: leave the ring balanced
+                    try:
+                        ring.wait()
+                    except Exception:
+                        pass
+                ring.close()
+        except Exception as exc:
+            _note_fallback(type(exc).__name__, detail=f"{type(exc).__name__}: {exc}")
+            return None  # re-run on libpq so the caller sees the real error
+        finally:
+            _ring_release(info)
+
+        self.shm_reads += 1
+        return ResultSet(frames, keys or [], types or [], total)
+
     def cursor(self):
         return Cursor(self)
 
@@ -719,7 +930,7 @@ class Connection:
     # it its own Result and Row machinery once the driver is subtracted. These
     # three do the same job — a statement in, its rows out — by compiling once
     # and running the plain SQL the ring already speaks, so what comes back is
-    # the driver's list of tuples: no Result, no Row, nothing per row.
+    # the columnar ResultSet: no Result, no Row, no tuple until one is read.
     #
     #     rows = conn.fetchall(select(Row.id, Row.sku))
     #
@@ -734,11 +945,15 @@ class Connection:
             statement = statement.params(**params)
         return _compiled(statement)
 
-    def fetchall(self, statement, **params) -> list:
-        """Run a SQLAlchemy statement (or SQL text) and return the driver's rows."""
+    def fetchall(self, statement, force_tuples=None, **params) -> Any:
+        """Run a SQLAlchemy statement (or SQL text) and return its rows.
+
+        The default is the lazy ``ResultSet`` for a SELECT; ``force_tuples=True``
+        returns the list of tuples the old path built.
+        """
         cur = self.cursor()
         cur.execute(self.compile(statement, **params))
-        return cur.fetchall()
+        return cur.fetchall(force_tuples)
 
     def first(self, statement, **params):
         """The first row of a statement, or None."""
@@ -790,14 +1005,34 @@ class Cursor:
     def execute(self, operation: str, parameters=None):
         sql = operation if parameters is None else _inline(operation, parameters)
 
-        result = None
         if self.connection._shm and _is_read_only(sql):
-            result = self.connection._shm_read(sql)
-        if result is None:
-            try:
-                result = self.connection._conn.exec(sql)
-            except Exception as exc:
-                raise _translate(exc) from exc
+            if self.connection._force_tuples:
+                result = self.connection._shm_read(sql)
+                if result is not None:
+                    self.description = [
+                        (name, oid, None, None, None, None, None)
+                        for name, oid in zip(result.fields, result.field_types)
+                    ]
+                    self._rows = result.rows
+                    self.rowcount = result.row_count
+                    self._pos = 0
+                    return self
+            else:
+                rows = self.connection._shm_read_lazy(sql)
+                if rows is not None:
+                    self.description = [
+                        (name, oid, None, None, None, None, None)
+                        for name, oid in zip(rows._keys, rows._types)
+                    ]
+                    self._rows = rows
+                    self.rowcount = len(rows)
+                    self._pos = 0
+                    return self
+
+        try:
+            result = self.connection._conn.exec(sql)
+        except Exception as exc:
+            raise _translate(exc) from exc
 
         self.description = [(name, oid, None, None, None, None, None) for name, oid in zip(result.fields, result.field_types)]
         self._rows = result.rows
@@ -994,15 +1229,33 @@ class Cursor:
         self._pos += len(rows)
         return rows
 
-    def fetchall(self):
-        if self._pos == 0:  # the common case: hand the list over instead of copying it
+    def fetchall(self, force_tuples=None):
+        """The remaining rows.
+
+        A lazy result is handed back as the ``ResultSet`` itself, so asking for
+        "all" does not build a tuple per row. ``force_tuples=True`` (or a
+        connection opened with ``force_tuples=True``/``FASTPOSTGRES_MATERIALIZE=1``)
+        returns a plain list instead.
+        """
+        force = self.connection._force_tuples if force_tuples is None else force_tuples
+        if self._pos == 0:  # the common case: hand the result over instead of copying it
             self._pos = len(self._rows)
-            return self._rows
-        rows = self._rows[self._pos :]
-        self._pos = len(self._rows)
+            rows = self._rows
+        else:
+            rows = self._rows[self._pos :]
+            self._pos = len(self._rows)
+        if force and isinstance(rows, ResultSet):
+            return rows.to_tuples()
         return rows
 
     def __iter__(self):
+        rows = self._rows
+        if isinstance(rows, ResultSet) and self._pos == 0:
+            self._pos = len(rows)
+            return iter(rows)
+        return self._iter_fetch()
+
+    def _iter_fetch(self):
         while True:
             row = self.fetchone()
             if row is None:
