@@ -87,7 +87,7 @@ def open_dbapi():
 
 
 def open_arrow():
-    return adbc.connect(ARROW_URI)
+    return arrow_tune(adbc.connect(ARROW_URI))
 
 
 def open_lean():
@@ -113,6 +113,10 @@ def fetch_arrow(conn):
     DDL between sizes would wait on it.
     """
     cur = conn.cursor()
+    try:
+        cur.adbc_statement.set_options(**ARROW_STMT_OPTS)
+    except Exception:
+        pass
     cur.execute(CORE_SQL)
     table = cur.fetch_arrow_table()
     cur.close()
@@ -185,6 +189,41 @@ ARROW_MT = "adbc+arrow, threads"
 # One per physical core less one, the same budget the ring's fan-out leaves
 # (its own client thread and the server both need somewhere to run).
 ARROW_THREADS = max(2, min(8, (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 4)) // 2 - 1))
+
+# The rival's own performance configuration, so the comparison is not a
+# settings mismatch: COPY rather than row-by-row in the wire protocol, an
+# autocommit connection (no open transaction per fetch), Arrow's jemalloc pool
+# and its thread count. Measured on 1M rows these are worth ~1%: the libpq
+# driver's ceiling is the text wire and the Arrow conversion, not a knob.
+ARROW_STMT_OPTS = {"adbc.postgresql.use_copy": "true"}
+# autocommit is deliberately not set: it measured identical (2.29M both
+# ways) and the driver refuses rollback() once it is on, which the fetch path
+# needs to end a read transaction.
+ARROW_CONN_OPTS = {}
+
+
+def arrow_tune(conn):
+    try:
+        conn.adbc_connection.set_options(**ARROW_CONN_OPTS)
+    except Exception:
+        pass
+    return conn
+
+
+def arrow_pool_tune():
+    try:
+        import pyarrow as pa
+
+        if hasattr(pa, "jemalloc_memory_pool"):
+            pa.set_memory_pool(pa.jemalloc_memory_pool())
+        if hasattr(pa, "set_cpu_count"):
+            pa.set_cpu_count(ARROW_THREADS)
+    except Exception:
+        pass
+
+
+arrow_pool_tune()
+
 REL_PAGES = (
     "SELECT greatest(relpages, pg_relation_size(oid) / current_setting('block_size')::int)"
     " FROM pg_class WHERE oid = 'fp_bench_rows'::regclass"
@@ -195,12 +234,15 @@ def open_arrow_pool():
     """N connections, each with its own page range of the same read."""
     from fastpostgres import partition
 
-    conns = [adbc.connect(ARROW_URI) for _ in range(ARROW_THREADS)]
+    conns = [arrow_tune(adbc.connect(ARROW_URI)) for _ in range(ARROW_THREADS)]
     cur = conns[0].cursor()
     cur.execute(REL_PAGES)
     relpages = int(cur.fetchone()[0])
     cur.close()
-    conns[0].rollback()
+    try:
+        conns[0].rollback()
+    except Exception:
+        pass
     sqls = partition.partition_sql(CORE_SQL, ARROW_THREADS, relpages)
     if not sqls or len(sqls) < 2:
         return [(conn, CORE_SQL) for conn in conns]  # too small to split: all read it all
@@ -210,6 +252,10 @@ def open_arrow_pool():
 def _arrow_one(pair):
     conn, sql = pair
     cur = conn.cursor()
+    try:
+        cur.adbc_statement.set_options(**ARROW_STMT_OPTS)
+    except Exception:
+        pass
     cur.execute(sql)
     table = cur.fetch_arrow_table()
     cur.close()

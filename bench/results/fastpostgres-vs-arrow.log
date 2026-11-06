@@ -9,6 +9,7 @@ shm: worker default · 8 rings
 max_worker_processes: 10
 fastpostgres_shm_pool: 8
 arrow_threads: 7
+arrow_options: use_copy, jemalloc pool, cpu_count
 git: 5762e1a
 ### END ENV
 
@@ -16,32 +17,32 @@ git: 5762e1a
 
 ZERO-COPY READ (rows/s): stream()     arrow, 7 conns arrow table  vs arrow    
   (the same read: the columnar form each stack lands, nothing consumed)
-  100K           14.46M       11.05M        2.30M    130.9%  ok
-  spread: stream() ±1.7%  arrow, 7 conns ±2.3%  arrow table ±1.1%
-  1M             51.64M       12.04M        2.31M    429.0%  ok
-  spread: stream() ±3.2%  arrow, 7 conns ±1.3%  arrow table ±1.8%
-  10M            55.60M       12.34M        2.33M    450.5%  ok
-  spread: stream() ±14.6%  arrow, 7 conns ±1.2%  arrow table ±0.4%
+  100K           14.65M       11.12M        2.31M    131.8%  ok
+  spread: stream() ±1.2%  arrow, 7 conns ±1.5%  arrow table ±1.1%
+  1M             62.10M       12.32M        2.24M    504.1%  ok
+  spread: stream() ±6.9%  arrow, 7 conns ±3.1%  arrow table ±0.7%
+  10M            59.21M       12.52M        2.29M    473.0%  ok
+  spread: stream() ±16.4%  arrow, 7 conns ±3.5%  arrow table ±0.5%
 
 PATHS, the same rows (rows/s):                      vs driver read
-  100K     fastpostgres, DBAPI                11.28M          
-  100K     fastpostgres, stream()             14.46M      128%
-  100K     fastpostgres, core interface       10.69M       95%
-  100K     fastpostgres, 4 processes          30.76M      273%
-  100K     adbc+arrow, arrow table             2.30M       20%
-  100K     adbc+arrow, fetchall()              0.14M        1%
-  100K     adbc+arrow, table+to_pylist         1.33M       12%
-  1M       fastpostgres, DBAPI                27.13M          
-  1M       fastpostgres, stream()             55.04M      203%
-  1M       fastpostgres, core interface       29.81M      110%
-  1M       fastpostgres, 4 processes          48.11M      177%
-  1M       adbc+arrow, arrow table             2.30M        8%
-  1M       adbc+arrow, fetchall()              0.15M        1%
-  1M       adbc+arrow, table+to_pylist         1.30M        5%
-  10M      fastpostgres, DBAPI                32.88M          
-  10M      fastpostgres, stream()             57.24M      174%
-  10M      fastpostgres, core interface       36.10M      110%
-  10M      fastpostgres, 4 processes          58.53M      178%
-  10M      adbc+arrow, arrow table             2.31M        7%
-  10M      adbc+arrow, fetchall()              0.15M        0%
-  10M      adbc+arrow, table+to_pylist         1.30M        4%
+  100K     fastpostgres, DBAPI                11.15M          
+  100K     fastpostgres, stream()             15.26M      137%
+  100K     fastpostgres, core interface       11.25M      101%
+  100K     fastpostgres, 4 processes          31.73M      284%
+  100K     adbc+arrow, arrow table             2.31M       21%
+  100K     adbc+arrow, fetchall()              0.15M        1%
+  100K     adbc+arrow, table+to_pylist         1.32M       12%
+  1M       fastpostgres, DBAPI                27.79M          
+  1M       fastpostgres, stream()             50.95M      183%
+  1M       fastpostgres, core interface       27.07M       97%
+  1M       fastpostgres, 4 processes          45.52M      164%
+  1M       adbc+arrow, arrow table             2.32M        8%
+  1M       adbc+arrow, fetchall()              0.14M        1%
+  1M       adbc+arrow, table+to_pylist         1.25M        4%
+  10M      fastpostgres, DBAPI                31.59M          
+  10M      fastpostgres, stream()             63.88M      202%
+  10M      fastpostgres, core interface       35.56M      113%
+  10M      fastpostgres, 4 processes          56.54M      179%
+  10M      adbc+arrow, arrow table             2.32M        7%
+  10M      adbc+arrow, fetchall()              0.14M        0%
+  10M      adbc+arrow, table+to_pylist         1.27M        4%
