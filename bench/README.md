@@ -75,11 +75,15 @@ result-cache comparisons and the codec x transport matrix.
 
 `ab` - one figure per log, into `docs/assets/` by default.
 
-The look has one home: [`charts/theme.py`](charts/theme.py) sets the sans-serif
-type, the thin axes, the dashed grid and the boxed legend, modelled on
-[`charts/chart-example.png`](charts/chart-example.png) (the style reference; the
-chart itself is not from this repo). Palettes stay with each chart, because there
-the color carries the reading.
+The look has one home: [`charts/styles.py`](charts/styles.py) holds the
+candidate looks and the two that were picked — `mono` for the repository and
+`brutal` for the deck. `just charts cache` renders the repository version;
+`just presentation` re-renders the same log in the deck style under
+`presentation/assets/`. Charts still migrate to the style layer one at a time;
+the rest keep the thin-axis look in [`charts/theme.py`](charts/theme.py),
+modelled on [`charts/chart-example.png`](charts/chart-example.png). Palettes
+stay with each chart, because there the color carries the reading.
+[`charts/STYLE-LAB.md`](charts/STYLE-LAB.md) is the comparison sheet.
 
 ## Old names, and where they went
 
