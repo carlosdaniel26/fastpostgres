@@ -226,3 +226,109 @@ but not an apples-to-apples win over the baseline's view construction.  What is
 missing — MVCC, WAL, vacuum, updates, durability, planner integration, a real
 table AM — is the price of making this a storage engine rather than a snapshot,
 and it is not paid here.
+
+# DB-ENCODE: a streaming columnar receiver and a wire offset table
+
+Status: on `ws/db-encode`, measured; full record in
+`bench/results/ws-db-encode-ab.log`.
+
+## What was there
+
+`fastpostgres_stream_next()` fetched a batch with `SPI_cursor_fetch()`, which
+materialises every result tuple in an SPI tuplestore, then called
+`fastpostgres_columnar_build()` over the `HeapTuple *`. The builder itself was
+already one pass into the column regions (H8-A), but it still paid for the
+tuplestore and its per-batch allocation, and it still compacted the frame on
+every batch to close the gaps left by the text-area reservation.
+
+## H8-B: encode from the DestReceiver
+
+`fastpostgres_columnar_fetch()` runs the portal with its own `DestReceiver`
+(`columnar_receive`) instead of fetching into a tuplestore. The receiver:
+
+1. samples the first eight rows (heap-tuple copies, in a small per-batch
+   context) to reserve the varlena areas exactly as the pull path did;
+2. reserves the frame for the requested row count, reducing that count until
+   the reservation fits the segment;
+3. writes each later slot's values straight into its column's region — one
+   `slot_getallattrs()` deform and one store per value, no row-major datum
+   scratch and no `HeapTuple` materialisation beyond the eight-row sample.
+
+A row the frame cannot take is already consumed by the executor, so it is kept
+in a per-portal queue (`carry.c`, also used by the FPROWS path) and written first
+by the next request. The queue is per portal, like the old single carried row,
+so one worker's stream cannot leak a row into another's batch. The final
+(partial) batch still compacts, because its null bitmap and varlena offset
+stride shrink to the real row count.
+
+The wire v2 frames produced by this path were verified byte-identical to
+`main@7e3d2e6` on bench, mixed/null-heavy and binary shapes, full and partial
+batches (12/12 payload SHA-256 checksums and sizes).
+
+## Wire v3: the column offset table
+
+The full batch still had to compact because a text column's byte area is
+reserved from a sample and ends short. v3 makes that unnecessary:
+
+```
+FPCOLUMN v3 header: magic, version, flags, ncols, nrows, columns_off
+                    at columns_off: ncols × u64 header offsets
+per column:         name_len, name, kind, pgtype, nulls, data_len, data
+```
+
+`fastpostgres_columnar_write_begin()` reserves and zeroes the table;
+`write_column()` records each header offset. The reader (`fastpostgres_reader_next`)
+follows the table and no longer needs the previous column's `data_len` to find
+the next header, so a reservation may leave a gap. On a full batch
+`columnar_finalize()` only patches the exact `data_len` and returns the furthest
+used byte; on a partial batch the existing compaction writes the table entries at
+the new header positions. Column contents are unchanged (verified: names, kinds,
+pgtypes, null bitmaps and data regions hash identically to the main baseline on
+all shapes and batch splits).
+
+The frame grows by 8 bytes plus 8 per column (the generator's 1000×6 payload:
+43 728 → 43 784 bytes), and v2/v3 readers refuse each other by the version check.
+
+## Measurement
+
+Same command (`benchmarks.sh 100000 1000000`), same host, one image at a time;
+the workstream base is `merge/transport` (303366d), not only the protocol's
+`main@7e3d2e6` baseline, because our branch already contains the merge.
+
+| `stream()` rows/s | main@7e3d2e6 | merge/transport | ws/db-encode |
+|---|---|---|---|
+| 100K | 8.56M | 9.01M | **13.75M** |
+| 1M | 8.50M | 8.85M | **13.94M** |
+
+That is **+52.7% / +57.6% over the branch base** and **+60.6% / +64.0% over the
+protocol baseline**; DB-API improves **+50.5% / +65.6% over the base**.
+
+Encode-only, from temporary instrumented images (base: timer around
+`publish_columnar_shm`; change: timer around `columnar_fetch` minus a
+`FPQ_SCAN_ONLY` run of the same executor):
+
+| | merge/transport | ws/db-encode |
+|---|---|---|
+| encode 100K / 1M | 34.1 / 34.8 ns/row | 46.7 / 43.7 ns/row |
+| whole worker NEXT 100K / 1M | 102.8 / 101.0 ns/row | 68.3 / 70.0 ns/row |
+
+The one-pass row-major write is more expensive per encoded row than the old
+column-major sweep — six column regions (six cache lines) per row instead of one
+sequential sweep. That is H8's honest trade: the receiver removes the
+tuplestore, and the net worker time drops **−33.6% / −30.7%**. `stream()` moves
+further than that because the shorter worker turn is on its critical path while
+the client's per-chunk decode is unchanged; the fix for the encode-only number
+is a small tiled row-major buffer written column-major (H4), which is
+deliberately not in this change: it is the scratch this item exists to remove.
+
+## What remains
+
+- **Cache locality.** A 1–4k-row tile would recover the encode-only gap; it
+  reintroduces a bounded scratch and is a separate, measurable item.
+- **v3 compatibility.** The reader/extension must come from the same header
+  build. A cross-version client needs negotiation or a v2 emitter.
+- **Payload gaps.** Full batches publish the reservation's header positions, so
+  `payload_size` includes unwritten interior gaps. The shm path never copies
+  them; a copying transport would.
+- **Partial batches still compact**; a frame could instead carry a separate
+  row capacity, at the cost of a more complex reader.
