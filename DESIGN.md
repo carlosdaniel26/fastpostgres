@@ -767,3 +767,94 @@ of the work.
   falls back. A future version could expose the chosen backing in the ring
   header so a tool can see which path a running ring took without looking at
   `/dev/shm`.
+
+# The per-fetch fixed cost at a small batch
+
+Status: implemented in `extension/transport/engine_shm.c`, default on at a
+300 us budget, with its measurement. `FASTPOSTGRES_SPIN_US=0` restores the pure
+semaphore sleep.
+
+## What the fixed cost was
+
+The map-cache workstream removed the worker's per-batch `shm_open`/`mmap`
+cost. At a 3000-row fetch the worker still paid a visible fixed cost, and
+bench/NOTES.md ("Where the time is now") priced it at ~25 us. Instrumenting
+`ring.next_rows()` on the base tree splits the worker's 261.3 us per fetch:
+
+| phase | us/fetch |
+|---|---|
+| `PortalRunFetch` (the executor) | **259.1** |
+| column headers | 1.1 |
+| SPI connect/find/finish | 0.5 |
+| cursor name + segment path | 0.4 |
+| per-batch memory context / arrays | 0.2 |
+| segment map (cache hit) + publish + cleanup | 0.0 |
+
+So the executor is 99% of the worker's turn, and reusing the cursor, the
+`RowReceiver` or its buffers would pay for itself only inside the remaining
+2.2 us. The only reducible piece outside the executor is the handoff: the
+driver's worker wall is ~294 us at 3k against those 261 us inside the worker,
+and the difference is the doorbell round trip.
+
+## Mechanism
+
+Both sides of the `shm` engine now poll the sequence counter for a bounded
+budget before falling back to `sem_timedwait`:
+
+- the client spins while `resp_seq < seq` after posting a request;
+- the worker spins while `req_seq == resp_seq` after posting a response.
+
+The budget defaults to 300 us and is capped by the hook's own timeout. It is
+used only for batches at or below `FASTPOSTGRES_SPIN_MAX_BATCH` (16384 by
+default): at 100k rows the partner's turn is milliseconds, the spin would pay
+its whole budget and then sleep anyway, and the pipelined DBAPI read already
+hides the worker behind the client's decode. Setting the env var to 0 disables
+the spin, and `FASTPOSTGRES_SPIN_MAX_BATCH=0` removes the batch gate.
+
+The counter stays the truth. A spun response leaves its `sem_post` in the
+semaphore, so a wake from `sem_timedwait` is re-checked against `resp_seq`
+rather than trusted; a stale post costs one loop and no incorrect return. The
+worker already worked this way, and the client now does too. `spin_us` in the
+ring's tally records the time spent before a fallback, so the record says what
+the policy cost.
+
+## Measurement
+
+`bench/dispatch/worker-map-batch.py 3000 100`, five interleaved runs per side,
+medians; the 100k control is `benchmarks.sh 100000`. Full record:
+`bench/results/ws-sd-3k-ab.log`.
+
+| side | worker | total | rows/s | worker CPU |
+|---|---|---|---|---|
+| baseline (main@7e3d2e6) | 104.85 ns/row | 191.08 ns/row | 5.23M | 95.16 ns/row |
+| base (merge/transport) | 98.46 | 187.18 | 5.34M | 88.44 |
+| change | **95.68** | **183.41** | **5.45M** | 178.20 |
+
+Incremental (base -> change): worker -2.8%, total -2.0%, throughput +2.1% at
+3k. Against the protocol baseline it is -8.7% / -4.0% / +4.2%, but most of that
+is the merge this branch builds on. The 100K control does not move: DBAPI
+7.70M -> 7.71M, and the other cells stay inside the harness' +/-5-10% spread.
+
+The price is explicit: the spin doubles the worker's on-CPU time at 3k (88 ->
+178 ns/row) because it waits on the core instead of sleeping. That is the
+trade a bounded spin always makes, and it is why it is capped, batch-gated and
+overridable. The wall time it buys is ~8 us of worker turn and ~11 us of total
+per 3000-row fetch.
+
+## What remains
+
+- **The executor.** 259 of the 261 us inside the worker is `PortalRunFetch`;
+  changing that means changing how the portal is driven, not the transport. A
+  custom `DestReceiver` for the columnar frame (the rows frame already has one)
+  would skip SPI's tuptable, but the executor's per-row work stays.
+- **The rest of the doorbell.** The spin removes the sleep/wake, not the two
+  `sem_post` calls or the Python/C call frame around the handoff. Replacing the
+  post with a shared-memory hint the other side can poll is the next step, and
+  the eventfd engine is the existing answer for a worker that polls many rings.
+- **A longer spin is not the answer.** 300, 500 and 800 us all landed within
+  noise of each other at 3k; beyond the partner's turn the extra budget only
+  burns CPU. An adaptive budget (the last observed turn) could spend less on a
+  mixed workload, but it adds state for a gain the fixed cap already captures.
+- **Large-batch reads.** The gate deliberately leaves them on the old path.
+  The DBAPI at 100k is pipelined, so the worker's turn is already hidden; the
+  spin would only cost CPU there.

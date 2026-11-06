@@ -1,7 +1,7 @@
 /*
- * engine_shm.c — the original transport, unchanged in behaviour: the ring's
- * own semaphores carry the wakeups, and the two sequence counters carry the
- * truth. The client bumps req_seq (release) and posts req_ready; the worker
+ * engine_shm.c — the original transport: the ring's own semaphores carry the
+ * wakeups, and the two sequence counters carry the truth. The client bumps
+ * req_seq (release) and posts req_ready; the worker
  * waits on req_ready, answers, bumps resp_seq (release) and posts resp_ready.
  * This is a futex round trip and a scheduler wake per handoff — no privileges,
  * works everywhere — and it is exactly the protocol ring.cpp on the client
@@ -12,13 +12,88 @@
  * resp_seq is what this worker has answered, so an unanswered request is exactly
  * req_seq != resp_seq — the duplicate suppression, with no per-process state.
  *
- * Neither side polls in this engine, so the ring's tally records it as what it
- * is: one post and one semaphore wait per handoff, and no spin at all.
+ * Each wait is a bounded spin on the sequence counter followed by the
+ * semaphore sleep. For a small batch the partner is normally still running
+ * when the handoff is posted, so the spin catches it and the futex wake costs
+ * nothing; anything longer falls through to sem_timedwait, which remains the
+ * whole criterion. The tally records both halves: the sleeps taken and the
+ * microseconds spent spinning before a fallback.
  */
 #include "transport.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <time.h>
+
+/* Bounded spin-then-sleep: before the semaphore sleep, poll the sequence
+ * counter for up to this many microseconds. The ring is synchronous, so the
+ * other side is normally already working when a handoff is posted; a short
+ * spin avoids one futex sleep and scheduler wake on the common path, and the
+ * semaphore still carries anything longer. FASTPOSTGRES_SPIN_US=0 disables it.
+ *
+ * The default is deliberately small: a wait that is going to be long pays the
+ * whole budget in CPU, and a client that idles between requests must not burn
+ * a core. At the 3k-row batch scale the partner's turn is ~250-300 us, so a
+ * budget in that range removes both wakes; 300 us measured best on this host
+ * and is the default.
+ *
+ * Only small batches spin. A batch large enough that the partner's turn is
+ * milliseconds pays the whole budget for nothing and then sleeps anyway, so the
+ * spin is skipped above FASTPOSTGRES_SPIN_MAX_BATCH rows (0 = no limit).
+ * Set FASTPOSTGRES_SPIN_US=0 to return to a pure semaphore sleep; see
+ * bench/NOTES.md. */
+#define FASTPOSTGRES_SPIN_DEFAULT_US        300
+#define FASTPOSTGRES_SPIN_MAX_BATCH_DEFAULT 16384
+
+static int
+shm_spin_us(uint32_t batch)
+{
+    static int budget    = -1;
+    static int max_batch = -1;
+
+    if (budget < 0)
+    {
+        const char *env = getenv("FASTPOSTGRES_SPIN_US");
+        long        v   = env && env[0] ? strtol(env, NULL, 10) : FASTPOSTGRES_SPIN_DEFAULT_US;
+
+        if (v < 0) v = 0;
+        if (v > 1000000) v = 1000000; /* never spin for more than a second */
+        budget = (int)v;
+
+        env = getenv("FASTPOSTGRES_SPIN_MAX_BATCH");
+        v   = env && env[0] ? strtol(env, NULL, 10) : FASTPOSTGRES_SPIN_MAX_BATCH_DEFAULT;
+        if (v < 0) v = 0;
+        if (v > 100000000) v = 100000000;
+        max_batch = (int)v;
+    }
+    if (budget == 0) return 0;
+    if (max_batch != 0 && batch > (uint32_t)max_batch) return 0;
+    return budget;
+}
+
+static inline void
+shm_cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("pause");
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+#define SHM_SPIN_CHECK 128
+
+/* Microseconds since `start`, using the monotonic clock (a vDSO read on Linux).
+ * Called only every SHM_SPIN_CHECK iterations: clock_gettime per iteration would
+ * cost more than the wait it is bounding. */
+static long
+shm_since_us(const struct timespec *start)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long)(now.tv_sec - start->tv_sec) * 1000000L + (now.tv_nsec - start->tv_nsec) / 1000L;
+}
 
 /* Absolute CLOCK_REALTIME deadline for sem_timedwait, which only has an
  * absolute form; the hooks are given a relative budget. */
@@ -82,17 +157,58 @@ shm_wait_response(FastpostgresRing *r, uint64_t seq, int timeout_ms)
 {
     struct timespec deadline;
     int             rc;
+    int             spin_us = shm_spin_us(r->batch);
 
-    (void)seq; /* the semaphore is the whole criterion; status/nrows are read under the fence below */
+    if (timeout_ms <= 0 || spin_us > timeout_ms * 1000) spin_us = timeout_ms > 0 ? timeout_ms * 1000 : 0;
+
     shm_deadline(&deadline, timeout_ms);
-    /* No poll before it: this wait is the futex sleep a wait policy would aim
-     * at, so it is the client's whole `sleeps` on this engine. */
-    fastpostgres_ring_tally(&r->tally.client, 0, 0, 1, 0);
-    rc = sem_timedwait(&r->resp_ready, &deadline);
-    if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
-    /* Everything the worker wrote before its release post is now visible. */
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return 1;
+    /* A bounded spin first: the worker is normally already running the request
+     * we just posted, so the counter turns before a sleep would be worth it.
+     * The semaphore remains the truth for anything the spin does not catch. */
+    if (spin_us > 0)
+    {
+        struct timespec start;
+        int             i     = 0;
+        long            spent = 0;
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;)
+        {
+            if (__atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE) >= seq)
+            {
+                /* Everything the worker wrote before its release store is now
+                 * visible. */
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                return 1;
+            }
+            shm_cpu_relax();
+            if ((++i & (SHM_SPIN_CHECK - 1)) == 0)
+            {
+                spent = shm_since_us(&start);
+                if (spent >= spin_us) break;
+            }
+        }
+        fastpostgres_ring_tally(&r->tally.client, 0, 0, 0, (uint64_t)spent);
+    }
+
+    /* The futex sleep: reachable when the spin budget did not cover the turn,
+     * so it is the client's `sleeps` on this engine. A spun response leaves its
+     * post in the semaphore, so a wake is re-checked against the counter rather
+     * than trusted: the counter is the truth, the post is only a hint. */
+    for (;;)
+    {
+        fastpostgres_ring_tally(&r->tally.client, 0, 0, 1, 0);
+        rc = sem_timedwait(&r->resp_ready, &deadline);
+        if (rc != 0) return errno == ETIMEDOUT ? 0 : -1;
+        if (__atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE) >= seq)
+        {
+            /* Everything the worker wrote before its release post is now
+             * visible. */
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            return 1;
+        }
+        /* a stale post from a response the spin already collected */
+    }
 }
 
 static int
@@ -130,8 +246,41 @@ shm_wait_request(FastpostgresRing *r, uint64_t *seq, int timeout_ms)
 {
     struct timespec deadline;
     int             rc;
+    int             spin_us = shm_spin_us(r->batch);
+
+    if (timeout_ms <= 0 || spin_us > timeout_ms * 1000) spin_us = timeout_ms > 0 ? timeout_ms * 1000 : 0;
 
     shm_deadline(&deadline, timeout_ms);
+    /* The mirror of the client's spin: after answering, the client is normally
+     * decoding the batch we just published, so the next request is already on
+     * its way. Spin for it rather than sleeping and waiting to be woken. */
+    if (spin_us > 0)
+    {
+        struct timespec start;
+        int             i     = 0;
+        long            spent = 0;
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;)
+        {
+            uint64_t asked    = __atomic_load_n(&r->req_seq, __ATOMIC_ACQUIRE);
+            uint64_t answered = __atomic_load_n(&r->resp_seq, __ATOMIC_ACQUIRE);
+
+            if (asked != answered)
+            {
+                *seq = asked;
+                return 1;
+            }
+            shm_cpu_relax();
+            if ((++i & (SHM_SPIN_CHECK - 1)) == 0)
+            {
+                spent = shm_since_us(&start);
+                if (spent >= spin_us) break;
+            }
+        }
+        fastpostgres_ring_tally(&r->tally.worker, 0, 0, 0, (uint64_t)spent);
+    }
+
     for (;;)
     {
         uint64_t asked;

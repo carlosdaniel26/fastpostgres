@@ -61,8 +61,9 @@ enum FastpostgresRingOp
 /* One side's handoff tally: the client's row counts what it posted, the
  * worker's what it answered. Only that side writes its own row, so the record
  * is two snapshots of this segment around a run — no shared counter, no lock.
- * The events are counted, never timed by an extra clock: the shm engine never
- * polls, so it leaves `spin_us` at zero. */
+ * The events are counted, never timed by an extra clock: `spin_us` is the
+ * measured time a bounded spin spent before falling back to the doorbell, and
+ * it is zero when the spin caught the handoff. */
 typedef struct FastpostgresRingSide
 {
     uint64_t handoffs; /* client: requests posted; worker: requests answered */
