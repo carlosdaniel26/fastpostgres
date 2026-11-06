@@ -1,0 +1,254 @@
+# team-merge — the nine branches, measured as one tree
+
+`merge/read-path` at `4902866` (records follow in the next commit), base
+`main@7e3d2e6`. All nine team branches are merged; see `MERGE.md` for the
+conflict resolutions and the two documented opt-in limitations.
+
+## Commands
+
+Build the measured image:
+
+    flock /tmp/fpq-bench.lock -c 'docker build -q --target dev -t fpq-merged -f docker/Dockerfile .'
+
+Tests (default path; then each opt-in engine):
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g fpq-merged tests.sh'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e FASTPOSTGRES_TRANSPORT=eventfd fpq-merged tests.sh'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e FASTPOSTGRES_MEMFD=1 fpq-merged tests.sh'
+
+A/B, one at a time, under the lock, same command and harness:
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=baseline fpq-baseline benchmarks.sh 100000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=merged fpq-merged benchmarks.sh 100000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=baseline fpq-baseline benchmarks.sh 1000000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=merged fpq-merged benchmarks.sh 1000000'
+
+The two fast paths on the merged image:
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=merged fpq-merged python3 /src/bench/jobs/columnar_scan.py 100000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g -e BENCH_GIT_REV=merged fpq-merged python3 /src/bench/orm/materialize_bench.py 100000 3'
+
+`fpq-baseline` is the untouched `main@7e3d2e6` image already in the lab;
+`fpq-merged` is this tree.
+
+# ===== 100K, baseline =====
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+read_rows: 626.5 cycles/row over 400000 rows (decode 624.4, frame+desc+list 2.1)
+read_rows: 622.4 cycles/row over 400000 rows (decode 620.6, frame+desc+list 1.9)
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow
+  (the same read: the columnar form each stack lands, nothing consumed)
+  100K            8.54M        2.33M    365.9%  ok
+  spread: stream() ±4.9%  arrow table ±0.3%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  100K     fastpostgres, DBAPI                 3.67M
+  100K     fastpostgres, stream()              8.53M      233%
+  100K     fastpostgres, core interface        3.69M      101%
+  100K     fastpostgres, 4 processes           8.46M      231%
+  100K     adbc+arrow, arrow table             2.32M       63%
+  100K     adbc+arrow, fetchall()              0.14M        4%
+  100K     adbc+arrow, table+to_pylist         1.33M       36%
+
+# ===== 100K, merged =====
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: merged
+shm: 3.0G
+### END ENV
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow
+  (the same read: the columnar form each stack lands, nothing consumed)
+  100K            8.68M        2.30M    377.5%  ok
+  spread: stream() ±2.8%  arrow table ±0.6%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  100K     fastpostgres, DBAPI                 7.54M
+  100K     fastpostgres, stream()              8.31M      110%
+  100K     fastpostgres, core interface        7.20M       96%
+  100K     fastpostgres, 4 processes          21.14M      280%
+  100K     adbc+arrow, arrow table             2.33M       31%
+  100K     adbc+arrow, fetchall()              0.14M        2%
+  100K     adbc+arrow, table+to_pylist         1.35M       18%
+
+# ===== 1M, baseline =====
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: baseline
+shm: 3.0G
+### END ENV
+read_rows: 638.8 cycles/row over 4000000 rows (decode 637.7, frame+desc+list 1.0)
+read_rows: 639.0 cycles/row over 4000000 rows (decode 637.8, frame+desc+list 1.2)
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow
+  (the same read: the columnar form each stack lands, nothing consumed)
+  1M              8.91M        2.33M    382.7%  ok
+  spread: stream() ±1.1%  arrow table ±0.9%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  1M       fastpostgres, DBAPI                 3.95M
+  1M       fastpostgres, stream()              8.60M      218%
+  1M       fastpostgres, core interface        4.02M      102%
+  1M       fastpostgres, 4 processes           9.33M      236%
+  1M       adbc+arrow, arrow table             2.34M       59%
+  1M       adbc+arrow, fetchall()              0.14M        4%
+  1M       adbc+arrow, table+to_pylist         1.32M       34%
+
+# ===== 1M, merged =====
+
+### ENV
+cpu: AMD Ryzen 7 7700 8-Core Processor
+mem: 30 GiB
+ghz: 3.8
+cores: 8
+postgres: 18.6
+python: 3.13.5
+sqlalchemy: 2.0.40
+pyarrow: 26.0.0
+adbc: 1.13.0
+shape: bench
+git: merged
+shm: 3.0G
+### END ENV
+# shape: bench — short ASCII text, no NULLs
+
+ZERO-COPY READ (rows/s): stream()     arrow table  vs arrow
+  (the same read: the columnar form each stack lands, nothing consumed)
+  1M              9.28M        2.32M    399.8%  ok
+  spread: stream() ±2.0%  arrow table ±0.2%
+
+PATHS, the same rows (rows/s):                      vs driver read
+  1M       fastpostgres, DBAPI                 9.03M
+  1M       fastpostgres, stream()              9.40M      104%
+  1M       fastpostgres, core interface        9.06M      100%
+  1M       fastpostgres, 4 processes          30.74M      340%
+  1M       adbc+arrow, arrow table             2.34M       26%
+  1M       adbc+arrow, fetchall()              0.14M        2%
+  1M       adbc+arrow, table+to_pylist         1.32M       15%
+
+## The OS columnar store, merged (100K)
+
+`Connection.columnar_load()` writes the rows once into a sealed memfd and scans
+them where they lie; `reduce()` walks the same mapping. The heap row is the
+same `Cursor.aggregate()` used by the AB above, so the comparison is inside one
+process.
+
+### COLUMNAR SCAN rows=100000 reps=5
+heap.relation.bytes: 7651328
+heap.aggregate.rows_s: 8928771
+heap.aggregate.ms: 11.200
+heap.aggregate.faults: 0 0
+heap.stream.rows_s: 8803752
+heap.stream.ms: 11.359
+heap.stream.faults: 0 0
+columnar.load.ms: 11.993
+columnar.load.faults: 3 0
+columnar.bytes: 3877790
+columnar.heap.x: 0.507
+columnar.scan.cold.ms: 0.790
+columnar.scan.cold.faults: 1 0
+verify.reduce: ok
+columnar.scan.rows_s: 127340032
+columnar.scan.ms: 0.785
+columnar.scan.faults: 0 0
+columnar.scan.bytes_s: 4937979039
+columnar.reduce.rows_s: 79886242
+columnar.reduce.ms: 1.252
+columnar.reduce.faults: 0 0
+columnar.scan.checksum: 18348572660784856466
+
+Columnar scan 127.34M rows/s against a heap aggregate at 8.93M (+14.3×), and
+the mapped reduce at 79.89M rows/s (+8.9×); `verify.reduce: ok`. The mapped
+bytes are 3.88 MB, 0.507× the heap relation.
+
+## The native ORM materializer, merged (100K)
+
+### ORM MATERIALIZE
+rows: 100000  reps: 3  shape: bench
+engine: postgresql+fastpostgres://postgres@/postgres?host=/tmp
+driver tuples            123.0 ns/row     8.13M rows/s
+stock ORM               3673.6 ns/row     0.27M rows/s
+materialize e2e          594.7 ns/row     1.68M rows/s
+materialize only         426.1 ns/row     2.35M rows/s
+speedup e2e:        6.18x  entity-only: 8.62x
+### END ORM MATERIALIZE
+
+## Tests
+
+    fpq-merged tests.sh                                  Ran 71 tests ... OK (skipped=1)
+    fpq-merged -e FASTPOSTGRES_TRANSPORT=eventfd tests.sh Ran 71 tests ... OK
+    fpq-merged -e FASTPOSTGRES_MEMFD=1 tests.sh          Ran 71 tests ... FAILED (failures=1, errors=1, skipped=1)
+
+The memfd run's two failures are the tests that `stat("/dev/shm/<seg>")` or
+count `/dev/shm` files directly; under the sealed-memfd path those files do not
+exist by design (formats' own record documents the same assertions). Every
+functional test passes in all three runs, and `make installcheck` is green in
+each. Default `shm` and opt-in `eventfd` are fully green.
+
+### AB
+
+100K, baseline -> merged (rows/s):
+
+    DBAPI                 3.67M -> 7.54M    +105.4%
+    stream()              8.53M -> 8.31M      -2.6% (within ±4.9% spread; unchanged path)
+    core interface        3.69M -> 7.20M     +95.1%
+    4 processes           8.46M -> 21.14M   +149.9%
+    adbc arrow table      2.32M -> 2.33M      +0.4%
+    stream() vs Arrow     3.67× -> 3.77×   (zero-copy section: 8.54M/2.33M -> 8.68M/2.30M)
+
+1M, baseline -> merged (rows/s):
+
+    DBAPI                 3.95M -> 9.03M    +128.6%
+    stream()              8.60M -> 9.40M     +9.3%
+    core interface        4.02M -> 9.06M    +125.4%
+    4 processes           9.33M -> 30.74M   +229.5%
+    adbc arrow table      2.34M -> 2.32M      -0.9%
+    stream() vs Arrow     3.82× -> 4.00×   (zero-copy section: 8.91M/2.33M -> 9.28M/2.32M)
+
+The largest movement is the default read path: architecture's lazy `ResultSet`
+removes the per-row tuple build, and programming's reduce/compilers' deformer
+sit behind it. `stream()` itself is the unchanged zero-copy path; databases'
+H8-A build shows up as +9.3% at 1M (100K is inside the run-to-run spread). The
+columnar store and the ORM materializer are separate paths and are recorded
+above, not multiplied into this number.
+
+**One honest combined read multiple:** default DBAPI `3.95M -> 9.03M rows/s`
+(**2.29×**) at 1M; `stream()` vs Arrow `3.82× -> 4.00×`. No per-team factor was
+applied to another team's number.
