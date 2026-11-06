@@ -412,7 +412,6 @@ aggregate_read_reduce(PyObject *, PyObject *args)
     }
     return out;
 }
-}
 
 static PyMethodDef aggregate_methods[] = {
     {"reduce", aggregate_reduce, METH_VARARGS,
