@@ -278,7 +278,11 @@ def measure(section, sizes):
     header(section)
     for n in sizes:
         setup(n)  # a fresh table of exactly n rows, so each read returns n
-        reps = REPS if n <= REPS_MAX_ROWS else 1
+        # Every size gets the same rep count: a single rep at 10M made the
+        # largest cell the noisiest one, which is backwards — it is the cell
+        # the headline is drawn from. The Arrow side pays for it (a 10M table
+        # is ~4 s to build), so the cost is bounded and it buys a median.
+        reps = REPS
         results = [read_one_player(section, key, n, reps) for key in keys]
         medians = {key: median for key, median, _count, _lo, _hi in results}
         counts = {key: count for key, _median, count, _lo, _hi in results}
