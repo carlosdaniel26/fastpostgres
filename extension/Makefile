@@ -9,7 +9,8 @@
 EXTENSION = fastpostgres
 MODULE_big = fastpostgres
 
-OBJS = src/fastpostgres.o src/columnar.o src/rows.o src/shm.o src/stream.o src/reduce.o src/worker.o \
+OBJS = src/fastpostgres.o src/columnar.o src/columnar_store.o src/rows.o src/shm.o src/stream.o \
+       src/reduce.o src/worker.o \
        transport/transport.o transport/engine_shm.o transport/engine_eventfd.o
 
 # PostgreSQL wants a version in fastpostgres.control and wants the SQL file named

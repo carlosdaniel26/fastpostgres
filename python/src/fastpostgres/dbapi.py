@@ -976,6 +976,18 @@ class Connection:
     def cursor(self):
         return Cursor(self)
 
+    def columnar_load(self, query: str, capacity: int = 0):
+        """Bulk-load a read-only SELECT into a sealed memfd, read-only.
+
+        Returns a ``fastpostgres.columnar.ColumnarTable`` whose columns are
+        zero-copy views over the mapped memfd.  The snapshot is taken once, at
+        load time; the store is immutable and has no MVCC.  Runs on this
+        connection's libpq backend, which keeps the descriptor open.
+        """
+        from .columnar import load as _columnar_load
+
+        return _columnar_load(self, query, capacity)
+
     # ---- the CORE read without CORE --------------------------------------
     #
     # SQLAlchemy's CORE layer costs ~375 ns/row on the benchmark's shape, all of

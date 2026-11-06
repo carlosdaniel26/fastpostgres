@@ -20,3 +20,8 @@ const uint8_t *fp_segment_payload(const char *name, uint64_t *payload_len);
  * name; without one they use /dev/shm. Ring start/teardown own the socket. */
 void fp_handoff_register(int sock);
 void fp_handoff_unregister(int sock);
+/* Map a bulk-loaded columnar memfd read-only, via the backend that owns it.
+ * The mapping is cached for the process lifetime and is immutable: the
+ * descriptor was sealed at load time, so it can never move under a reader.
+ * Returns the FPCOLUMN payload, or nullptr with a Python exception set. */
+const uint8_t *fp_columnar_map(int pid, int fd, uint64_t size, uint64_t *payload_len);
