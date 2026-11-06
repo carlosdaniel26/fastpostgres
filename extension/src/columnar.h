@@ -25,8 +25,4 @@ uint64 columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char *out, 
  * first by the next call. */
 uint64 columnar_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, size_t capacity);
 
-/* Encode straight into /dev/shm/<path>; returns the payload size.
- * `capacity` fixes the segment size (0 = FASTPOSTGRES_SEGMENT_BYTES). */
-uint64 publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, size_t capacity);
-
 } // namespace fp

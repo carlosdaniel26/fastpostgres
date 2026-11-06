@@ -921,20 +921,3 @@ fp::columnar_fetch(Portal portal, TupleDesc td, const char *path, int64 batch, s
     /* the mapping is cached for the worker's lifetime: no per-batch munmap */
     return rx.nrows;
 }
-
-uint64
-fp::publish_columnar_shm(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, size_t capacity)
-{
-    size_t cap    = capacity ? capacity : FASTPOSTGRES_SEGMENT_BYTES;
-    size_t mapped = 0;
-    void  *map    = fp::shm_map_rw(path, cap, &mapped);
-
-    if (map == nullptr) elog(ERROR, "fastpostgres: cannot map data segment");
-    uint64 total =
-        fp::columnar_build(tuples, td, nrows, static_cast<char *>(map) + FASTPOSTGRES_SHM_HEADER_SIZE,
-                           static_cast<char *>(map) + mapped);
-
-    fastpostgres_shm_publish(map, mapped, total);
-    /* the mapping is cached for the worker's lifetime: no per-batch munmap */
-    return total;
-}

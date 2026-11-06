@@ -968,82 +968,6 @@ column_from_buffers(PyObject *, PyObject *args)
     return (PyObject *)column;
 }
 
-/* decode_frame(columns, nrows) -> list of tuples
- *
- * The materialising half of the lazy read: the copied columnar batch is decoded
- * by the same specialized per-column loops read_rows() uses, just from buffers
- * the caller owns instead of the live mapping. */
-static PyObject *
-decode_frame(PyObject *, PyObject *args)
-{
-    PyObject *columns;
-    long      nrows;
-
-    if (!PyArg_ParseTuple(args, "Ol", &columns, &nrows)) return nullptr;
-    if (!PyList_Check(columns))
-    {
-        PyErr_SetString(PyExc_TypeError, "decode_frame(): columns must be a list");
-        return nullptr;
-    }
-    if (nrows < 0)
-    {
-        PyErr_SetString(PyExc_ValueError, "decode_frame(): negative row count");
-        return nullptr;
-    }
-
-    Py_ssize_t                      ncols = PyList_GET_SIZE(columns);
-    std::vector<FastpostgresColumn> cols((size_t)ncols);
-
-    for (Py_ssize_t c = 0; c < ncols; c++)
-    {
-        PyObject *item = PyList_GET_ITEM(columns, c);
-        if (!PyObject_TypeCheck(item, &ColumnType))
-        {
-            PyErr_SetString(PyExc_TypeError, "decode_frame(): expected Column objects");
-            return nullptr;
-        }
-        ColumnObject *column = (ColumnObject *)item;
-        FastpostgresColumn &fc = cols[(size_t)c];
-
-        memset(&fc, 0, sizeof(fc));
-        fc.kind   = (uint8_t)column->kind;
-        fc.pgtype = (uint32_t)column->pgtype;
-        fc.nulls  = fp_col_bytes(column->nulls);
-        fc.data   = fp_col_bytes(column->data);
-        fc.bytes  = fp_col_bytes(column->bytes);
-        fc.nrows  = (uint64_t)column->nrows;
-
-        if (nrows > 0 && fc.nulls == nullptr)
-        {
-            PyErr_SetString(PyExc_ValueError, "decode_frame(): column has no null bitmap");
-            return nullptr;
-        }
-        if (nrows > 0 && fc.data == nullptr)
-        {
-            PyErr_SetString(PyExc_ValueError, "decode_frame(): column has no data");
-            return nullptr;
-        }
-    }
-
-    PyObject *rows = PyList_New((Py_ssize_t)nrows);
-    if (rows == nullptr) return nullptr;
-    for (long r = 0; r < nrows; r++)
-    {
-        PyObject *tuple = PyTuple_New(ncols);
-        if (tuple == nullptr)
-        {
-            Py_DECREF(rows);
-            return nullptr;
-        }
-        PyList_SET_ITEM(rows, (Py_ssize_t)r, tuple);
-    }
-    if (!fp_decode_columns(cols.data(), (uint32_t)ncols, (uint64_t)nrows, rows))
-    {
-        Py_DECREF(rows);
-        return nullptr;
-    }
-    return rows;
-}
 
 /* decode_rows(columns, start, count) -> list of tuples
  *
@@ -1194,8 +1118,6 @@ static PyMethodDef segment_methods[] = {
      "segment_fd(segName) -> duplicated memfd for inspection, or None for /dev/shm"},
     {"column", column_from_buffers, METH_VARARGS,
      "column(name, kind, pgtype, nrows, data, bytes, nulls) -> Column over caller-owned buffers"},
-    {"decode_frame", decode_frame, METH_VARARGS,
-     "decode_frame(columns, nrows) -> list of tuples from copied column buffers"},
     {"decode_rows", decode_rows, METH_VARARGS,
      "decode_rows(columns, start, count) -> list of tuples for a row window"},
     {"decode_row", decode_row, METH_VARARGS, "decode_row(columns, row) -> one tuple"},
