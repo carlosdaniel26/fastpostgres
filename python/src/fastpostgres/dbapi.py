@@ -1132,12 +1132,12 @@ def _fanout_capacity(conn) -> int:
         slots = _server_ring_slots(conn)
         if slots is not None:
             want = min(want, slots)
-    want = max(1, want)
+    # The fan-out borrows the pool, it does not resize it, and it leaves one
+    # ring free: every ring is a server worker slot, and a query that takes the
+    # whole pool knocks every other read in the process (or its tests, or the
+    # next connection) off the shared-memory path.
+    want = max(1, min(want, pool_size() - 1))
     _fanout_max = want
-    # Let the pool grow to the fan-out's size: it is the same rings, and a
-    # fan-out that cannot get them would silently run at half width.
-    if _POOL_ENV is None and (_pool_size or 0) < want:
-        _pool_size = want
     return want
 
 
