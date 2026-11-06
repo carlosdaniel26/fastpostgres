@@ -165,13 +165,11 @@ fp::stream_next_reduce(const char *stream, const char *seg, int64 batch, size_t 
         elog(ERROR, "fastpostgres_stream_next_reduce: no open stream \"%s\"", stream);
     }
 
-    SPI_cursor_fetch(portal, true, static_cast<long>(batch));
+    /* No tuplestore: the portal drives a receiver that accumulates each slot as
+     * the executor produces it. The old SPI_cursor_fetch copied every row into a
+     * tuplestore first, which is the copy the columnar path already dropped. */
+    uint64 nrows = fp::reduce_fetch(portal, path, batch, capacity, plan);
 
-    uint64     nrows  = SPI_processed;
-    TupleDesc  td     = SPI_tuptable != nullptr ? SPI_tuptable->tupdesc : portal->tupDesc;
-    HeapTuple *tuples = SPI_tuptable != nullptr ? SPI_tuptable->vals : nullptr;
-
-    fp::reduce_publish(path, td, tuples, nrows, plan, capacity);
     SPI_finish();
     return nrows;
 }

@@ -6,6 +6,7 @@ extern "C" {
 
 #include "access/htup.h"
 #include "access/tupdesc.h"
+#include "utils/portal.h"
 }
 
 namespace fp
@@ -23,5 +24,11 @@ namespace fp
  * `capacity` fixes the segment size (0 = FASTPOSTGRES_SEGMENT_BYTES). */
 uint64 reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
                       size_t capacity);
+
+/* The same reduce without a materialised batch: the portal is run with a
+ * DestReceiver and each slot is accumulated as the executor produces it, so no
+ * tuplestore and no per-row copy sit between the scan and the accumulator.
+ * Returns the rows this batch.read. */
+uint64 reduce_fetch(Portal portal, const char *path, int64 batch, size_t capacity, const char *plan);
 
 } // namespace fp

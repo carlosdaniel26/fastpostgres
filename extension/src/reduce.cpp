@@ -45,9 +45,13 @@ extern "C" {
 #include "access/tupdesc.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
+#include "executor/tuptable.h"
+#include "tcop/dest.h"
+#include "tcop/pquery.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/fmgrprotos.h"
+#include "utils/portal.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
 #include "varatt.h"
@@ -532,20 +536,29 @@ publish(const char *path, const ReduceAcc *accs, int nops, uint64_t nrows, size_
     return total;
 }
 
-} // namespace
-
-uint64
-fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
-                   size_t capacity)
+/* The plan and its accumulators, resolved against one cursor's descriptor.
+ * Shared by the materialised path (reduce_publish) and the streaming one
+ * (reduce_fetch): the difference is only where the rows come from. */
+struct ReduceCtx
 {
-    char *copy = fp::pdup(fp::view(plan));
+    std::array<ReduceAcc, kMaxOps> accs;
+    int                            nops;
+    char                          *copy;     /* the plan text the names point into */
+    MemoryContext                  stable;   /* numeric/text winners live until publish */
+    uint64                         nrows;
+};
 
-    std::array<ReduceAcc, kMaxOps> accs{};
-    const int                      nops = parse_plan(copy, accs.data());
+static void
+reduce_ctx_init(ReduceCtx *ctx, TupleDesc td, const char *plan)
+{
+    ctx->copy = fp::pdup(fp::view(plan));
 
-    for (int k = 0; k < nops; k++)
+    ctx->accs = {};
+    ctx->nops = parse_plan(ctx->copy, ctx->accs.data());
+
+    for (int k = 0; k < ctx->nops; k++)
     {
-        ReduceAcc &a = accs[k];
+        ReduceAcc &a = ctx->accs[k];
 
         if (a.op == FP_AGG_COUNT_ALL)
         {
@@ -555,7 +568,7 @@ fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nro
         }
         if (a.by_name)
         {
-            const char *name = copy + a.name_off;
+            const char *name = ctx->copy + a.name_off;
 
             a.column = resolve_column(td, false, 0, name);
         }
@@ -565,8 +578,8 @@ fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nro
         const Form_pg_attribute att = TupleDescAttr(td, a.column);
 
         a.kind = fastpostgres_oid_to_kind(static_cast<uint32_t>(att->atttypid));
-        /* numeric has no wire kind (the columnar path widens it to float8), but
-         * this path holds the raw Datum, so it can stay exact. */
+        /* numeric stays exact: this path holds the raw Datum, so it never goes
+         * through the wire kind (which is decimal text). */
         a.is_numeric = att->atttypid == FASTPOSTGRES_OID_NUMERIC;
         a.is_varlena = att->atttypid == FASTPOSTGRES_OID_TEXT || att->atttypid == FASTPOSTGRES_OID_VARCHAR ||
                        att->atttypid == FASTPOSTGRES_OID_BPCHAR || att->atttypid == FASTPOSTGRES_OID_BYTEA;
@@ -576,108 +589,276 @@ fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nro
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                             errmsg("reduce: %s is not supported for this column type", op_name(a.op))));
     }
+}
 
-    /* Only the planned columns are read: a sum over one column of a wide result
-     * never deforms the rest. */
-    for (int k = 0; k < nops; k++)
+/* One non-NULL value into its accumulator. The Datum must outlive the
+ * accumulator, which is the caller's job (see reduce_ctx_slot). */
+static void
+acc_apply(ReduceAcc &a, Datum d)
+{
+    if (a.op == FP_AGG_SUM)
     {
-        ReduceAcc &a = accs[k];
-
-        if (a.op == FP_AGG_COUNT_ALL || a.column < 0 || a.op == FP_AGG_COUNT)
+        if (a.is_numeric)
         {
-            if (a.op == FP_AGG_COUNT)
-                for (uint64 r = 0; r < nrows; r++)
-                {
-                    bool isnull = false;
-                    /* COUNT reads no value: the attribute is only tested for
-                     * NULL, which is also why it works for every kind. */
-                    [[maybe_unused]] Datum ignored = heap_getattr(tuples[r], a.column + 1, td, &isnull);
+            a.nsum = a.seen ? DirectFunctionCall2(numeric_add, a.nsum, d) : d;
+            a.seen = true;
+        }
+        else if (kind_is_float(a.kind))
+            a.fsum += float_value(d, a.kind);
+        else
+            a.isum += static_cast<unsigned __int128>(static_cast<__int128>(int_value(d, a.kind)));
+        return;
+    }
 
-                    if (!isnull) a.count++;
-                }
+    if (a.is_numeric)
+    {
+        const int  cmp    = a.seen ? DatumGetInt32(DirectFunctionCall2(numeric_cmp, d, a.nbest)) : 0;
+        const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
+
+        if (better) a.nbest = d;
+        a.seen = true;
+    }
+    else if (a.is_varlena)
+    {
+        const char *data;
+        int         len;
+        int         cmp = 0;
+
+        varlena_value(d, &data, &len);
+        if (a.seen) cmp = textual_cmp(data, len, a.best, a.best_len, a.kind, a.collation);
+
+        const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
+
+        if (better)
+        {
+            a.best     = data;
+            a.best_len = len;
+        }
+        a.seen = true;
+    }
+    else if (kind_is_float(a.kind))
+    {
+        const double v      = float_value(d, a.kind);
+        const bool   better = !a.seen || (a.op == FP_AGG_MIN ? v < a.fmin : v > a.fmax);
+
+        if (better)
+        {
+            if (a.op == FP_AGG_MIN)
+                a.fmin = v;
+            else
+                a.fmax = v;
+        }
+        a.seen = true;
+    }
+    else
+    {
+        const long long v      = int_value(d, a.kind);
+        const bool      better = !a.seen || (a.op == FP_AGG_MIN ? v < a.imin : v > a.imax);
+
+        if (better)
+        {
+            if (a.op == FP_AGG_MIN)
+                a.imin = v;
+            else
+                a.imax = v;
+        }
+        a.seen = true;
+    }
+}
+
+/* A value that is already stable for the batch (a materialised tuple). */
+static void
+reduce_ctx_tuple_row(ReduceCtx *ctx, TupleDesc td, HeapTuple tup)
+{
+    for (int k = 0; k < ctx->nops; k++)
+    {
+        ReduceAcc &a = ctx->accs[k];
+
+        if (a.op == FP_AGG_COUNT_ALL)
+        {
+            a.count++;
             continue;
         }
 
-        for (uint64 r = 0; r < nrows; r++)
-        {
-            bool  isnull = false;
-            Datum d      = heap_getattr(tuples[r], a.column + 1, td, &isnull);
+        bool  isnull = false;
+        Datum d      = heap_getattr(tup, a.column + 1, td, &isnull);
 
-            if (isnull) continue;
-
-            if (a.op == FP_AGG_SUM)
-            {
-                if (a.is_numeric)
-                {
-                    /* Keep the numeric exactly as the server does: numeric_add,
-                     * not a cast through double. */
-                    a.nsum = a.seen ? DirectFunctionCall2(numeric_add, a.nsum, d) : d;
-                    a.seen = true;
-                }
-                else if (kind_is_float(a.kind))
-                    a.fsum += float_value(d, a.kind);
-                else
-                    a.isum += static_cast<unsigned __int128>(static_cast<__int128>(int_value(d, a.kind)));
-                continue;
-            }
-
-            /* MIN/MAX */
-            if (a.is_numeric)
-            {
-                const int  cmp    = a.seen ? DatumGetInt32(DirectFunctionCall2(numeric_cmp, d, a.nbest)) : 0;
-                const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
-
-                if (better) a.nbest = d;
-                a.seen = true;
-            }
-            else if (a.is_varlena)
-            {
-                const char *data;
-                int         len;
-                int         cmp = 0;
-
-                varlena_value(d, &data, &len);
-                if (a.seen) cmp = textual_cmp(data, len, a.best, a.best_len, a.kind, a.collation);
-
-                const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
-
-                if (better)
-                {
-                    a.best     = data;
-                    a.best_len = len;
-                }
-                a.seen = true;
-            }
-            else if (kind_is_float(a.kind))
-            {
-                const double v      = float_value(d, a.kind);
-                const bool   better = !a.seen || (a.op == FP_AGG_MIN ? v < a.fmin : v > a.fmax);
-
-                if (better)
-                {
-                    if (a.op == FP_AGG_MIN)
-                        a.fmin = v;
-                    else
-                        a.fmax = v;
-                }
-                a.seen = true;
-            }
-            else
-            {
-                const long long v      = int_value(d, a.kind);
-                const bool      better = !a.seen || (a.op == FP_AGG_MIN ? v < a.imin : v > a.imax);
-
-                if (better)
-                {
-                    if (a.op == FP_AGG_MIN)
-                        a.imin = v;
-                    else
-                        a.imax = v;
-                }
-                a.seen = true;
-            }
-        }
+        if (isnull) continue;
+        if (a.op == FP_AGG_COUNT)
+            a.count++;
+        else
+            acc_apply(a, d);
     }
+}
 
-    return publish(path, accs.data(), nops, nrows, capacity);
+/* A value read out of an executor slot, which the next row overwrites: the
+ * winner of a MIN/MAX (and the first SUM operand) is copied into the batch
+ * context. Runs with CurrentMemoryContext already the batch context. */
+static void
+reduce_ctx_slot(ReduceCtx *ctx, TupleTableSlot *slot)
+{
+    for (int k = 0; k < ctx->nops; k++)
+    {
+        ReduceAcc &a = ctx->accs[k];
+
+        if (a.op == FP_AGG_COUNT_ALL)
+        {
+            a.count++;
+            continue;
+        }
+
+        if (slot->tts_isnull[a.column]) continue;
+        if (a.op == FP_AGG_COUNT)
+        {
+            a.count++;
+            continue;
+        }
+
+        Datum d = slot->tts_values[a.column];
+
+        if (a.is_numeric)
+        {
+            /* Own the value: the accumulator outlives the slot's row. */
+            struct varlena *v  = pg_detoast_datum(reinterpret_cast<struct varlena *>(DatumGetPointer(d)));
+            Size            n  = VARSIZE_ANY(v);
+            char           *p  = static_cast<char *>(palloc(n));
+
+            std::memcpy(p, v, n);
+            acc_apply(a, PointerGetDatum(p));
+        }
+        else if (a.is_varlena)
+        {
+            const char *data;
+            int         len;
+            int         cmp = 0;
+
+            varlena_value(d, &data, &len);
+            if (a.seen) cmp = textual_cmp(data, len, a.best, a.best_len, a.kind, a.collation);
+
+            const bool better = !a.seen || (a.op == FP_AGG_MIN ? cmp < 0 : cmp > 0);
+
+            if (better)
+            {
+                char *owned = static_cast<char *>(palloc(static_cast<size_t>(len) + 1));
+
+                std::memcpy(owned, data, static_cast<size_t>(len));
+                owned[len] = '\0';
+                a.best     = owned;
+                a.best_len = len;
+            }
+            a.seen = true;
+        }
+        else
+            acc_apply(a, d);
+    }
+}
+
+uint64
+reduce_ctx_publish(ReduceCtx *ctx, const char *path, size_t capacity)
+{
+    return publish(path, ctx->accs.data(), ctx->nops, ctx->nrows, capacity);
+}
+
+/* ---- the streaming receiver --------------------------------------------- */
+
+struct ReduceReceiver
+{
+    DestReceiver pub;
+    ReduceCtx   *ctx;
+    MemoryContext batch; /* where accumulate temporaries may live */
+};
+
+bool
+reduce_receive(TupleTableSlot *slot, DestReceiver *self)
+{
+    ReduceReceiver *rx = reinterpret_cast<ReduceReceiver *>(self);
+    MemoryContext   old = MemoryContextSwitchTo(rx->batch);
+
+    /* Only the planned columns are read: a sum over one column of a wide result
+     * never deforms the rest. */
+    int want = 0;
+
+    for (int k = 0; k < rx->ctx->nops; k++)
+        if (rx->ctx->accs[k].op != FP_AGG_COUNT_ALL && rx->ctx->accs[k].column + 1 > want)
+            want = rx->ctx->accs[k].column + 1;
+
+    if (want > 0) slot_getsomeattrs(slot, want);
+
+    reduce_ctx_slot(rx->ctx, slot);
+    rx->ctx->nrows++;
+    MemoryContextSwitchTo(old);
+    return true;
+}
+
+void
+reduce_rx_startup([[maybe_unused]] DestReceiver *self, [[maybe_unused]] int operation,
+                  [[maybe_unused]] TupleDesc typeinfo)
+{
+}
+
+void
+reduce_rx_shutdown([[maybe_unused]] DestReceiver *self)
+{
+}
+
+void
+reduce_rx_destroy([[maybe_unused]] DestReceiver *self)
+{
+}
+
+} // namespace
+
+uint64
+fp::reduce_publish(const char *path, TupleDesc td, HeapTuple *tuples, uint64 nrows, const char *plan,
+                   size_t capacity)
+{
+    ReduceCtx ctx;
+
+    ctx.stable = CurrentMemoryContext;
+    ctx.nrows  = nrows;
+    reduce_ctx_init(&ctx, td, plan);
+
+    for (uint64 r = 0; r < nrows; r++) reduce_ctx_tuple_row(&ctx, td, tuples[r]);
+
+    return reduce_ctx_publish(&ctx, path, capacity);
+}
+
+/* The same reduce, driven from the portal instead of a materialised batch: the
+ * executor's slot is accumulated as it arrives, so no tuple is copied into a
+ * tuplestore and no `Datum` staging array is built. That is the shape the
+ * columnar path took in DB-ENCODE, where it was worth a third of the worker's
+ * turn; here it is the same rows without the copies in between. */
+uint64
+fp::reduce_fetch(Portal portal, const char *path, int64 batch, size_t capacity, const char *plan)
+{
+    MemoryContext batch_ctx =
+        AllocSetContextCreate(CurrentMemoryContext, "fastpostgres reduce batch", ALLOCSET_DEFAULT_SIZES);
+    MemoryContext old = MemoryContextSwitchTo(batch_ctx);
+
+    ReduceCtx ctx;
+
+    ctx.stable  = batch_ctx;
+    ctx.nrows   = 0;
+    reduce_ctx_init(&ctx, portal->tupDesc, plan);
+
+    ReduceReceiver rx;
+
+    std::memset(&rx, 0, sizeof(rx));
+    rx.pub.receiveSlot = reduce_receive;
+    rx.pub.rStartup    = reduce_rx_startup;
+    rx.pub.rShutdown   = reduce_rx_shutdown;
+    rx.pub.rDestroy    = reduce_rx_destroy;
+    rx.pub.mydest      = DestNone;
+    rx.ctx             = &ctx;
+    rx.batch           = batch_ctx;
+
+    MemoryContextSwitchTo(old);
+
+    PortalRunFetch(portal, FETCH_FORWARD, static_cast<long>(batch), &rx.pub);
+
+    uint64 nrows = ctx.nrows;
+
+    reduce_ctx_publish(&ctx, path, capacity);
+    MemoryContextDelete(batch_ctx);
+    return nrows;
 }
