@@ -23,6 +23,7 @@ EOF
 }
 
 case "$target" in
+  clickbench)   just clickbench "$@" ;;
   adbc)         just bench-adbc "$@" ;;
   arrow-memory) just arrow-memory-bench "$@" ;;
   "" | list | help) usage ;;

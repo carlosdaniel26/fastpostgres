@@ -11,7 +11,7 @@ Every number the project quotes is a line in a committed log under
 
 | class | command | the question it answers |
 |---|---|---|
-| rivals | `just rivals [target]` | how the ring compares with ADBC + Arrow, at its defaults and with every connection it can use |
+| rivals | `just rivals [target]` | how the ring compares with ADBC + Arrow and with psycopg, on ClickBench's `hits` and on the read-only shape, at one width |
 | internals | `just internals [target]` | what the row decode and the transport cost at the instruction, cache and port level - the evidence the design notes argue from |
 | adoption | `just adoption [target]` | what a published suite's own queries and protocol find, with our cell in its roster - [`adoption/`](adoption/), written up in [`ADOPTION.md`](ADOPTION.md) |
 
@@ -43,6 +43,7 @@ just rivals cache --quick
 | target | the question | record | method and caveats |
 |---|---|---|---|
 | `adbc` | the read against the Arrow ecosystem's own answer, same output | [`fastpostgres-vs-arrow.log`](results/fastpostgres-vs-arrow.log), [`-mixed`](results/fastpostgres-vs-arrow-mixed.log), [`-small`](results/fastpostgres-vs-arrow-small.log) | [`METHODOLOGY.md`](METHODOLOGY.md), [`WHY-IT-WINS.md`](WHY-IT-WINS.md), [`LIMITATIONS.md`](../docs/LIMITATIONS.md) |
+| `clickbench` | ClickBench's 43 queries against fast-postgres, ADBC + Arrow and psycopg at the same width | [`rivals/clickbench/`](rivals/clickbench/) | [`CLICKBENCH.md`](CLICKBENCH.md) |
 | `arrow-memory` | the same reads with the ring's buffer fixed: what each side holds | [`fastpostgres-vs-arrow-memory.log`](results/fastpostgres-vs-arrow-memory.log) | [`ARROW-MEMORY.md`](ARROW-MEMORY.md) |
 
 ## 2. Internals: `just internals [target]`

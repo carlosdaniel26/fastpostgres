@@ -71,7 +71,7 @@ _image_nogil:
 test:
     just _run tests.sh
 
-# the competitive benchmarks: adbc | arrow-memory
+# the competitive benchmarks: clickbench | adbc | arrow-memory
 rivals target="" *args:
     bench/dispatch/rivals.sh {{target}} {{args}}
 
@@ -91,6 +91,16 @@ charts target="" *args:
 # the deck set: the same numbers, rendered in the chosen presentation style
 presentation *args:
     bench/dispatch/presentation.sh {{args}}
+
+# ClickBench (rivals clickbench): the universal analytical workload — hits, 43
+# queries — against fast-postgres, ADBC + Arrow and psycopg, at one width. The
+# data is fetched once on the host (git-ignored); the image's own build runs it.
+[private]
+clickbench *args:
+    @python3 bench/rivals/clickbench/fetch.py
+    just _image
+    docker run --rm --shm-size={{shm}} -v {{justfile_directory()}}/bench/rivals/clickbench:/data:ro \
+        {{image}} python3 /data/run.py {{args}}
 
 # the ADBC + Arrow read comparison (rivals adbc): fast-postgres against the
 # Arrow ecosystem's own answer over the same rows
