@@ -359,7 +359,7 @@ uint64_t
 fpcolumn_capacity(const Dataset &ds)
 {
     const uint32_t null_bytes = (uint32_t)((ds.rows + 7) / 8);
-    uint64_t       off        = FASTPOSTGRES_COLUMNAR_FRAME;
+    uint64_t       off        = FASTPOSTGRES_COLUMNAR_FRAME + FASTPOSTGRES_COLUMNAR_TABLE(kDatasetColumns);
 
     for (int c = 0; c < kDatasetColumns; c++)
         off =

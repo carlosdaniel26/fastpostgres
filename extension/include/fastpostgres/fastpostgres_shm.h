@@ -43,20 +43,36 @@ static_assert(sizeof(FastpostgresShmHeader) == 64, "FastpostgresShmHeader must b
 #endif
 
 /* FPCOLUMN payload:
- *   magic[8] "FPCOLUMN", version u32, flags u32, ncols u32, nrows u64
+ *   magic[8] "FPCOLUMN", version u32, flags u32, ncols u32, nrows u64,
+ *   columns_off u64
+ *   at columns_off: ncols × u64, the absolute offset of each column's header
  *   per column: name_len u32, name, kind u8, pgtype u32, nulls bitmap, then
  *   data_len u64 and data: fixed-width values, or (text) an int32 offset table
  *   followed by the raw bytes.
  *
  * Each column's data is padded to 8-byte alignment relative to the payload
  * base, so the client can view it in place as a typed array.
+ *
+ * v3 replaced the sequential walk with the offset table: a column header may
+ * sit after a gap left by a reservation, so the writer never has to move data
+ * to make the frame look compact. data_len is still exact and the reader still
+ * sees one contiguous region per column.
  */
 #define FASTPOSTGRES_ALIGN8(x)      (((uint64_t)(x) + 7) & ~(uint64_t)7)
 #define FASTPOSTGRES_COLUMNAR_MAGIC "FPCOLUMN"
 /* 2: the binary kinds (date/time/timestamp/timestamptz/uuid/bytea). A reader
  * that does not know them must refuse the payload rather than guess — the frame
- * is checked against this number, so v1 and v2 cannot be mixed silently. */
-#define FASTPOSTGRES_COLUMNAR_VERSION 2
+ * is checked against this number, so v1 and v2 cannot be mixed silently.
+ * 3: the column offset table (columns_off); the reader no longer relies on the
+ * previous column's data_len to find the next header. */
+#define FASTPOSTGRES_COLUMNAR_VERSION 3
+
+/* Bytes the frame itself occupies: magic, version, flags, ncols, nrows, and the
+ * offset of the column table. */
+#define FASTPOSTGRES_COLUMNAR_FRAME (8u + 4u + 4u + 4u + 8u + 8u)
+
+/* Bytes the ncols-entry header-offset table occupies, aligned to 8. */
+#define FASTPOSTGRES_COLUMNAR_TABLE(ncols) FASTPOSTGRES_ALIGN8((uint64_t)(ncols) * 8)
 
 /* ---------------------------------------------------------------------------
  * Wire type helpers — format plumbing, kept out of the codec's core logic.
@@ -273,9 +289,11 @@ typedef struct FastpostgresColumn {
 } FastpostgresColumn;
 
 typedef struct FastpostgresReader {
-    const uint8_t *base; /* payload base; column data is aligned relative to it */
-    const uint8_t *p;
+    const uint8_t *base;  /* payload base; column data is aligned relative to it */
+    const uint8_t *p;     /* end of the column just decoded */
     const uint8_t *end;
+    const uint8_t *table; /* v3: ncols absolute header offsets */
+    uint32_t       next;  /* v3: the column reader_next will return */
     uint32_t       ncols;
     uint64_t       nrows;
 } FastpostgresReader;
@@ -287,8 +305,9 @@ fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
 {
     const uint8_t *p = (const uint8_t *)payload;
     uint32_t       version;
+    uint64_t       columns_off;
 
-    if (len < 8 || memcmp(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8) != 0) return 0;
+    if (len < FASTPOSTGRES_COLUMNAR_FRAME || memcmp(p, FASTPOSTGRES_COLUMNAR_MAGIC, 8) != 0) return 0;
     r->base = p;
     r->p    = p + 8;
     r->end  = p + len;
@@ -297,22 +316,37 @@ fastpostgres_reader_init(FastpostgresReader *r, const void *payload, size_t len)
     (void)fastpostgres_rd_u32(&r->p); /* flags */
     r->ncols = fastpostgres_rd_u32(&r->p);
     r->nrows = fastpostgres_rd_u64(&r->p);
+    columns_off = fastpostgres_rd_u64(&r->p);
+    if (columns_off > len || (uint64_t)r->ncols * 8 > len - columns_off) return 0;
+    r->table = p + columns_off;
+    r->next  = 0;
     return 1;
 }
 
-/* Decode the next column; returns 0 at the end of the payload. */
+/* Decode the next column; returns 0 at the end of the payload. The table entry
+ * is the authority for where the header starts, so reservations may leave gaps
+ * between columns without the reader knowing or caring. */
 static inline int
 fastpostgres_reader_next(FastpostgresReader *r, FastpostgresColumn *c)
 {
-    const uint8_t *p = r->p;
-    if (p == NULL || p >= r->end) return 0;
+    const uint8_t *p;
+    uint64_t       off;
+
+    if (r->next >= r->ncols) return 0;
+    memcpy(&off, r->table + (size_t)r->next * 8, 8);
+    if (off >= (uint64_t)(r->end - r->base)) return 0;
+    p = r->base + off;
+
+    if (p + 9 > r->end) return 0;
     c->name_len = fastpostgres_rd_u32(&p);
     c->name     = (const char *)p;
     p += c->name_len;
+    if (p + 5 > r->end) return 0;
     c->kind   = *p++;
     c->pgtype = fastpostgres_rd_u32(&p);
     c->nulls  = p;
     p += (r->nrows + 7) / 8;
+    if (p + 8 > r->end) return 0;
     c->data_len = fastpostgres_rd_u64(&p);
     p           = r->base + FASTPOSTGRES_ALIGN8((uint64_t)(p - r->base)); /* data is 8-byte aligned */
     c->data     = p;
@@ -321,6 +355,7 @@ fastpostgres_reader_next(FastpostgresReader *r, FastpostgresColumn *c)
     if (p > r->end) return 0;
     c->nrows = r->nrows;
     r->p     = p;
+    r->next++;
     return 1;
 }
 
@@ -718,18 +753,18 @@ fastpostgres_reduce_next(FastpostgresReduceReader *r, FastpostgresReduceSlot *s)
 /* ---------------------------------------------------------------------------
  * FPCOLUMN writer — the frame emitted by the extension (from tuples) and by the
  * client's generators (from synthetic arrays). Both fill only the column data;
- * the layout, the padding and the backpatched data_len live here once.
+ * the layout, the padding and the backpatched data_len live here once. The
+ * frame/table sizes are macros beside the version, above.
  * ------------------------------------------------------------------------- */
-
-/* Bytes the frame itself occupies: magic, version, flags, ncols, nrows. */
-#define FASTPOSTGRES_COLUMNAR_FRAME (8u + 4u + 4u + 4u + 8u)
 
 typedef struct FastpostgresColumnarWrite {
     char    *base;  /* payload base (8-byte aligned) */
     char    *p;     /* current write position */
+    char    *table; /* v3: ncols absolute header offsets, filled by write_column */
     char    *nulls; /* the column being written: its null bitmap, for the caller to fill */
     char    *lenp;  /* the column being written: its data_len, backpatched by write_end */
     uint32_t ncols;
+    uint32_t written;
     uint64_t nrows;
 } FastpostgresColumnarWrite;
 
@@ -756,13 +791,18 @@ fastpostgres_columnar_write_begin(FastpostgresColumnarWrite *w, char *out, uint3
     p += 4;
     fastpostgres_put_u64(p, nrows);
     p += 8;
+    fastpostgres_put_u64(p, (uint64_t)(p - out) + 8); /* columns_off: the table follows */
+    p += 8;
 
-    w->base  = out;
-    w->p     = p;
-    w->nulls = NULL;
-    w->lenp  = NULL;
-    w->ncols = ncols;
-    w->nrows = nrows;
+    w->base    = out;
+    w->table   = p;
+    w->ncols   = ncols;
+    w->written = 0;
+    w->nrows   = nrows;
+    w->nulls   = NULL;
+    w->lenp    = NULL;
+    memset(p, 0, (size_t)FASTPOSTGRES_COLUMNAR_TABLE(ncols));
+    w->p = out + FASTPOSTGRES_COLUMNAR_FRAME + FASTPOSTGRES_COLUMNAR_TABLE(ncols);
 }
 
 /* Write one column's frame; returns its 8-byte aligned data pointer and points
@@ -772,6 +812,10 @@ fastpostgres_columnar_write_column(FastpostgresColumnarWrite *w, const char *nam
                                    uint8_t kind, uint32_t pgtype, uint32_t null_bytes)
 {
     char *p = w->p;
+
+    if (w->written < w->ncols)
+        fastpostgres_put_u64(w->table + (size_t)w->written * 8, (uint64_t)(p - w->base));
+    w->written++;
 
     fastpostgres_put_u32(p, name_len);
     p += 4;

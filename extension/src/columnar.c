@@ -209,7 +209,7 @@ static uint64
 columnar_reserved_size(ColumnPlan *plans, int ncols, uint64 nrows)
 {
     uint32 null_bytes = (uint32)((nrows + 7) / 8);
-    uint64 off        = FASTPOSTGRES_COLUMNAR_FRAME;
+    uint64 off        = FASTPOSTGRES_COLUMNAR_FRAME + FASTPOSTGRES_COLUMNAR_TABLE(ncols);
     int    c;
 
     for (c = 0; c < ncols; c++)
@@ -398,7 +398,8 @@ columnar_note_used(ColumnPlan *plans, int ncols, uint64 nrows)
 static char *
 columnar_compact(ColumnPlan *plans, int ncols, uint64 old_rows, uint64 new_rows, char *out)
 {
-    char  *dst            = out + FASTPOSTGRES_COLUMNAR_FRAME;
+    char  *table          = out + FASTPOSTGRES_COLUMNAR_FRAME;
+    char  *dst            = out + FASTPOSTGRES_COLUMNAR_FRAME + FASTPOSTGRES_COLUMNAR_TABLE(ncols);
     uint32 new_null_bytes = (uint32)((new_rows + 7) / 8);
     int    c;
 
@@ -412,6 +413,7 @@ columnar_compact(ColumnPlan *plans, int ncols, uint64 old_rows, uint64 new_rows,
         char       *data        = out + data_off;
         uint64      used        = pl->used;
 
+        fastpostgres_put_u64(table + (size_t)c * 8, dst_off);
         if (pl->varlena && old_rows != new_rows)
             used = (uint64)(new_rows + 1) * 4 + (pl->used - (uint64)(old_rows + 1) * 4);
         else if (!pl->varlena)
@@ -450,6 +452,31 @@ columnar_compact(ColumnPlan *plans, int ncols, uint64 old_rows, uint64 new_rows,
         dst = data + used;
     }
     return dst;
+}
+
+/* Finish a frame without moving anything: every column's data_len is patched to
+ * the bytes actually used and the offset table already points at the reserved
+ * header positions. The payload ends at the furthest used byte, so trailing
+ * reservations cost nothing on the wire. */
+static char *
+columnar_finalize(ColumnPlan *plans, int ncols, char *out)
+{
+    char *end = out + FASTPOSTGRES_COLUMNAR_FRAME + FASTPOSTGRES_COLUMNAR_TABLE(ncols);
+    int   c;
+
+    for (c = 0; c < ncols; c++)
+    {
+        ColumnPlan *pl = &plans[c];
+        char       *p;
+
+        fastpostgres_put_u64(pl->header + pl->hdr_plain - 8, pl->used);
+
+        p = pl->header + pl->hdr_plain;
+        if (p > end) end = p;
+        p = pl->data + pl->used;
+        if (p > end) end = p;
+    }
+    return end;
 }
 
 /* Build the frame directly into its final column regions from a materialised
@@ -520,7 +547,7 @@ fastpostgres_columnar_build(HeapTuple *tuples, TupleDesc td, uint64 nrows, char 
     }
 
     columnar_note_used(plans, ncols, nrows);
-    final = columnar_compact(plans, ncols, nrows, nrows, out);
+    final = columnar_finalize(plans, ncols, out);
 
     if (tmp_ctx != NULL)
     {
@@ -784,11 +811,13 @@ columnar_receiver_finish(ColumnarReceiver *rx)
 
     columnar_note_used(rx->plans, rx->ncols, rx->nrows);
 
-    /* The text areas were reserved from a sample, so they almost always end
-     * shorter than the reservation even when the row count is exactly what was
-     * asked for. Compaction is what writes the exact data_len and the final
-     * payload size; the full-batch branch only has the gaps to close. */
-    final = columnar_compact(rx->plans, rx->ncols, rx->cap, rx->nrows, rx->out);
+    /* A full batch needs no move: reserve wrote every header where the table
+     * points, so this only patches the exact data_len. The last (partial)
+     * batch still compacts, which is one pass over that batch's bytes. */
+    if (rx->nrows == rx->cap)
+        final = columnar_finalize(rx->plans, rx->ncols, rx->out);
+    else
+        final = columnar_compact(rx->plans, rx->ncols, rx->cap, rx->nrows, rx->out);
 
     /* The header was written for the reservation; the frame carries the rows
      * that actually arrived. */
