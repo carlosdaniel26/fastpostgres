@@ -36,6 +36,7 @@ from bisect import bisect_right
 from typing import Any, Optional, Sequence
 
 from . import _client
+from . import partition
 
 apilevel = "2.0"
 threadsafety = 1
@@ -299,6 +300,13 @@ _AGG_OPS = {
 # instead of shipping the batch and reducing it in C++. 0 keeps the client-side
 # path, which is also the automatic fallback for an extension that predates the op.
 _AGG_PUSHDOWN = os.environ.get("FASTPOSTGRES_AGG_PUSHDOWN", "1") != "0"
+
+# How many rings one aggregate() may fan a simple single-table SELECT out over.
+# 1 — the default — is the single-ring path, unchanged; a call's `parallel=`
+# overrides this process-wide default. Only a plain SELECT from one base table
+# splits (fastpostgres.partition), and only when the driver can drive the rings
+# at once (_client.aggregate_frames); anything else keeps the one-ring path.
+_PARALLEL_ENV = "FASTPOSTGRES_PARALLEL"
 
 
 def _agg_plan(plan) -> str:
@@ -1396,7 +1404,8 @@ class Cursor:
         sql = operation if parameters is None else _inline(operation, parameters)
         return self._track(self._stream(sql, size))
 
-    def aggregate(self, operation: str, ops, parameters=None, size=_SHM_BATCH) -> dict:
+    def aggregate(self, operation: str, ops, parameters=None, size=_SHM_BATCH,
+                  parallel=None) -> dict:
         """Reduce a read-only SELECT in C++: numbers out, no row objects.
 
         `ops` maps a result name to ``(operation, column)``:
@@ -1425,6 +1434,19 @@ class Cursor:
         with the column's collation), date/time and numeric as well as numbers;
         ``count`` works on every kind. Numeric is exact on the worker path;
         with the pushdown off the columnar frame's float8 widening applies.
+
+        One call can also fan out over the ring pool: ``parallel=N`` — or the
+        process-wide ``FASTPOSTGRES_PARALLEL=N`` default, which it overrides —
+        splits a simple single-table SELECT into N disjoint ctid page ranges,
+        renders each as a ``Tid Range Scan``, and drives one ring per range
+        concurrently. Each range is reduced where its tuples are and the partial
+        scalars are folded with the serial path's own combine, so the answer is
+        the one scan's answer, exactly. Only a plain
+        ``SELECT ... FROM one_table [WHERE ...]`` splits
+        (see ``fastpostgres.partition``); a join, grouping, ordering, limit, set
+        operation, CTE, window or a subquery in FROM keeps the single-ring path,
+        as does a table too small to have one page per range. ``parallel=1``
+        (the default) never splits.
         """
         sql = operation if parameters is None else _inline(operation, parameters)
         if not self.connection._shm:
@@ -1461,90 +1483,183 @@ class Cursor:
 
         op_codes = [op for op, _column in internal]
 
-        info = _ring_acquire(self.connection._conn, block=self.connection._wait)
-        if info is None:
-            if pool_size() > 0:
-                _note_fallback("pool exhausted", warn=False)
-            raise NotSupportedError("aggregate() needs the fastpostgres extension (ring unavailable)")
-        ring, seg, _pid = info
-
-        try:
-            ring.open(seg, sql)
-            acc = None
-
-            # The pushdown: the worker accumulates the plan over each batch and
-            # publishes one scalar per op (FPREDUCE), so the full result never
-            # enters the segment. An older extension answers "unknown op" to the
-            # first request without consuming a row; the client-side reduce
-            # below is then the fallback, unchanged.
-            if _AGG_PUSHDOWN and hasattr(_client, "read_reduce") and hasattr(ring, "reduce"):
-                plan_str = _agg_plan(internal)
-                acc = [None] * len(internal)
-                seen = False
+        # The fan-out: a simple single-table SELECT splits into disjoint ctid page
+        # ranges, one ring per range, and the driver reduces all of them at once.
+        # None means "not split": the single-ring path below runs, unchanged.
+        acc = None
+        parts = int(parallel) if parallel is not None else int(os.environ.get(_PARALLEL_ENV, "1"))
+        if (
+            parts > 1
+            and _AGG_PUSHDOWN  # the fan-out is the worker's reduce, driven N times
+            and hasattr(_client, "aggregate_frames")
+            and hasattr(_client, "read_reduce_bytes")  # it ships with its frame decoder
+        ):
+            table = partition.table_of(sql)
+            relpages = None
+            if table is not None:
+                # relpages is only refreshed by VACUUM/ANALYZE, and a table that has
+                # only ever been inserted into still reports 0 — so ask the relation
+                # for its real size as well and take the larger. A stale page count
+                # would leave the tail of the relation outside every range.
+                quoted = table.replace("'", "''")
                 try:
+                    relpages = self.connection._conn.exec(
+                        "SELECT greatest(relpages, pg_relation_size(oid)"
+                        " / current_setting('block_size')::int)"
+                        f" FROM pg_class WHERE oid = '{quoted}'::regclass"
+                    ).rows[0][0]
+                except Exception:
+                    relpages = None  # not a table, not visible: the serial path says why
+            sqls = None if relpages is None else partition.partition_sql(sql, parts, int(relpages))
+            if sqls is not None:
+                infos = []  # [(ring, segment, pid)], one lease per partition
+                try:
+                    for _ in range(len(sqls)):
+                        lease = _ring_acquire(self.connection._conn, block=False)
+                        if lease is None:
+                            break
+                        infos.append(lease)
+                    # Fewer rings than ranges is fine — re-split down to the rings we
+                    # hold so every page is still covered. Fewer than two is not: the
+                    # single-ring path is simpler, and driving a prefix of the ranges
+                    # would silently drop the pages it skipped.
+                    if len(infos) >= 2 and len(infos) < len(sqls):
+                        sqls = partition.partition_sql(sql, len(infos), int(relpages))
+                    if len(infos) >= 2 and sqls is not None:
+                        # OPEN/REDUCE/CLOSE per ring is the driver's: do not drive
+                        # these rings from here, they are leased to that one call.
+                        frames = _client.aggregate_frames(
+                            [info[0] for info in infos],
+                            [info[1] for info in infos],
+                            sqls,
+                            _agg_plan(internal),
+                            size,
+                        )
+                        # One buffer per ring is the contract. Fewer would mean a
+                        # partition's contribution is missing, which reads as a
+                        # smaller answer: fall back rather than guess. None is the
+                        # driver's own "could not drive these rings".
+                        if frames is not None and len(frames) != len(infos):
+                            frames = None
+                        if frames:
+                            # Each buffer is one partition's run of FPREDUCE frames,
+                            # u32 LE length + payload, in plan order: scalars only,
+                            # so this is a handful of Python objects per batch and
+                            # never a single row object. A buffer that does not walk
+                            # exactly frame by frame is not trusted — a batch that
+                            # went missing would read as a smaller answer — so the
+                            # fold only becomes the result once every buffer is whole.
+                            combined = [None] * len(internal)
+                            walked = True
+                            for buf in frames:
+                                view = memoryview(buf)
+                                off, end = 0, len(view)
+                                while off + 4 <= end:
+                                    n = int.from_bytes(view[off : off + 4], "little")
+                                    off += 4
+                                    if off + n > end:
+                                        break  # truncated payload
+                                    values = _client.read_reduce_bytes(view[off : off + n])
+                                    off += n
+                                    if len(values) != len(internal):
+                                        raise ProgrammingError(
+                                            "aggregate: the worker returned a different plan"
+                                        )
+                                    _agg_combine(combined, op_codes, values)
+                                if off != end:
+                                    walked = False
+                                    break
+                            if walked:
+                                acc = combined
+                finally:
+                    for info in infos:  # every lease goes back, on every path
+                        _ring_release(info)
+
+        if acc is None:
+            info = _ring_acquire(self.connection._conn, block=self.connection._wait)
+            if info is None:
+                if pool_size() > 0:
+                    _note_fallback("pool exhausted", warn=False)
+                raise NotSupportedError("aggregate() needs the fastpostgres extension (ring unavailable)")
+            ring, seg, _pid = info
+
+            try:
+                ring.open(seg, sql)
+                acc = None
+
+                # The pushdown: the worker accumulates the plan over each batch and
+                # publishes one scalar per op (FPREDUCE), so the full result never
+                # enters the segment. An older extension answers "unknown op" to the
+                # first request without consuming a row; the client-side reduce
+                # below is then the fallback, unchanged.
+                if _AGG_PUSHDOWN and hasattr(_client, "read_reduce") and hasattr(ring, "reduce"):
+                    plan_str = _agg_plan(internal)
+                    acc = [None] * len(internal)
+                    seen = False
+                    try:
+                        while True:
+                            n = ring.reduce(seg, plan_str, size)
+                            values = _client.read_reduce(seg)
+                            if len(values) != len(internal):
+                                raise ProgrammingError("aggregate: the worker returned a different plan")
+                            _agg_combine(acc, op_codes, values)
+                            seen = True
+                            if n == 0:
+                                break
+                    except RuntimeError as exc:
+                        msg = str(exc)
+                        if not seen and "unknown op" in msg:
+                            acc = None
+                        elif msg.startswith("reduce: "):
+                            raise ProgrammingError(msg) from None
+                        else:
+                            raise
+
+                if acc is None:
+                    seen = False
+                    resolved = None  # [(op, column index)], once the metadata is known
+                    acc = [None] * len(internal)
                     while True:
-                        n = ring.reduce(seg, plan_str, size)
-                        values = _client.read_reduce(seg)
-                        if len(values) != len(internal):
-                            raise ProgrammingError("aggregate: the worker returned a different plan")
-                        _agg_combine(acc, op_codes, values)
+                        n = ring.next(size)
+                        if n == 0 and seen:
+                            break
+                        if resolved is None:
+                            if any(column is not None for _, column in internal):
+                                batch = _client.read(seg)  # metadata only: the names and their order
+                                index = {c.name: i for i, c in enumerate(batch.columns)}
+                                resolved = []
+                                for op, column in internal:
+                                    if column is None:
+                                        resolved.append((op, -1))
+                                        continue
+                                    if isinstance(column, int):
+                                        at = column if column >= 0 else len(index) + column
+                                        if not 0 <= at < len(index):
+                                            raise ProgrammingError(f"aggregate: column index {column} is out of range")
+                                    else:
+                                        try:
+                                            at = index[column]
+                                        except KeyError:
+                                            raise ProgrammingError(
+                                                f"aggregate: no column {column!r} in the result"
+                                            ) from None
+                                    resolved.append((op, at))
+                            else:
+                                resolved = [(op, -1) for op, _column in internal]
+                        try:
+                            values = _client.reduce(seg, resolved)
+                        except ValueError as exc:
+                            raise ProgrammingError(str(exc)) from exc
+                        _agg_combine(acc, [op for op, _at in resolved], values)
                         seen = True
                         if n == 0:
                             break
-                except RuntimeError as exc:
-                    msg = str(exc)
-                    if not seen and "unknown op" in msg:
-                        acc = None
-                    elif msg.startswith("reduce: "):
-                        raise ProgrammingError(msg) from None
-                    else:
-                        raise
-
-            if acc is None:
-                seen = False
-                resolved = None  # [(op, column index)], once the metadata is known
-                acc = [None] * len(internal)
-                while True:
-                    n = ring.next(size)
-                    if n == 0 and seen:
-                        break
-                    if resolved is None:
-                        if any(column is not None for _, column in internal):
-                            batch = _client.read(seg)  # metadata only: the names and their order
-                            index = {c.name: i for i, c in enumerate(batch.columns)}
-                            resolved = []
-                            for op, column in internal:
-                                if column is None:
-                                    resolved.append((op, -1))
-                                    continue
-                                if isinstance(column, int):
-                                    at = column if column >= 0 else len(index) + column
-                                    if not 0 <= at < len(index):
-                                        raise ProgrammingError(f"aggregate: column index {column} is out of range")
-                                else:
-                                    try:
-                                        at = index[column]
-                                    except KeyError:
-                                        raise ProgrammingError(
-                                            f"aggregate: no column {column!r} in the result"
-                                        ) from None
-                                resolved.append((op, at))
-                        else:
-                            resolved = [(op, -1) for op, _column in internal]
-                    try:
-                        values = _client.reduce(seg, resolved)
-                    except ValueError as exc:
-                        raise ProgrammingError(str(exc)) from exc
-                    _agg_combine(acc, [op for op, _at in resolved], values)
-                    seen = True
-                    if n == 0:
-                        break
-        finally:
-            try:
-                ring.close()
-            except Exception:
-                pass
-            _ring_release(info)
+            finally:
+                try:
+                    ring.close()
+                except Exception:
+                    pass
+                _ring_release(info)
 
         self.connection.shm_reads += 1
         result = {}
