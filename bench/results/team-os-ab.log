@@ -1,0 +1,123 @@
+# team/os — a read-only columnar store in a sealed memfd (H9/B2)
+
+#
+# Change: `fastpostgres_columnar_load(query, capacity)` bulk-loads a read-only
+# SELECT into a sealed anonymous memfd laid out as FPCOLUMN (null bitmap, int32
+# varlena offset table, 8-byte-aligned fixed-width runs), keeps the descriptor
+# open in the backend, and returns "FPQCOL1 <pid> <fd> <bytes> <rows>".  The
+# client opens /proc/<pid>/fd/<fd> read-only, maps it once, and scans the columns
+# in place (`ColumnarTable.reduce`, `.scan_all`, and the ordinary zero-copy
+# column views).  No table AM, no MVCC, no WAL: this is a bulk-loaded snapshot.
+#
+# The same command runs on both images, one at a time, under /tmp/fpq-bench.lock.
+# The script is bind-mounted because fpq-baseline predates this file; both images
+# execute the same bytes.  The baseline image has no bulk-load API, so it prints
+# the heap path and "columnar.path: unavailable".
+#
+# The heap players are the same on both images and are the control: the baseline
+# image and the change image differ by a few percent (process-to-process noise),
+# which is the scale to read every delta against.
+
+## Build (change image, from this worktree)
+
+    flock /tmp/fpq-bench.lock -c 'docker build -q --target dev -t fpq-os -f docker/Dockerfile .'
+    -> sha256:dd1a34e5de47889538f2a513facce27442afd3e79e5da11b464f9b8c21c865c9
+
+## Command — 100K (the same on both images)
+
+    SCRIPT=/home/carlos/.local/share/opencode/worktree/b2743c/team-os/bench/jobs/columnar_scan.py
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -v $SCRIPT:/usr/local/bin/columnar_scan.py:ro \
+      -e BENCH_GIT_REV=baseline fpq-baseline python3 /usr/local/bin/columnar_scan.py 100000'
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g \
+      -v $SCRIPT:/usr/local/bin/columnar_scan.py:ro \
+      -e BENCH_GIT_REV=os fpq-os python3 /usr/local/bin/columnar_scan.py 100000'
+
+Three alternating runs per image (baseline, os, baseline, os, baseline, os);
+the result lines below are the medians and every per-run value is listed so the
+spread travels with the number.  Page faults are the client process's own
+`getrusage(RUSAGE_SELF)` deltas around each timed region.
+
+## Baseline — ENV (run 1; identical for every rep)
+
+    ### ENV
+    cpu: AMD Ryzen 7 7700 8-Core Processor
+    mem: 30 GiB
+    ghz: 3.8
+    cores: 8
+    postgres: 18.6
+    python: 3.13.5
+    sqlalchemy: 2.0.40
+    pyarrow: 26.0.0
+    adbc: 1.13.0
+    shape: bench
+    git: baseline
+    shm: 3.0G
+    ### END ENV
+
+## Baseline — 100K, runs
+
+    heap.relation.bytes: 7651328
+    heap.aggregate.rows_s: 7384513, 7077757, 7585634     median 7384513
+    heap.aggregate.ms:     13.542,  14.129,  13.183      median  13.542
+    heap.aggregate.faults: 0 0 (warm: the mapping is faulted by the warm-up)
+    heap.stream.rows_s:    8272457, 8289998, 8329814     median 8289998
+    heap.stream.ms:        12.088,  12.063,  12.005      median  12.063
+    heap.stream.faults:    0 0
+    columnar.path: unavailable (baseline image has no bulk-load API)
+
+## Change — ENV (run 1; identical for every rep)
+
+    ### ENV
+    cpu: AMD Ryzen 7 7700 8-Core Processor
+    mem: 30 GiB
+    ghz: 3.8
+    cores: 8
+    postgres: 18.6
+    python: 3.13.5
+    sqlalchemy: 2.0.40
+    pyarrow: 26.0.0
+    adbc: 1.13.0
+    shape: bench
+    git: os
+    shm: 3.0G
+    ### END ENV
+
+## Change — 100K, runs
+
+    heap.relation.bytes: 7651328
+    heap.aggregate.rows_s: 7871129, 8399069, 7656157     median 7871129
+    heap.aggregate.ms:     12.705,  11.906,  13.061      median  12.705
+    heap.aggregate.faults: 0 0
+    heap.stream.rows_s:    8801517, 9306483, 8413264     median 8801517
+    heap.stream.ms:        11.362,  10.745,  11.886      median  11.362
+    heap.stream.faults:    0 0
+
+    columnar.load.ms:       12.388, 11.609, 12.523       median 12.388
+    columnar.load.faults:   3 0 (minor/major; the memfd is already in page cache)
+    columnar.bytes:         3877790  (fixed runs + offset tables + text bytes)
+    columnar.heap.x:        0.507    (0.51x the 7,651,328-byte heap relation)
+    columnar.scan.cold.ms:  0.791, 0.798, 0.786          median 0.791
+    columnar.scan.cold.faults: 1 0   (THP: 3.88 MB spans two 2 MiB pages;
+                                      the header faulted the first)
+    verify.reduce:          ok       (sum/count/max equal the heap player's)
+    columnar.scan.rows_s:   127148492, 127717836, 127654251  median 127654251
+    columnar.scan.ms:       0.786, 0.783, 0.783          median 0.783
+    columnar.scan.faults:   0 0 (warm)
+    columnar.scan.bytes_s:  4930551493, 4952629455, 4950163781  median 4950163781
+    columnar.reduce.rows_s: 79118431, 82406127, 80442175 median 80442175
+    columnar.reduce.ms:     1.264, 1.214, 1.243          median 1.243
+    columnar.reduce.faults: 0 0
+    columnar.scan.checksum: 18348572660784856466 (same in all three runs)
+
+### AB columnar.reduce 80.44M rows/s vs baseline heap.aggregate 7.38M = +989.5% (10.89x; 10.22x vs the same image's 7.87M heap path — the two heap medians differ by 6.6%, the run-to-run noise); full in-place scan 127.65M rows/s vs baseline heap.stream 8.29M = +1440.0% (15.40x, but the baseline stream only builds views while the columnar scan reads every value byte — a one-sided comparison, kept as a ceiling); one load + one reduce 13.631 ms vs 13.542 ms = 0.7% more latency (a wash, the copy is not free), two reduces 14.874 ms vs 27.084 ms = 1.82x, ten reduces 24.818 ms vs 135.42 ms = 5.46x; break-even at ~1.01 extra scans; client minor faults per warm reduce 0, per first full scan 1 (THP-backed memfd), and the store is 0.51x the heap relation.
+
+## Correctness gate
+
+    flock /tmp/fpq-bench.lock -c 'docker run --rm --shm-size=3g fpq-os tests.sh'
+    -> extension pg_regress: 1/1 passed (the SQL surface now lists
+       fastpostgres_columnar_load as well as the ring functions)
+    -> client unittest: Ran 60 tests ... OK
+       (new python/tests/test_columnar.py: load, projection, in-place reduce
+       against the server's sums, full-byte scan, text out of the mapping, and
+       a non-SELECT refusal)

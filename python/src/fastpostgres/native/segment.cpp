@@ -7,9 +7,16 @@
  * the header. */
 #include "segment.hpp"
 
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <fcntl.h>
 #include <mutex>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include <x86intrin.h>
@@ -31,6 +38,20 @@ typedef struct {
  * with the GIL held, once the GIL stops being the lock that hides it. */
 static std::mutex           g_read_maps_lock;
 static std::vector<ReadMap> g_read_maps;
+
+/* Bulk-loaded columnar tables: (pid, fd) names an immutable sealed memfd. The
+ * mapping is kept for the process lifetime and never rewritten, so unlike the
+ * streaming segment above there is no next-batch invalidation. */
+typedef struct {
+    int      pid;
+    int      fd;
+    uint64_t size; /* the size the caller asked for (0 = fstat) */
+    void    *base;
+    uint64_t len;
+} ColumnarMap;
+
+static std::mutex                 g_columnar_lock;
+static std::vector<ColumnarMap>   g_columnar_maps;
 
 static void *
 read_map_get(const char *path, const std::string &name, size_t *size_out)
@@ -118,17 +139,10 @@ result_from(const std::vector<FastpostgresColumn> &cols, uint64_t nrows, PyObjec
     return fp_result(fields, types, rows, (long)nrows);
 }
 
-/* read(seg): the columnar frame as zero-copy column views. */
+/* Turn one FPCOLUMN payload into the Segment of zero-copy column views. */
 static PyObject *
-segment_read(PyObject *, PyObject *args)
+segment_from_payload(const uint8_t *payload, uint64_t payload_len)
 {
-    const char *name;
-    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
-
-    uint64_t       payload_len = 0;
-    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
-    if (payload == nullptr) return nullptr;
-
     FastpostgresReader rd;
     if (!fastpostgres_reader_init(&rd, payload, payload_len))
     {
@@ -173,6 +187,187 @@ segment_read(PyObject *, PyObject *args)
     segment->row_count = PyLong_FromLongLong((long long)rd.nrows);
     return (PyObject *)segment;
 }
+
+/* read(seg): the columnar frame as zero-copy column views. */
+static PyObject *
+segment_read(PyObject *, PyObject *args)
+{
+    const char *name;
+    if (!PyArg_ParseTuple(args, "s", &name)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return segment_from_payload(payload, payload_len);
+}
+
+/* Map a bulk-loaded columnar memfd, via the backend that loaded it. */
+const uint8_t *
+fp_columnar_map(int pid, int fd, uint64_t size, uint64_t *payload_len)
+{
+    std::lock_guard<std::mutex> held(g_columnar_lock);
+
+    for (ColumnarMap &m : g_columnar_maps)
+    {
+        if (m.pid == pid && m.fd == fd && m.size == size)
+        {
+            *payload_len = m.len;
+            return (const uint8_t *)m.base;
+        }
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, fd);
+
+    int h = open(path, O_RDONLY | O_CLOEXEC);
+    if (h < 0)
+    {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        return nullptr;
+    }
+
+    struct stat st;
+    if (fstat(h, &st) != 0)
+    {
+        close(h);
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        return nullptr;
+    }
+
+    uint64_t len = size ? size : (uint64_t)st.st_size;
+    if ((uint64_t)st.st_size < len)
+    {
+        close(h);
+        PyErr_Format(PyExc_ValueError,
+                     "columnar memfd is %lld bytes, but %llu were asked for",
+                     (long long)st.st_size, (unsigned long long)len);
+        return nullptr;
+    }
+
+    void *base = mmap(nullptr, (size_t)len, PROT_READ, MAP_SHARED, h, 0);
+    close(h);
+    if (base == MAP_FAILED)
+    {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return nullptr;
+    }
+
+    FastpostgresReader probe;
+    if (!fastpostgres_reader_init(&probe, base, len))
+    {
+        munmap(base, (size_t)len);
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        return nullptr;
+    }
+
+    g_columnar_maps.push_back({pid, fd, size, base, len});
+    *payload_len = len;
+    return (const uint8_t *)base;
+}
+
+static PyObject *
+columnar_attach(PyObject *, PyObject *args)
+{
+    int                pid, fd;
+    unsigned long long size;
+
+    if (!PyArg_ParseTuple(args, "iiK", &pid, &fd, &size)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map(pid, fd, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return segment_from_payload(payload, payload_len);
+}
+
+/* FNV-1a over 8-byte words (and a byte tail), chosen only so the full-column
+ * walk has a data dependency on every byte it reads: the point is to touch
+ * every page, not to be cryptographic.  Hashing a word at a time keeps the
+ * chain from hiding the memory traffic it is supposed to measure. */
+static inline uint64_t
+hash_bytes(const uint8_t *p, uint64_t n, uint64_t h)
+{
+    uint64_t i = 0;
+
+    for (; i + 8 <= n; i += 8)
+    {
+        uint64_t w;
+
+        memcpy(&w, p + i, 8);
+        h ^= w;
+        h *= 1099511628211ULL;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++)
+    {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* columnar_scan(pid, fd, size) -> (rows, data_bytes, checksum, ncols)
+ *
+ * A real scan of the whole table: every fixed-width byte and every varlena
+ * payload byte is read where it lies, with no per-row object and no copy.  The
+ * checksum is a deterministic function of the payload, and `data_bytes` is the
+ * column bytes touched (null slots for fixed kinds included, matching data_len),
+ * so a caller can report bytes/s and page faults for the whole SELECT *. */
+static PyObject *
+columnar_scan(PyObject *, PyObject *args)
+{
+    int                pid, fd;
+    unsigned long long size;
+
+    if (!PyArg_ParseTuple(args, "iiK", &pid, &fd, &size)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map(pid, fd, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    FastpostgresReader rd;
+    if (!fastpostgres_reader_init(&rd, payload, payload_len))
+    {
+        PyErr_SetString(PyExc_ValueError, "not a fastpostgres columnar payload");
+        return nullptr;
+    }
+
+    const uint64_t rows     = rd.nrows;
+    const uint32_t ncols    = rd.ncols;
+    uint64_t       bytes    = 0;
+    uint64_t       checksum = 1469598103934665603ULL;
+
+    Py_BEGIN_ALLOW_THREADS;
+    for (uint32_t c = 0; c < ncols; c++)
+    {
+        FastpostgresColumn col;
+
+        if (!fastpostgres_reader_next(&rd, &col)) break;
+
+        if (fastpostgres_kind_is_varlena(col.kind))
+        {
+            const uint32_t *off   = (const uint32_t *)col.data;
+            uint64_t        total = rows ? (uint64_t)off[rows] : 0;
+
+            bytes += total;
+            checksum = hash_bytes(col.bytes, total, checksum);
+        }
+        else
+        {
+            int      width = fastpostgres_kind_width(col.kind);
+            uint64_t n     = width > 0 ? rows * (uint64_t)width : 0;
+
+            bytes += n;
+            checksum = hash_bytes(col.data, n, checksum);
+        }
+    }
+    Py_END_ALLOW_THREADS;
+
+    return Py_BuildValue("(KKKn)", (unsigned long long)rows, (unsigned long long)bytes,
+                         (unsigned long long)checksum, (Py_ssize_t)ncols);
+}
+
 
 /* Materialize the chunk as typed row tuples (the DB-API fast path). */
 static PyObject *
@@ -266,6 +461,10 @@ segment_read_rows(PyObject *, PyObject *args)
 static PyMethodDef segment_methods[] = {
     {"read", segment_read, METH_VARARGS, "read(segName) -> Segment (zero-copy column views)"},
     {"read_rows", segment_read_rows, METH_VARARGS, "read_rows(segName) -> Result (typed tuple rows)"},
+    {"columnar_attach", columnar_attach, METH_VARARGS,
+     "columnar_attach(pid, fd, size) -> Segment (read-only memfd, zero-copy column views)"},
+    {"columnar_scan", columnar_scan, METH_VARARGS,
+     "columnar_scan(pid, fd, size) -> (rows, data_bytes, checksum, ncols) (in-place full walk)"},
     {nullptr},
 };
 

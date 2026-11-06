@@ -5,8 +5,8 @@
 # Both suites, against the entrypoint's fresh PostgreSQL:
 #
 #   extension   pg_regress (`make installcheck`): the extension installs, its
-#               version is the control file's, and its SQL surface is the two
-#               ring functions
+#               version is the control file's, and its SQL surface is the ring
+#               functions plus the columnar bulk-load
 #   client      the Python suite: the DBAPI and the dialect against the live
 #               server, including the ring's round trip over /dev/shm
 set -euo pipefail

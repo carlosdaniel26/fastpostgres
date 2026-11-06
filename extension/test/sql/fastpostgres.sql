@@ -15,7 +15,8 @@ WHERE proname LIKE 'fastpostgres\_%'
 ORDER BY proname, args;
 
 -- All are STRICT VOLATILE C functions: the ring's start (one overload for the
--- shm default, one that names a transport) and its stop.
+-- shm default, one that names a transport), its stop, and the columnar
+-- bulk-load (query text, capacity bigint).
 SELECT proname, provolatile, proisstrict, pronargs
 FROM pg_proc
 WHERE proname LIKE 'fastpostgres\_%'

@@ -162,19 +162,11 @@ walk_float(const FastpostgresColumn *c, const AggOp *ops, AggAcc *accs, size_t n
     }
 }
 
-/* reduce(seg, [(op, column), ...]) -> [value, ...] in plan order.
- *
- * The payload is mapped under the GIL (the mapping cache and every error path
- * need it), then the whole walk runs without it: the loops read the mapped bytes
- * and nothing else. */
+/* The reduce itself, over an FPCOLUMN payload already mapped by the caller.
+ * Shared by the streaming segment name and the bulk-loaded memfd descriptor. */
 static PyObject *
-aggregate_reduce(PyObject *, PyObject *args)
+reduce_payload(const uint8_t *payload, uint64_t payload_len, PyObject *plan)
 {
-    const char *name;
-    PyObject   *plan;
-
-    if (!PyArg_ParseTuple(args, "sO", &name, &plan)) return nullptr;
-
     PyObject *seq = PySequence_Fast(plan, "reduce(seg, ops): ops must be a sequence of (op, column)");
     if (seq == nullptr) return nullptr;
     const Py_ssize_t nops = PySequence_Fast_GET_SIZE(seq);
@@ -203,10 +195,6 @@ aggregate_reduce(PyObject *, PyObject *args)
         accs[(size_t)k] = AggAcc{};
     }
     Py_DECREF(seq);
-
-    uint64_t       payload_len = 0;
-    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
-    if (payload == nullptr) return nullptr;
 
     FastpostgresReader rd;
     if (!fastpostgres_reader_init(&rd, payload, payload_len))
@@ -324,9 +312,49 @@ aggregate_reduce(PyObject *, PyObject *args)
     return out;
 }
 
+/* reduce(seg, [(op, column), ...]) -> [value, ...] in plan order.
+ *
+ * The payload is mapped under the GIL (the mapping cache and every error path
+ * need it), then the whole walk runs without it: the loops read the mapped bytes
+ * and nothing else. */
+static PyObject *
+aggregate_reduce(PyObject *, PyObject *args)
+{
+    const char *name;
+    PyObject   *plan;
+
+    if (!PyArg_ParseTuple(args, "sO", &name, &plan)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_segment_payload(name, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return reduce_payload(payload, payload_len, plan);
+}
+
+/* columnar_reduce(pid, fd, size, [(op, column), ...]): the same reduce over a
+ * bulk-loaded, immutable memfd. */
+static PyObject *
+columnar_reduce(PyObject *, PyObject *args)
+{
+    int                pid, fd;
+    unsigned long long size;
+    PyObject          *plan;
+
+    if (!PyArg_ParseTuple(args, "iiKO", &pid, &fd, &size, &plan)) return nullptr;
+
+    uint64_t       payload_len = 0;
+    const uint8_t *payload     = fp_columnar_map(pid, fd, (uint64_t)size, &payload_len);
+    if (payload == nullptr) return nullptr;
+
+    return reduce_payload(payload, payload_len, plan);
+}
+
 static PyMethodDef aggregate_methods[] = {
     {"reduce", aggregate_reduce, METH_VARARGS,
      "reduce(seg, [(agg_op, column_index), ...]) -> list of scalars (no Python objects per row)"},
+    {"columnar_reduce", columnar_reduce, METH_VARARGS,
+     "columnar_reduce(pid, fd, size, [(agg_op, column_index), ...]) -> list of scalars"},
     {nullptr},
 };
 
