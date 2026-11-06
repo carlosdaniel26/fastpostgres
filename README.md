@@ -258,6 +258,7 @@ objects is the DB-API compatibility path, and it is GIL-bound — on a
 |---|---|---|
 | `FASTPOSTGRES_SHM_POOL` | sized from the machine and the server, at most 8 | how many rings (each one background worker) a process may create. `0` turns the shared-memory path off and every read stays on libpq |
 | `FASTPOSTGRES_SEGMENT_BYTES` | 1 GiB | capacity of each data segment, in bytes; clamped to 64 KiB - 1 GiB. A stream alternates two of them. It is virtual, not resident: pages appear as batches are written |
+| `FASTPOSTGRES_BATCH` | 100000 | rows per ring batch. The batch is what a data segment holds, so this is the memory-per-ring lever: 25k puts ~1/4 the payload in each segment and keeps the client's working set in cache, at more per-batch fixed cost in the worker |
 | `FASTPOSTGRES_SHM_BYTES` | unset | the whole shared-memory budget a process may spend on data segments (`3g`, `512m` or bytes). Split over two segments per ring in the pool; `FASTPOSTGRES_SEGMENT_BYTES` overrides it. Charts print the resolved line |
 
 On the server side, `max_worker_processes` bounds how many rings (background workers) can exist at once; when the budget is exhausted a read falls back to libpq and the client warns once.

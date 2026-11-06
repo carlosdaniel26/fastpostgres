@@ -285,7 +285,11 @@ def _compiled(statement) -> str:
 
 # ---- Connection / Cursor --------------------------------------------------
 
-_SHM_BATCH = 100000
+# Rows per batch: the unit of both the ring's work and each data segment's
+# footprint. Smaller batches put less in each segment (less resident memory per
+# ring, and a client working set that stays in cache) at the cost of more
+# per-batch fixed cost in the worker. FASTPOSTGRES_BATCH overrides it.
+_SHM_BATCH = max(1, int(os.environ.get("FASTPOSTGRES_BATCH", "100000")))
 _READ_RE = re.compile(r"^(select|values|table)\b", re.I | re.S)
 
 # The C++ reduce's operations (fastpostgres/native/aggregate.cpp).
