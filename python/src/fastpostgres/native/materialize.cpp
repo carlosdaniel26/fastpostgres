@@ -9,7 +9,10 @@
  *
  * The contract is deliberately narrow; orm.py's docstring states what a
  * materialized instance cannot do. Keys are the model's attribute keys, in the
- * same order as the row tuples.
+ * same order as the row tuples. This kernel is only reached after orm.py has
+ * proved the model is flat; a mapper with relationships, inheritance,
+ * validators, deferred columns, composites or versioning is materialized as
+ * stock SQLAlchemy instances in Python instead.
  */
 #include "materialize.hpp"
 

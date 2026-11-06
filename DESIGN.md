@@ -1178,3 +1178,123 @@ same-tree cells, not across the merge.)
   runs the whole suite green (including a new 8-ring test that exceeds the
   budget and proves the multiplex); the default keeps the 1:1 engine until the
   eventfd handshake has a deployment story for cross-user clients.
+
+# The ORM materializer: a two-mode contract (ws/orm-semantics)
+
+This is the consumer-side companion to the storage path above, and it is not a
+storage change.  The native kernel is still `python/src/fastpostgres/native/materialize.cpp`:
+allocate the model instance, fill its `__dict__` with the row's columns, append
+it.  What was missing was an honest answer for a model the kernel cannot honor:
+before this workstream it produced objects with no `InstanceState`, so a
+relationship, a validator or `inspect()` failed later, after the read had
+succeeded.  `fastpostgres.orm.materialize` now checks the mapper once, per
+class, and picks one of two modes.
+
+### The contract
+
+| | fast path (flat model) | fallback (anything else) |
+|---|---|---|
+| object | model instance, columns in `__dict__` | stock ORM instance + real `InstanceState` |
+| session | none | none |
+| identity | no key, no identity map | detached key when the PK was materialized, else transient |
+| `inspect(obj)` | `NoInspectionAvailable` | a real `InstanceState` |
+| relationships | absent by construction | unloaded; access raises `DetachedInstanceError` (stock detached behavior) |
+| assignment | plain `__dict__` write; no validation, no history, never persisted | normal instrumentation: validators run, history is recorded |
+| `__repr__` | the class's `__repr__`, else Python's default | same |
+
+The fast path is selected only when `mapper.relationships` is empty, there is
+no `inherits`/`polymorphic_on`, no `version_id_col`, no `mapper.validators`, no
+composites, no deferred or raiseload columns, and every mapper property is a
+single-column `ColumnProperty` (so no synonyms or multi-column properties).
+A partial `keys` projection also falls back: the native kernel has no way to
+represent an unloaded attribute, and an instance without instrumentation turns
+a missing attribute into `UnmappedInstanceError`, which is worse than a slow
+correct object.
+
+The fallback is built with `manager_of_class(model).new_instance()` and
+`instance_dict`, not `model(**values)`: `__init__` is not called and the row is
+written straight into the instance dict, exactly as query loading does.  When
+the primary key columns are present, `make_transient_to_detached` gives the
+object its real identity key, so it behaves like a loaded-then-expunged object:
+`session.merge(obj)` is the attach path, and a relationship read fails loudly
+rather than returning an empty collection for a row nobody loaded.  A model
+quirk in that conversion leaves the object transient rather than turning the
+read into an error; it still has real instrumentation.  For a polymorphic
+mapper the row's discriminator selects the mapped subclass, so a
+`polymorphic_identity="sub"` row comes back as the subclass rather than a base
+instance; if the discriminator is not in the materialized keys, the base class
+is used.
+
+### Defaults, validators, events
+
+- Column `default=`/`server_default=` are INSERT-time values.  Stock ORM
+  hydration does not apply them either; a read row already carries the stored
+  value.  They are never applied here, and a partial projection never invents
+  one.
+- `@validates` triggers the fallback.  Hydration itself writes the state dict
+  directly, like stock query loading, so a stored value is not re-validated;
+  the validator is there for the assignment that follows, which the fast path
+  cannot honor.
+- `__init__`, mapper init/load/refresh events and attribute set events are not
+  fired.  Query loading does not call `__init__` or run validators either; the
+  missing piece is the event surface, which is part of the ORM's state machine
+  and therefore outside this contract.  Python-level descriptors (hybrids,
+  `@property`) still run as written; one that reaches for a relationship or the
+  session will fail the same way it would on a detached object.
+
+### Identity and repr
+
+Neither mode adds a `__repr__`.  If the model defines one it runs; otherwise
+the address-bearing `object.__repr__` does.  Fast instances have no ORM
+identity map, so two materializations of the same primary key are two distinct
+objects.  Fallback instances carry a key but are still not in an identity map
+(there is no session), which is why `merge` is the documented attach path.
+
+### ResultSet
+
+`merge/read-path`'s DBAPI `fetchall()` returns a lazy `ResultSet`, not a list.
+`materialize` recognizes it and calls its `to_tuples()` once: that decodes the
+whole columnar frame in C, while the native `PySequence_Fast` path would walk
+the ResultSet's Python iterator and build a throwaway tuple list first.  This
+is consumer-side only and does not touch the transport.
+
+### Measured
+
+`bench/results/ws-orm-semantics-ab.log`, 100K rows, 3 alternating runs,
+`reps=5`, medians:
+
+| cell | baseline `fpq-baseline` | change `fpq-orm-semantics` |
+|---|---|---|
+| driver tuples | 213.6 ns/row (4.68M) | 119.0 ns/row (8.40M) |
+| stock ORM | 3373.4 ns/row (0.30M) | 3585.2 ns/row (0.28M) |
+| materialize e2e | unavailable | **475.7 ns/row (2.10M)** |
+| materialize only (fill) | unavailable | **161.1 ns/row (6.21M)** |
+| materialize fallback | unavailable | 3793.3 ns/row (0.26M) |
+
+Baseline stock ORM -> change e2e is -85.9% ns/row and 7.09x; against the same
+image's stock ORM control it is -86.7% and 7.54x.  The fill alone is 22.25x the
+same image's stock ORM.  The fallback is 5.8% slower than that image's stock
+ORM, which is the point: it is stock, not a fast lie.  The driver control moved
+between images (-44.3%) because the base carries the transport work; the stock
+ORM control moved +6.3%, so read the materializer numbers against it.
+
+### What remains
+
+1. **No session semantics on the fast path, by design.** It is a read-path
+   materializer: no identity map, no dirty tracking, no expiry, no lazy loads.
+   The fallback covers models that need those features, but the fast path does
+   not grow into an ORM.
+2. **Plan caching is per class.** The mapper shape is probed on the first
+   `materialize` call and cached.  Mapper options changed at runtime afterwards
+   (for example toggling `raiseload` on an attribute) are not re-probed.  Mapper
+   shape is normally fixed by configuration; a public cache clear would be the
+   next small addition if callers need it.
+3. **Partial projections have no fast representation.** They fall back so that
+   unloaded attributes behave correctly.  A sentinel/"unloaded" value in the
+   native fill could keep them fast later, but it would have to reproduce
+   SQLAlchemy's deferred-load error semantics exactly to be worth it.
+4. **Events and `__init__` are not replayed.** Documented above; replaying them
+   would require constructing the state machine the fast path exists to avoid.
+5. **Fallback is one instance at a time in Python.** It is intentionally the
+   correctness path; a bulk `new_instance` loop is already the main cost, and
+   optimizing it would not change which models are eligible.

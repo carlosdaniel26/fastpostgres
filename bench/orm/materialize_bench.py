@@ -12,6 +12,10 @@ Three cells, each a warm read and the median of ``REPS`` timed ones:
   materialize e2e   the driver read + the native instance fill
   materialize only  the same fill on rows already in memory
 
+A fourth cell, when the materializer is present, prices the fallback contract:
+a model with a relationship is returned as stock, instrumented instances, so it
+is expected to cost about what the ORM's object construction costs.
+
 The baseline image has no ``fastpostgres.orm``; there the script prints the
 stock ORM cell and reports the materializer as unavailable, so the same command
 produces the before and the after block.
@@ -29,12 +33,43 @@ import time
 sys.path.insert(0, "/src/bench")
 
 from lib.dataset import CORE_SQL, Row, setup  # noqa: E402
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import Session, configure_mappers  # noqa: E402
+from sqlalchemy import ForeignKey, Integer, Text, select  # noqa: E402
+from sqlalchemy.orm import (  # noqa: E402
+    DeclarativeBase,
+    Mapped,
+    Session,
+    configure_mappers,
+    mapped_column,
+    relationship,
+)
+from sqlalchemy.orm.exc import DetachedInstanceError  # noqa: E402
 
 import fastpostgres.dialect  # noqa: F401,E402  registers postgresql+fastpostgres
 from fastpostgres import dbapi  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
+
+
+class FallbackBase(DeclarativeBase):
+    pass
+
+
+class FallbackParent(FallbackBase):
+    """A model the fast path must refuse: it has a relationship."""
+
+    __tablename__ = "fp_orm_fallback_bench"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str | None] = mapped_column(Text)
+    children = relationship("FallbackChild", back_populates="parent")
+
+
+class FallbackChild(FallbackBase):
+    __tablename__ = "fp_orm_fallback_child_bench"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parent_id: Mapped[int] = mapped_column(ForeignKey("fp_orm_fallback_bench.id"))
+    parent = relationship("FallbackParent", back_populates="children")
+
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "host=/tmp dbname=postgres user=postgres")
 ORM_URL = "postgresql+fastpostgres://postgres@/postgres?host=/tmp"
@@ -136,6 +171,21 @@ def main():
         preloaded = cur.fetchall()
         assert len(preloaded) == n
 
+        # The fallback contract, checked before it is timed: a relationship
+        # model must come back instrumented and detached, not as a half-ORM.
+        fallback_rows = [(i, f"Product {i}") for i in range(1, n + 1)]
+        fallback = materialize(FallbackParent, fallback_rows, ("id", "name"))
+        assert len(fallback) == n
+        assert "_sa_instance_state" in vars(fallback[0])
+        try:
+            fallback[0].children
+        except DetachedInstanceError:
+            pass
+        else:
+            raise AssertionError("relationship model did not fall back to stock")
+        del fallback
+        gc.collect()
+
     gc.disable()
     try:
         t_driver = timed(read_driver, n, reps)
@@ -143,6 +193,11 @@ def main():
         if materialize is not None:
             t_e2e = timed(read_materialize, n, reps)
             t_only = timed(lambda: materialize(Row, preloaded, keys), n, reps)
+            t_fallback = timed(
+                lambda: materialize(FallbackParent, fallback_rows, ("id", "name")),
+                n,
+                reps,
+            )
     finally:
         gc.enable()
 
@@ -156,6 +211,7 @@ def main():
     else:
         report("materialize e2e", t_e2e, n)
         report("materialize only", t_only, n)
+        report("materialize fallback", t_fallback, n)
         print(
             f"speedup e2e:        {t_orm / t_e2e:.2f}x"
             f"  entity-only: {t_orm / t_only:.2f}x"
