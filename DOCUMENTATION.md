@@ -9,7 +9,7 @@ and the formal bits.
 
 | path | what it is |
 |---|---|
-| `extension/transport/` | the doorbell engine (`engine_shm.c`) |
+| `extension/transport/` | the doorbell engine (`engine_shm.cpp`) |
 | `extension/` | the PostgreSQL extension: the ring worker, the request/response ring, the two writers, and `fastpostgres_shm.h` - the wire format |
 | `python/` | the client: a C++ extension module (the row/columnar decode and the aggregate reduce), the PEP 249 DBAPI, the asyncio layer (`aio.py`), the SQLAlchemy dialect, and the tests |
 | `bench/` | the claim's tree: the measurement classes (`rivals/` - one directory per rival - `internals/`), the arguments (`WHY-IT-WINS.md`, `PG-CACHE.md`, `ARROW-MEMORY.md`, `CODEC-TRANSPORT.md`), the notebook, the dispatchers, the chart scripts, the image jobs and the committed records in `results/` |
@@ -40,7 +40,7 @@ expect, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md). The ones that shape
 how this can be used:
 
 - **Research prototype.** Not for production, multi-user, or untrusted networks.
-- **The segment is the trust boundary.** `/dev/shm/<seg>` is an SQL-execution endpoint: the client creates it `0600` and the worker widens it to `0666` (`extension/src/shm.c`) so a client running as another user can map it. Treat the segment itself as the permission.
+- **The segment is the trust boundary.** `/dev/shm/<seg>` is an SQL-execution endpoint: the client creates it `0600` and the worker widens it to `0666` (`extension/src/shm.cpp`) so a client running as another user can map it. Treat the segment itself as the permission.
 - **Ring reads run in the worker's session.** They miss the calling connection's uncommitted writes; the driver is autocommit.
 - **`numeric` widens to `float8` on the wire.** Types whose storage is not the wire bytes (numeric, jsonb, arrays, enums) take the columnar frame, which is correct but not the zero-copy row path.
 - **One stream per ring.** The pool is sized on first use - one stream per ~1.2 hardware threads, divided by the SMT width (6 on this machine), clamped by the server's free `max_worker_processes` - and when it is exhausted the read falls back to libpq.

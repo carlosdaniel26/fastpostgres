@@ -6,7 +6,7 @@ The ring is an **SQL-execution endpoint**. A background worker maps a segment th
 client created and executes whatever SQL arrives through it; there is no
 authentication on the segment itself, because the segment is the boundary. The
 client creates it `0600`, and `fastpostgres_shm_map_rw()` widens it to `0666`
-(`extension/src/shm.c`) so a client running as a different OS user can map it.
+(`extension/src/shm.cpp`) so a client running as a different OS user can map it.
 
 So, by design:
 

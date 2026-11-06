@@ -29,7 +29,7 @@ repos:
         name: clang-format
         entry: clang-format --dry-run --Werror
         language: system
-        files: ^(extension/src/.*\.(c|h)|python/src/fastpostgres/native/.*\.(cpp|hpp|h)|bench/internals/codec_transport/.*\.(cpp|h))$
+        files: ^(extension/.*\.(cpp|hpp|h)|python/src/fastpostgres/native/.*\.(cpp|hpp|h)|bench/internals/codec_transport/.*\.(cpp|h))$
       - id: shellcheck
         name: shellcheck
         entry: shellcheck

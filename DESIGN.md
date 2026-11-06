@@ -300,7 +300,7 @@ every batch to close the gaps left by the text-area reservation.
    scratch and no `HeapTuple` materialisation beyond the eight-row sample.
 
 A row the frame cannot take is already consumed by the executor, so it is kept
-in a per-portal queue (`carry.c`, also used by the FPROWS path) and written first
+in a per-portal queue (`carry.cpp`, also used by the FPROWS path) and written first
 by the next request. The queue is per portal, like the old single carried row,
 so one worker's stream cannot leak a row into another's batch. The final
 (partial) batch still compacts, because its null bitmap and varlena offset
@@ -692,7 +692,7 @@ the change is the semantics, not a new speed record.
 - **Output-function text types.** `name` and other types that map to the TEXT
   wire kind but are not varlena text are refused by the worker's MIN/MAX (the
   fallback's columnar frame has already normalised them to text bytes). A
-  `NameStr`/output-function comparator in `reduce.c` would close that gap.
+  `NameStr`/output-function comparator in `reduce.cpp` would close that gap.
 - **Numeric accumulation memory.** `numeric_add` allocates a new value per row
   in the batch's memory context; it is bounded by batch size and freed at
   `SPI_finish`, but a per-batch reset context would keep a very large batch's
@@ -795,7 +795,7 @@ of the work.
 
 ## What remains
 
-- **eventfd + memfd.** The eventfd pool could carry memfds too, but `shm.c`'s
+- **eventfd + memfd.** The eventfd pool could carry memfds too, but `shm.cpp`'s
   segment cache and handoff socket are per-worker globals today. Supporting it
   needs a per-ring handoff registry (and a per-ring segment cache key) in the
   pool. Until then the fallback is explicit, not silent.
@@ -815,7 +815,7 @@ of the work.
 
 # The per-fetch fixed cost at a small batch
 
-Status: implemented in `extension/transport/engine_shm.c`, default on at a
+Status: implemented in `extension/transport/engine_shm.cpp`, default on at a
 300 us budget, with its measurement. `FASTPOSTGRES_SPIN_US=0` restores the pure
 semaphore sleep.
 
@@ -931,7 +931,7 @@ transport-neutral, and `transport.h` already isolates the wakeup.
 
 Two additions, both behind that seam:
 
-### 1. `engine_eventfd.c` — a pollable doorbell
+### 1. `engine_eventfd.cpp` — a pollable doorbell
 
 Each ring gets two eventfds: client→worker and worker→client. The client
 creates them (it also creates the ring segment) and hands the worker its copies
@@ -957,7 +957,7 @@ Eventfd counters coalesce, so a missed read of a stale wake costs nothing: the
 next poll sees the count. Writes ignore `EAGAIN` (the counter is already
 non-zero, i.e. a wake is already pending).
 
-### 2. `worker.c` — a small pool of workers dispatching many rings
+### 2. `worker.cpp` — a small pool of workers dispatching many rings
 
 The registry is a per-database `/dev/shm/fp_pool_<dboid>` file (a worker is
 connected to one database) holding eight slots of up to 32 ring names. The SQL

@@ -38,8 +38,8 @@ Relevant to width choices: masks are cheap here, gathers are not.
 
 | loop | per value | what the asm shows |
 |---|---|---|
-| `columnar.c` fixed-width pass | **10 instr** | switch **is** unswitched (loop cloned per kind); 1 null byte load + test + branch; 1 strided 8-byte `Datum` load; 1 store of `width`; 3 pointer bumps |
-| `columnar.c` varlena pass | **~25 instr + `call *8(%rax)`** | 14 instr head (null test, `Datum` load, varlena header, length, **per-value `p + len > end` check**), 2 (len ≤ 32), 2 (table load + indirect call), 7 tail; **4 stack-slot accesses per value**, because the call forces the loop's state to memory |
+| `columnar.cpp` fixed-width pass | **10 instr** | switch **is** unswitched (loop cloned per kind); 1 null byte load + test + branch; 1 strided 8-byte `Datum` load; 1 store of `width`; 3 pointer bumps |
+| `columnar.cpp` varlena pass | **~25 instr + `call *8(%rax)`** | 14 instr head (null test, `Datum` load, varlena header, length, **per-value `p + len > end` check**), 2 (len ≤ 32), 2 (table load + indirect call), 7 tail; **4 stack-slot accesses per value**, because the call forces the loop's state to memory |
 | `write.c` ingest (`col_datum` inlined) | **~26 instr** | kind switch **not** unswitched (compare chain inside the loop), 6 instr of null bit test, `memcpy` per value, store + bumps |
 
 *The ingest path was removed with its client-side producer; the row stays as the
@@ -143,7 +143,7 @@ Two shapes:
   offset table instead. Removes the scratch, the faults and the strided sweeps;
   keeps the tuplestore.
 - **B (streams).** Run the query with a `DestReceiver` and publish chunks as they
-  fill — i.e. what `push_receive` (`worker.c:377`) already does, with the
+  fill — i.e. what `push_receive` (`worker.cpp:377`) already does, with the
   per-row frame replaced by per-column regions. Removes the tuplestore as well.
   Costs a protocol change: `ring.next()` becomes a pull-driven queue, which is
   what `push_ready`/`push_free` already implement. `simd-hot-path.md` (Stage 3)
@@ -158,7 +158,7 @@ is random-access). Fixed-width columns are exact and free.
 
 About "free the ones not selected": in this format there is nothing to free. A
 null varlena consumes zero bytes (only an offset entry) and a null fixed-width
-value consumes its slot by design (`columnar.c:154`, so `data_len == nrows x
+value consumes its slot by design (`columnar.cpp:154`, so `data_len == nrows x
 width`). The only place a *not-selected* value costs anything is that zeroed
 slot, plus a `memset` per null row. Reclaiming it means a dense-values + bitmap
 layout (the Arrow layout): the writer skips the `memset`, the reader pays a
@@ -197,7 +197,7 @@ So "let the client read the pages the scan walked" is technically a **buffer
 lease**: pin, publish `(relfilenode, block, offset)` into the segment, hand the
 client a COW/shared mapping, unpin when it releases. The pieces already exist in
 this repo — `push_free`/`push_ready` are the release handshake, and the worker
-already detects a dead client (`kill(client_pid, 0)`, `worker.c:290`) to unpin.
+already detects a dead client (`kill(client_pid, 0)`, `worker.cpp:290`) to unpin.
 
 Why it probably is not the win it looks like:
 
@@ -400,7 +400,7 @@ used to lay a result out twice: SPI's `DestSPI` copies every row into a tuptable
 rows into FPCOLUMN, per value. Neither copy reads a tuple as anything but a byte
 string.
 
-The row frame (`FPROWS`, `rows.c`) drops both. A DestReceiver of our own feeds
+The row frame (`FPROWS`, `rows.cpp`) drops both. A DestReceiver of our own feeds
 `PortalRunFetch` — the call `SPI_cursor_fetch` wraps, minus its hardcoded
 receiver — and each tuple is memcpy'd once, straight out of the buffer page for
 a plain scan, into the segment: a per-column descriptor, then per row a length
@@ -556,7 +556,7 @@ assertion, both now guarded by the build:
   encodings behind `#ifdef WORDS_BIGENDIAN` — tag bit low on little-endian, high
   on big-endian, and the 4-byte header shifts rather than masks. The first mirror
   here was written from the big-endian block, so a 6-byte short `bytea` (`0x0d` =
-  tag 0x01, size 6 << 1) decoded as garbage. `rows.c` now fails the build if the
+  tag 0x01, size 6 << 1) decoded as garbage. `rows.cpp` now fails the build if the
   mirror's byte order disagrees with the server's.
 - **a tuple must start MAXALIGNed.** `heap_fill_tuple` aligns a datum by its
   *address*, `heap_deform_tuple` by its *offset*; the two agree only when the
@@ -1072,7 +1072,7 @@ same values are fine over libpq, fine in the columnar frame, and fine in the row
 frame *while the segment is fresh* — every batch after the first decoded long
 varlenas wrong.
 
-`extension/src/rows.c` builds a tuple for a projection (`heap_fill_tuple`,
+`extension/src/rows.cpp` builds a tuple for a projection (`heap_fill_tuple`,
 because a virtual slot has no heap tuple to copy), and the filler leaves the
 alignment padding it inserts **unwritten**. In PostgreSQL that is safe for a
 reason above the filler: `heap_form_tuple` hands it a `palloc0` tuple, so the
