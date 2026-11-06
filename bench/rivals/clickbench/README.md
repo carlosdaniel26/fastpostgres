@@ -48,6 +48,27 @@ harness reports both:
 - `rows/s` per query — what the ring actually delivers, which is the claim this
   repository makes.
 
+## The data
+
+Upstream publishes one file, `hits.tsv.gz` (16.3 GB), and no official small
+sample at that path. `fetch.py` streams it through gzip and keeps a bounded
+prefix — the header and the first `--rows` data rows — then records the URL,
+the row count and the sha256 of what it wrote in `data/source.json`.
+
+```
+python3 bench/rivals/clickbench/fetch.py               # 1,000,000 rows
+python3 bench/rivals/clickbench/fetch.py --rows 200000 # cheaper smoke run
+```
+
+`data/` is git-ignored: the file is fetched once per host and re-used, and a
+run calls `fetch.py` unconditionally because it is a no-op when the recorded
+checksum still matches.
+
+**What this slice is not:** it is upstream's first N rows of the same file, not
+ClickBench's 1M-row "small" dataset, and a q/s figure from it is comparable to
+another run of this harness — not to the published 100M-row table. Every record
+carries the row count and the checksum so that distinction cannot be lost.
+
 ## Adaptations
 
 Filled in as the harness lands; each one is a deviation from upstream's runner

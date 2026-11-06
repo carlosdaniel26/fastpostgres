@@ -30,3 +30,6 @@ extension/test/regression.out
 *.mod.c
 Module.symvers
 modules.order
+
+# ClickBench data: fetched once by bench/rivals/clickbench/fetch.py, never committed
+bench/rivals/clickbench/data/
