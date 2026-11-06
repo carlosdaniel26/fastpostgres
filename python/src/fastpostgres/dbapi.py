@@ -223,6 +223,45 @@ _SKIP_RE = re.compile(
 )
 
 
+# Rows per generated statement. Large enough that 1000-row inserts are one round
+# trip, small enough that a runaway parameter list cannot build a statement the
+# server refuses on size.
+_INSERT_BATCH = 1000
+
+_INSERT_RE = re.compile(r"^(\s*INSERT\s+INTO\s.+?)\bVALUES\s*\((.+)\)\s*;?\s*$", re.I | re.S)
+
+
+def _batch_insert(operation, params):
+    """(head, inner) when `operation` is a batchable INSERT, else None.
+
+    `inner` is the text between the VALUES parentheses, so a row is
+    `"(" + _inline(inner, row) + ")"` and a batch is those joined by commas.
+    """
+    if not isinstance(operation, str):
+        return None
+    low = operation.lower()
+    if "returning" in low or "on conflict" in low or "values" not in low:
+        return None
+    m = _INSERT_RE.match(operation)
+    if m is None:
+        return None
+    head, inner = m.group(1), m.group(2)
+    if "%s" not in inner:
+        return None
+    # One verify: every row must supply exactly the placeholders the template
+    # has, and none of them may be a mapping (this driver inlines sequences).
+    width = inner.count("%s")
+    for row in params:
+        if isinstance(row, (str, bytes, dict)) or row is None:
+            return None
+        try:
+            if len(row) != width:
+                return None
+        except TypeError:
+            return None
+    return head, inner
+
+
 def _inline(sql: str, params: Sequence[Any]) -> str:
     """Replace each `%s` with the next parameter's literal, leaving `%%` as `%`."""
     params = list(params)
@@ -1720,9 +1759,35 @@ class Cursor:
         return self
 
     def executemany(self, operation: str, seq_of_parameters):
+        """Run a statement once per parameter set.
+
+        A plain ``INSERT ... VALUES (...)`` is batched into multi-row VALUES
+        statements of up to `_INSERT_BATCH` rows: one round trip per batch
+        instead of one per row. That is the whole difference between this
+        driver and a prepared pipeline on a batched insert — measured on
+        MagicStack's 1000-row cell, one statement per row cost ~5/s against
+        asyncpg's 885/s, all of it round trips.
+
+        Anything else — a statement with RETURNING or ON CONFLICT, a parameter
+        count this cannot verify, a non-literal placeholder — keeps the row
+        loop, because a wrong rewrite would change what the insert means.
+        """
+        params = list(seq_of_parameters)
+        batched = _batch_insert(operation, params) if len(params) > 1 else None
+        if batched is None:
+            total = 0
+            for parameters in params:
+                self.execute(operation, parameters)
+                total += self.rowcount
+            self.rowcount = total
+            return self
+
         total = 0
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters)
+        head, inner = batched
+        for start in range(0, len(params), _INSERT_BATCH):
+            group = params[start : start + _INSERT_BATCH]
+            tuples = ", ".join("(" + _inline(inner, row) + ")" for row in group)
+            self.execute(f"{head} VALUES {tuples}")
             total += self.rowcount
         self.rowcount = total
         return self
