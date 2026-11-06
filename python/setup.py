@@ -63,9 +63,9 @@ setup(
                 # The engine and its name resolution: the client speaks the
                 # same ops table the worker does, from the same files. None
                 # of them touches PostgreSQL, only the ring header and syscalls.
-                os.path.join(PG_EXTENSION_REL, "transport", "transport.c"),
-                os.path.join(PG_EXTENSION_REL, "transport", "engine_shm.c"),
-                os.path.join(PG_EXTENSION_REL, "transport", "engine_eventfd.c"),
+                os.path.join(PG_EXTENSION_REL, "transport", "transport.cpp"),
+                os.path.join(PG_EXTENSION_REL, "transport", "engine_shm.cpp"),
+                os.path.join(PG_EXTENSION_REL, "transport", "engine_eventfd.cpp"),
             ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,

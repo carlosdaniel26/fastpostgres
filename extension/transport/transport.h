@@ -16,8 +16,7 @@
  * Each hook returns 1 on success, 0 on timeout and -1 on error, and none of
  * them may block for longer than the timeout it is given.
  */
-#ifndef FASTPOSTGRES_TRANSPORT_H
-#define FASTPOSTGRES_TRANSPORT_H
+#pragma once
 
 #include <stdint.h>
 
@@ -67,6 +66,4 @@ void fastpostgres_eventfd_detach(FastpostgresRing *r);
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif
