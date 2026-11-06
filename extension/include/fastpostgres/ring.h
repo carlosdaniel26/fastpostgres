@@ -45,6 +45,9 @@
 
 /* sockaddr_un.sun_path bytes the memfd handoff address may use. */
 #define FASTPOSTGRES_RING_FD_PATH 108
+/* An exported snapshot id (pg_export_snapshot()) the worker imports before OPEN.
+ * 128 bytes covers the identifier with room to spare; empty means none. */
+#define FASTPOSTGRES_SNAPSHOT_LEN 128
 
 enum FastpostgresRingOp
 {
@@ -123,6 +126,10 @@ typedef struct FastpostgresRing {
     int32_t  worker_req_efd;  /* the worker's received copy of the request bell */
     int32_t  worker_resp_efd; /* the worker's received copy of the response bell */
     uint32_t srv_pid;         /* the worker that attached this ring */
+
+    /* The fan-out's consistency: an exported snapshot this ring's OPEN imports,
+     * so N partitions read one point in time. Empty means a fresh snapshot. */
+    char     snapshot[FASTPOSTGRES_SNAPSHOT_LEN];
 } FastpostgresRing;
 
 /* One side's costs, added to its row where the engine ran the event. Relaxed

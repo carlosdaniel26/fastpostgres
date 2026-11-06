@@ -42,8 +42,10 @@
 
 extern "C" {
 #include "access/xact.h"
+#include "executor/spi.h"
 #include "commands/dbcommands.h"
 #include "fmgr.h"
+#include "lib/stringinfo.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
@@ -134,13 +136,57 @@ commit_txn(void)
     have_stream = false;
 }
 
-/* A bgworker has no active snapshot; SPI_cursor_open (read-only) needs one. */
+/* The identifiers pg_export_snapshot() produces are hex digits and dashes; a
+ * value outside that set is refused rather than interpolated into SQL. */
+bool
+snapshot_id_ok(const char *id)
+{
+    if (id == nullptr || id[0] == '\0') return false;
+    for (const char *p = id; *p != '\0'; p++)
+        if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F') || *p == '-'))
+            return false;
+    return true;
+}
+
+/* Import an exported snapshot into this transaction, so every partition of a
+ * fan-out reads one point in time. Must run before the first query; PostgreSQL
+ * requires REPEATABLE READ or SERIALIZABLE to adopt a snapshot. Runs through SPI
+ * because that is the same code path SET TRANSACTION SNAPSHOT uses in a client
+ * session. */
 void
-begin_txn(void)
+import_snapshot(const char *id)
+{
+    if (!snapshot_id_ok(id)) elog(ERROR, "fastpostgres: malformed snapshot identifier");
+
+    if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "fastpostgres: SPI_connect failed");
+    if (SPI_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", false, 0) != SPI_OK_UTILITY)
+        elog(ERROR, "fastpostgres: cannot raise the isolation level for a snapshot import");
+
+    StringInfoData cmd;
+
+    initStringInfo(&cmd);
+    appendStringInfo(&cmd, "SET TRANSACTION SNAPSHOT '%s'", id);
+    if (SPI_execute(cmd.data, false, 0) != SPI_OK_UTILITY)
+        elog(ERROR, "fastpostgres: cannot import the shared snapshot");
+    pfree(cmd.data);
+    SPI_finish();
+}
+
+/* A bgworker has no active snapshot; SPI_cursor_open (read-only) needs one.
+ * With a snapshot id, this transaction reads at that exact snapshot. */
+void
+begin_txn(const char *snapshot)
 {
     abort_txn();
     StartTransactionCommand();
     have_txn = true;
+    if (snapshot != nullptr && snapshot[0] != '\0')
+    {
+        /* SPI wants an active snapshot; the imported one replaces it. */
+        PushActiveSnapshot(GetTransactionSnapshot());
+        import_snapshot(snapshot);
+        PopActiveSnapshot();
+    }
     PushActiveSnapshot(GetTransactionSnapshot());
     have_snapshot = true;
 }
@@ -220,7 +266,7 @@ ring_handle(FastpostgresRing *r, const char *ring_name)
             return false;
 
         case FASTPOSTGRES_OP_OPEN:
-            begin_txn(); /* drop any previous stream and open a new transaction */
+            begin_txn(r->snapshot); /* drop any previous stream; open one transaction */
             PG_TRY();
             {
                 fp::stream_open(a1, a2);
