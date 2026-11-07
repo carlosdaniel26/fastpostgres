@@ -32,10 +32,8 @@ COPY python /src/python
 COPY bench /src/bench
 COPY examples /src/examples
 COPY docker/entrypoint.sh docker/tests.sh examples/run.sh \
-     bench/jobs/adoption.sh bench/jobs/decode-cycles.sh bench/jobs/decode-ir.sh \
-     bench/jobs/decode-mca.sh bench/jobs/client-scaling.sh bench/jobs/client-nogil.sh \
-     bench/jobs/loop-asm.py bench/rivals/adbc-arrow/benchmarks.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/*.sh /usr/local/bin/loop-asm.py
+     bench/jobs/adoption.sh bench/rivals/adbc-arrow/benchmarks.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/*.sh
 
 # The adopted suite's Python cells run through its own wrapper, which wants a
 # virtualenv beside it (`make -C _python venv`, in its README). The venv is made
