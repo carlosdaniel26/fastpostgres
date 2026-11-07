@@ -2116,6 +2116,11 @@ class Cursor:
         want = _fanout_want(self.connection._conn, None)
         if want < 2:
             return None
+        # This path concatenates each partition's rows. That is only the answer
+        # when the projection preserves rows; an aggregate there would yield one
+        # partial row per partition. `aggregate()` splits those and combines.
+        if not partition.concat_safe(sql):
+            return None
         split = _split(self.connection._conn, sql, want)
         if split is None:
             return None

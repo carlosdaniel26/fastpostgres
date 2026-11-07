@@ -149,6 +149,46 @@ class TableOfTest(unittest.TestCase):
                 self.assertIsNone(partition.table_of(sql))
 
 
+class ConcatSafeTest(unittest.TestCase):
+    """Which SELECTs a row-concatenating fan-out may split.
+
+    `table_of` answers "can this be split at all", and `aggregate()` needs that
+    wide answer because it combines partial answers. A fan-out that concatenates
+    rows needs the narrower one: an aggregate in the select list would yield one
+    partial row per partition instead of one total.
+    """
+
+    def test_aggregates_are_not_concat_safe(self):
+        sqls = [
+            "SELECT count(*) FROM t",
+            "SELECT sum(a), avg(b) FROM t",
+            "SELECT min(a), max(b) FROM t WHERE a > 1",
+            "SELECT count(DISTINCT a) FROM t",
+            "SELECT CASE WHEN count(*) > 1 THEN 1 ELSE 0 END FROM t",
+        ]
+        for sql in sqls:
+            with self.subTest(sql=sql):
+                self.assertFalse(partition.concat_safe(sql), sql)
+
+    def test_row_preserving_projections_are_concat_safe(self):
+        sqls = [
+            "SELECT * FROM t",
+            "SELECT a FROM t",
+            "SELECT a, b, a + b AS c FROM t",
+            "SELECT a::int, b AS x FROM t WHERE a > 1 AND (b = 2 OR c = 3)",
+            "SELECT a FROM t WHERE a IN (SELECT a FROM u LIMIT 3)",
+            "SELECT * FROM public.t AS x",
+        ]
+        for sql in sqls:
+            with self.subTest(sql=sql):
+                self.assertTrue(partition.concat_safe(sql), sql)
+
+    def test_unsplittable_is_never_concat_safe(self):
+        for sql in ("SELECT count(*) FROM t GROUP BY a", "SELECT * FROM t,j", "nonsense"):
+            with self.subTest(sql=sql):
+                self.assertFalse(partition.concat_safe(sql), sql)
+
+
 class PartitionSqlTest(unittest.TestCase):
     """The text each ring runs: contiguous page ranges, one statement per part."""
 

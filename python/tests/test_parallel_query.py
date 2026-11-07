@@ -91,6 +91,18 @@ class ParallelAggregateTest(unittest.TestCase):
         self.assertEqual(serial, parallel)
         self.assertTrue(calls and calls[0] >= 2, f"fan-out did not run: {calls}")
 
+    def test_fetchall_does_not_concat_an_aggregate(self):
+        # A row-concatenating fan-out would return one partial count per
+        # partition; an aggregate must stay on the single-ring path and come
+        # back as the one total. (Before the concat gate: PARALLEL=4 returned
+        # _RANGE_MULT * 4 partial rows.)
+        sql = f"SELECT count(*) FROM {TABLE}"
+        with mock.patch.dict(os.environ, {dbapi._PARALLEL_ENV: "4"}):
+            self.cur.execute(sql)
+            rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 1, "the aggregate was split and concatenated")
+        self.assertEqual(rows[0][0], 200000)
+
     def test_non_splittable_query_stays_serial(self):
         # GROUP BY cannot be split by ctid; the fan-out must not be attempted.
         sql = f"SELECT grp FROM {TABLE} GROUP BY grp"

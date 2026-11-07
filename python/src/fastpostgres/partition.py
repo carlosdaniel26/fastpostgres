@@ -33,7 +33,7 @@ recognise the shape above and to refuse everything else.
 Pure stdlib: importing this module must not need the native extension.
 """
 
-__all__ = ["table_of", "partition_sql"]
+__all__ = ["table_of", "partition_sql", "concat_safe"]
 
 
 class _Token:
@@ -227,15 +227,18 @@ class _Shape:
     ``table`` is the relation as written (`public.t`, `"My Table"`), so it can be
     handed to ``::regclass`` unchanged. ``where`` is the top-level WHERE token,
     or None. ``cut`` is where the statement ends — the trailing ``;`` and
-    anything after it, which the rewrite leaves in place.
+    anything after it, which the rewrite leaves in place. ``projection_safe`` is
+    False when the SELECT list contains a function call (a ``(`` at depth 0):
+    such a query may aggregate, so its per-partition rows are not independent.
     """
 
-    __slots__ = ("table", "where", "cut")
+    __slots__ = ("table", "where", "cut", "projection_safe")
 
-    def __init__(self, table, where, cut):
+    def __init__(self, table, where, cut, projection_safe):
         self.table = table
         self.where = where
         self.cut = cut
+        self.projection_safe = projection_safe
 
 
 def _analyse(sql):
@@ -274,6 +277,13 @@ def _analyse(sql):
     froms = [k for k, tok in enumerate(toks) if tok.kind == "word" and tok.text.lower() == "from"]
     if len(froms) != 1:
         return None
+
+    # A `(` at depth 0 before FROM is a function call or a subquery in the
+    # projection. An aggregate there collapses rows, so per-partition rows are
+    # not independent and cannot simply be concatenated — see `concat_safe`.
+    # `aggregate()` still splits such a query, because it combines the partials.
+    projection_safe = not any(tok.kind == "(" for tok in toks[1 : froms[0]])
+
     i = froms[0] + 1
 
     # The relation name: an identifier, optionally schema-qualified and/or
@@ -331,7 +341,22 @@ def _analyse(sql):
             return None  # WHERE with no condition
         where = tok
 
-    return _Shape(".".join(parts), where, cut)
+    return _Shape(".".join(parts), where, cut, projection_safe)
+
+
+def concat_safe(sql):
+    """True when the per-partition rows of `sql` may simply be concatenated.
+
+    A projection with no function call is row-preserving: the page ranges are
+    disjoint and every partition's rows are independent, so their union is the
+    answer. A function call may be an aggregate (`count(*)`, `sum(x)`), whose
+    per-partition answers are partial — concatenating them would yield one row
+    per partition instead of one total. Such a statement must stay on the
+    single-ring path; `Cursor.aggregate()` splits it instead, because that path
+    knows how to combine partial answers.
+    """
+    shape = _analyse(sql)
+    return shape is not None and shape.projection_safe
 
 
 def table_of(sql):
