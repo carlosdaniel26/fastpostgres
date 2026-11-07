@@ -62,6 +62,7 @@ costs - and their results live in the lab notebook rather than in this catalog.
 read.
 `arrow-memory` · `codec` - the fixed-buffer read, the
 result-cache comparisons and the codec x transport matrix.
+`clickbench` - q/s and rows/s for the three players, each bar against the ring.
 
 `ab` - one figure per log, into `docs/assets/` by default.
 

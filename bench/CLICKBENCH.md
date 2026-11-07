@@ -63,16 +63,13 @@ just rivals clickbench --reps 3         # fastest of three per query
 just rivals clickbench --only Q1 Q7     # a subset
 ```
 
-## First record
+## The record
 
 1,000,000 rows, 4 clients of each player, one rep, medians of the clients'
-fastest runs. Record: [`results/clickbench.log`](results/clickbench.log).
+fastest runs. Record: [`results/clickbench.log`](results/clickbench.log),
+rendered by `just charts clickbench`.
 
-| player | q/s | rows/s |
-| --- | ---: | ---: |
-| fast-postgres | 6.7 | 46 |
-| ADBC + Arrow | 8.9 | 62 |
-| psycopg 3 | 9.0 | 62 |
+![ClickBench: three players, one machine — the ring at 6.7 q/s and 46 rows/s](../docs/assets/clickbench.png)
 
 **The ring loses here, by about 25%**, and the reason is in the query set
 rather than in the transport: 41 of the 43 queries return a handful of

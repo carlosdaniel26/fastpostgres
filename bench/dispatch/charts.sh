@@ -11,6 +11,7 @@ charts: one figure per log
 
   arrow          fastpostgres vs ADBC + Arrow (bench/results/fastpostgres-vs-arrow.log)
   arrow-memory   the same reads under a fixed ring buffer
+  clickbench     the 43-query set against ADBC and psycopg (bench/results/clickbench.log)
   codec          the codec x transport matrix
   ab             before/after, from an improve-*.log pair (--log=...)
 
@@ -21,6 +22,7 @@ EOF
 case "$target" in
   arrow)        exec bench/charts/adbc.py "$@" ;;
   arrow-memory) exec bench/charts/arrow_memory.py "$@" ;;
+  clickbench)   exec bench/charts/clickbench.py "$@" ;;
   "" | list | help) usage ;;
   *)
     echo "charts: unknown target '$target'" >&2

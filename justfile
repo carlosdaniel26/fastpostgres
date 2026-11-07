@@ -84,7 +84,7 @@ adoption target="" *args:
 demo n="5000":
     just _run run.sh {{n}}
 
-# one figure per log: arrow | arrow-memory
+# one figure per log: arrow | arrow-memory | clickbench
 charts target="" *args:
     bench/dispatch/charts.sh {{target}} {{args}}
 
